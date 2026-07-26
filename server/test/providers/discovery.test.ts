@@ -585,7 +585,7 @@ describe("runAccountSync, starred", () => {
     );
     const provider = fakeProvider({
       repos: [[]],
-      starred: [[repo("nodejs/node")], []],
+      starred: [[repo("nodejs/node"), repo("vuejs/core")], [repo("vuejs/core")]],
       access: { "nodejs/node": "accessible" },
     });
     const deps = baseDeps(provider, { now: () => 1 });
@@ -597,24 +597,50 @@ describe("runAccountSync, starred", () => {
     expect(second.retained).toBe(1);
     expect(provider.accessCalls).toEqual([]);
     expect(deletions).toEqual([]);
-    expect(repoRows().map((row) => row.origin)).toEqual(["manual"]);
+    expect(repoRows().map((row) => row.path)).toContain("nodejs/node");
+    expect(repoRows().find((row) => row.path === "nodejs/node")?.origin).toBe("manual");
   });
 
-  it("re-creates a repo cleanly when it is starred again", async () => {
-    const { syncId, provider } = starredSetup([[repo("nodejs/node")], [], [repo("nodejs/node")]], {
+  it("removes nothing when the whole starred listing comes back empty", async () => {
+    const { syncId, provider } = starredSetup([[repo("nodejs/node"), repo("vuejs/core")], []], {
       "nodejs/node": "accessible",
+      "vuejs/core": "accessible",
     });
     const deps = baseDeps(provider, { now: () => 1 });
 
     await runAccountSyncDetailed(db, syncId, deps);
-    const firstId = repoRows()[0]?.id;
+    const second = await runAccountSyncDetailed(db, syncId, deps);
+
+    // A lost token scope looks exactly like unstarring everything at once, so
+    // an empty listing is never taken as proof of a deliberate unstar.
+    expect(second.discovered).toBe(0);
+    expect(second.removed).toBe(0);
+    expect(second.retained).toBe(2);
+    expect(provider.accessCalls).toEqual([]);
+    expect(deletions).toEqual([]);
+    expect(repoRows()).toHaveLength(2);
+  });
+
+  it("re-creates a repo cleanly when it is starred again", async () => {
+    const { syncId, provider } = starredSetup(
+      [
+        [repo("nodejs/node"), repo("vuejs/core")],
+        [repo("vuejs/core")],
+        [repo("nodejs/node"), repo("vuejs/core")],
+      ],
+      { "nodejs/node": "accessible" },
+    );
+    const deps = baseDeps(provider, { now: () => 1 });
+
     await runAccountSyncDetailed(db, syncId, deps);
-    expect(repoRows()).toHaveLength(0);
+    const firstId = repoRows().find((row) => row.path === "nodejs/node")?.id;
+    await runAccountSyncDetailed(db, syncId, deps);
+    expect(repoRows().map((row) => row.path)).toEqual(["vuejs/core"]);
 
     const third = await runAccountSyncDetailed(db, syncId, deps);
     expect(third.created).toBe(1);
     const rows = repoRows();
-    expect(rows).toHaveLength(1);
+    expect(rows).toHaveLength(2);
     expect(rows[0]?.path).toBe("nodejs/node");
     expect(rows[0]?.id).not.toBe(firstId);
     expect(rows[0]?.origin).toBe("account_sync");

@@ -282,16 +282,28 @@ export async function runAccountSyncDetailed(
     vanished = stale.length;
 
     if (row.source === "starred") {
-      const outcome = await reconcileUnstarred(stale, {
-        db,
-        provider,
-        context,
-        helpers,
-        log,
-        accountSyncId: row.id,
-      });
-      removed = outcome.removed;
-      retained = outcome.retained;
+      // A listing that comes back completely empty after a run that found
+      // repositories is far more likely to be a lost scope or a forge glitch
+      // than the account unstarring everything at once. One confirmed unstar is
+      // evidence; an empty list is not evidence of N unstars.
+      if (discovered === 0 && (row.repos_discovered ?? 0) > 0) {
+        retained = stale.length;
+        log.warn(
+          { accountSyncId: row.id, retained, previouslyDiscovered: row.repos_discovered },
+          "starred listing came back empty after a run that found repos, removing nothing",
+        );
+      } else {
+        const outcome = await reconcileUnstarred(stale, {
+          db,
+          provider,
+          context,
+          helpers,
+          log,
+          accountSyncId: row.id,
+        });
+        removed = outcome.removed;
+        retained = outcome.retained;
+      }
     } else {
       for (const repo of stale) {
         // Deleted upstream is precisely what a backup is for: keep syncing it.
