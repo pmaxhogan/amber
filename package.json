@@ -1,0 +1,52 @@
+{
+  "name": "amber",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Amber - git history, preserved. Self-hosted git backup service.",
+  "license": "MIT",
+  "author": "Max Hogan",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "shared",
+    "server",
+    "web",
+    "e2e"
+  ],
+  "//typescript": "Pinned to 6.x, not the latest 7.x: typescript-eslint 8.65 declares peer typescript '>=4.8.4 <6.1.0', so TS 7 would break linting. Deviation from ARCHITECTURE.md (which suggested falling back to 5.x) - 6.0.3 is the newest release typescript-eslint accepts. Revisit when typescript-eslint ships TS 7 support.",
+  "scripts": {
+    "dev": "concurrently -n server,web -c yellow,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w shared && npm run build -w server && npm run build -w web",
+    "lint": "eslint . && npm run lint:ascii",
+    "lint:fix": "eslint . --fix",
+    "lint:ascii": "node scripts/check-ascii.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "npm run build -w shared && npm run typecheck -w shared && npm run typecheck -w server && npm run typecheck -w web && npm run typecheck -w e2e",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "coverage:ratchet": "node scripts/coverage-ratchet.mjs",
+    "coverage:ratchet:write": "node scripts/coverage-ratchet.mjs --write"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@types/node": "^26.1.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "concurrently": "^10.0.4",
+    "eslint": "^10.8.0",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.10.0",
+    "globals": "^17.7.0",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.65.0",
+    "vitest": "^4.1.10",
+    "vue-eslint-parser": "^10.4.1"
+  }
+}

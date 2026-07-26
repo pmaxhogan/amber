@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+**/coverage
+.git
+.github
+docs
+# e2e/package.json is needed for the workspaces install, so the directory
+# itself is not ignored; only its test artifacts are.
+e2e/tests
+e2e/playwright.config.ts
+tmp
+tmp-data
+playwright-report
+test-results
+*.log
+.env
+.env.*
