@@ -149,6 +149,22 @@ describe("Account sync form", () => {
     });
   });
 
+  it("omits visibility from a starred sync payload, which the server rejects", async () => {
+    const { wrapper, api } = await openCreate();
+
+    await sourceSelect(wrapper)?.vm.$emit("update:modelValue", "starred");
+    await flush();
+    await clickButton(wrapper, "Create");
+    await flush();
+
+    expect(api.createAccountSync).toHaveBeenCalledWith({
+      accountId: 1,
+      source: "starred",
+      intervalMinutes: 360,
+      enabled: true,
+    });
+  });
+
   it("hides the visibility picker for a starred sync, which has no such notion", async () => {
     const { wrapper } = await openCreate();
     expect(wrapper.find("#sync-visibility").exists()).toBe(true);

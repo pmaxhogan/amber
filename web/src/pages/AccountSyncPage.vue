@@ -137,10 +137,12 @@ async function save(): Promise<void> {
   if (form.value.accountId === null) return;
   busy.value = true;
   try {
+    // A starred sync always takes the full list; the server rejects a
+    // visibility field on one, so only owned syncs send it.
     const body = {
       accountId: form.value.accountId,
       source: form.value.source,
-      visibility: form.value.visibility,
+      ...(form.value.source === "owned" ? { visibility: form.value.visibility } : {}),
       intervalMinutes: form.value.intervalMinutes,
       enabled: form.value.enabled,
     };
