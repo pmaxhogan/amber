@@ -11,9 +11,9 @@ import type {
 } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
+import { getCredential, markAccountUsed } from "../domain/accounts.ts";
 import { resolveSettings } from "../domain/settings.ts";
 import { createConsoleLogger } from "../logging.ts";
-import { decryptSecret } from "../security/secrets.ts";
 import { backoffDelayMs, jitteredIntervalMs, RATE_LIMIT_BACKOFF_FACTOR } from "./backoff.ts";
 import { directorySizeBytes } from "./diskUsage.ts";
 import {
@@ -29,9 +29,9 @@ import {
   enforceRunRetention,
   finishSyncRun,
   loadSyncTarget,
-  markAccountUsed,
   resolveRepoAccount,
   startSyncRun,
+  type RepoAccount,
   type SyncForgeRow,
   type SyncTarget,
 } from "./repoStore.ts";
@@ -132,25 +132,32 @@ export function archiveStamp(at: number): string {
 // ---------------------------------------------------------------------------
 
 /**
- * The repo override account, or the forge default, decrypted with the instance
- * key. A credential is only ever resolved through the repo's own forge, which
- * is what makes the immutable forge_id columns load bearing.
+ * The credential for an already-resolved account, or undefined when the
+ * account stores no secret (an anonymous fetch). Decryption lives in
+ * domain/accounts.ts getCredential, which raises a clear error when a secret
+ * exists but AMBER_SECRET_KEY does not.
+ *
+ * Marking the account used is deliberately NOT done here: an account is
+ * "used" when a fetch with its credential actually succeeded, not when the
+ * password was read out of the database. performSync does it after the fetch.
  */
+function credentialForAccount(
+  db: Db,
+  secretKey: Buffer | null,
+  account: RepoAccount | undefined,
+): GitCredentials | undefined {
+  if (account === undefined) {
+    return undefined;
+  }
+  const credential = getCredential(db, secretKey, account.id);
+  if (credential.secret === null) {
+    return undefined;
+  }
+  return { username: credential.username, password: credential.secret };
+}
+
 export function createCredentialResolver(secretKey: Buffer | null): CredentialResolver {
-  return (db, target) => {
-    const account = resolveRepoAccount(db, target);
-    if (account === undefined || account.secretEnc === null) {
-      return undefined;
-    }
-    if (secretKey === null) {
-      throw new Error(
-        `Account ${String(account.id)} has a stored secret but AMBER_SECRET_KEY is not configured`,
-      );
-    }
-    const password = decryptSecret(secretKey, Buffer.from(account.secretEnc));
-    markAccountUsed(db, account.id, Date.now());
-    return { username: account.username, password };
-  };
+  return (db, target) => credentialForAccount(db, secretKey, resolveRepoAccount(db, target));
 }
 
 // ---------------------------------------------------------------------------
@@ -305,10 +312,13 @@ async function performSync(
   const mode: CloneMode = settings.clone_mode;
   const dir = repoDir(deps.backupsDir, target.repo.slug);
   const remote = deps.remoteUrl ?? buildRemoteUrl(target.forge, target.repo.path);
-  const credentials = (deps.credentials ?? createCredentialResolver(deps.secretKey ?? null))(
-    deps.db,
-    target,
-  );
+  // Resolved once: the same account backs the credential presented to the
+  // fetch and the last_used_at stamp written after it succeeds.
+  const account = resolveRepoAccount(deps.db, target);
+  const credentials =
+    deps.credentials === undefined
+      ? credentialForAccount(deps.db, deps.secretKey ?? null, account)
+      : deps.credentials(deps.db, target);
 
   const base: GitRunOptions = {
     cwd: dir,
@@ -344,6 +354,13 @@ async function performSync(
     authed,
   );
   const bytesFetched = parseBytesFetched(fetchResult.stderr);
+
+  // The fetch came back, so this account's credential demonstrably works.
+  // Recorded here rather than at resolution time so a stored secret that the
+  // forge rejects never looks freshly used.
+  if (credentials !== undefined && account !== undefined) {
+    markAccountUsed(deps.db, account.id, now());
+  }
 
   const after = await readRefs(base);
 

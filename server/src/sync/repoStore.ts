@@ -1,5 +1,6 @@
 import type { ForgeKind, ForgeProtocol, RepoState, SyncErrorKind, SyncRun } from "@amber/shared";
 import type { Db } from "../db/db.ts";
+import { getAccount, getDefaultAccount } from "../domain/accounts.ts";
 
 /**
  * The narrow slice of the data model the sync engine reads and writes. It is
@@ -143,38 +144,34 @@ export function countForgesWithRepos(db: Db): number {
 export interface RepoAccount {
   id: number;
   username: string;
-  secretEnc: Uint8Array | null;
 }
 
 /**
  * The account whose credential a fetch should present: the repo override, or
- * the forge default. force_anonymous wins over both. Credentials are only ever
- * looked up through the repo's own forge, which is why repos.forge_id and
- * accounts.forge_id are immutable.
+ * the forge default. force_anonymous wins over both.
+ *
+ * The forge check is the load bearing part. A credential is only ever
+ * presented to its own forge, so an override that does not belong to the
+ * repo's forge resolves to nothing rather than being used against a host it
+ * was never registered for. repos.forge_id and accounts.forge_id are immutable
+ * so that this stays true over a repo's lifetime.
+ *
+ * The secret itself is not read here: domain/accounts.ts getCredential owns
+ * decryption, so there is exactly one place that turns secret_enc into a
+ * password.
  */
 export function resolveRepoAccount(db: Db, target: SyncTarget): RepoAccount | undefined {
   if (target.repo.forceAnonymous) {
     return undefined;
   }
-  const row =
+  const account =
     target.repo.accountOverrideId === null
-      ? db.get<{ id: number; username: string; secret_enc: Uint8Array | null }>(
-          "SELECT id, username, secret_enc FROM accounts WHERE forge_id = ? AND is_default = 1",
-          target.repo.forgeId,
-        )
-      : db.get<{ id: number; username: string; secret_enc: Uint8Array | null }>(
-          "SELECT id, username, secret_enc FROM accounts WHERE id = ? AND forge_id = ?",
-          target.repo.accountOverrideId,
-          target.repo.forgeId,
-        );
-  if (row === undefined) {
+      ? getDefaultAccount(db, target.repo.forgeId)
+      : getAccount(db, target.repo.accountOverrideId);
+  if (account === undefined || account.forgeId !== target.repo.forgeId) {
     return undefined;
   }
-  return { id: row.id, username: row.username, secretEnc: row.secret_enc };
-}
-
-export function markAccountUsed(db: Db, accountId: number, at: number): void {
-  db.run("UPDATE accounts SET last_used_at = ?, updated_at = ? WHERE id = ?", at, at, accountId);
+  return { id: account.id, username: account.username };
 }
 
 // ---------------------------------------------------------------------------

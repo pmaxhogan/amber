@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { AmberEventType } from "@amber/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db/db.ts";
+import { createAccount, getAccount } from "../src/domain/accounts.ts";
 import { runGit } from "../src/sync/gitCli.ts";
 import { listSyncRuns, loadSyncTarget, RUN_RETENTION_COUNT } from "../src/sync/repoStore.ts";
 import {
@@ -36,6 +37,9 @@ let repoId: number;
 let backupsDir: string;
 let stateDir: string;
 let events: { type: AmberEventType; payload: Record<string, unknown> }[];
+
+/** Any valid 32 byte key; these tests only need encrypt/decrypt to round trip. */
+const SECRET_KEY = Buffer.alloc(32, 7);
 
 const publisher: SyncEventPublisher = {
   publish(type, payload = {}) {
@@ -379,5 +383,64 @@ describe("retention", () => {
     await sync();
     const runs = listSyncRuns(db, repoId);
     expect(runs.every((run) => run.startedAt > old)).toBe(true);
+  });
+});
+
+describe("credential lifecycle", () => {
+  /**
+   * last_used_at means "this credential worked", so it is stamped after the
+   * fetch comes back rather than when the password is read out of the row.
+   * These use the real resolver (no credentials override) against a file://
+   * origin that ignores auth, so the fetch outcome is what varies.
+   */
+  function seedAccount(secret: string | null): number {
+    const forgeId = loadSyncTarget(db, repoId)?.repo.forgeId;
+    expect(forgeId).toBeDefined();
+    const now = Date.now();
+    const account = createAccount(db, SECRET_KEY, {
+      forgeId: forgeId!,
+      username: "octocat",
+      secret,
+      isDefault: true,
+    });
+    db.run("UPDATE accounts SET last_used_at = NULL, updated_at = ? WHERE id = ?", now, account.id);
+    return account.id;
+  }
+
+  it("stamps last_used_at once a fetch using the credential succeeds", async () => {
+    const accountId = seedAccount("ghp_example_token");
+    expect(getAccount(db, accountId)?.lastUsedAt).toBeNull();
+
+    const run = await sync({}, { credentials: undefined, secretKey: SECRET_KEY });
+
+    expect(run.outcome).toBe("success");
+    expect(getAccount(db, accountId)?.lastUsedAt).not.toBeNull();
+  });
+
+  it("leaves last_used_at alone when the fetch fails", async () => {
+    const accountId = seedAccount("ghp_example_token");
+
+    const run = await sync(
+      {},
+      {
+        credentials: undefined,
+        secretKey: SECRET_KEY,
+        remoteUrl: `${origin.url}-does-not-exist`,
+      },
+    );
+
+    expect(run.outcome).toBe("error");
+    // A stored secret the forge never accepted must not look freshly used.
+    expect(getAccount(db, accountId)?.lastUsedAt).toBeNull();
+  });
+
+  it("leaves last_used_at alone when the account stores no secret", async () => {
+    const accountId = seedAccount(null);
+
+    const run = await sync({}, { credentials: undefined, secretKey: SECRET_KEY });
+
+    expect(run.outcome).toBe("success");
+    // Nothing was presented, so nothing was used.
+    expect(getAccount(db, accountId)?.lastUsedAt).toBeNull();
   });
 });
