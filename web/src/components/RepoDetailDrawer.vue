@@ -248,6 +248,27 @@ async function loadSettings(): Promise<void> {
   }
 }
 
+const settingsEditor = ref<InstanceType<typeof SettingsScopeEditor> | null>(null);
+const discardConfirmVisible = ref(false);
+
+/**
+ * Closing the drawer (click-off, escape, the X) silently threw away a dirty
+ * settings draft; route every close request through here so it asks first.
+ */
+function requestClose(visible: boolean): void {
+  if (!visible && settingsEditor.value?.hasChanges === true) {
+    discardConfirmVisible.value = true;
+    return;
+  }
+  emit("update:visible", visible);
+}
+
+function confirmDiscard(): void {
+  settingsEditor.value?.discard();
+  discardConfirmVisible.value = false;
+  emit("update:visible", false);
+}
+
 async function saveSettings(patch: Partial<Record<SettingKey, unknown>>): Promise<void> {
   if (props.repo === null) return;
   settingsSaving.value = true;
@@ -395,7 +416,7 @@ watch(activeTab, (tab) => {
     class="repo-drawer"
     :style="{ width: 'min(48rem, 100vw)' }"
     :header="repo?.displayName ?? 'Repository'"
-    @update:visible="emit('update:visible', $event)"
+    @update:visible="requestClose($event)"
   >
     <div v-if="repo" class="repo-drawer__body">
       <p class="repo-drawer__path mono">{{ origin }}/{{ repo.path }}</p>
@@ -628,6 +649,7 @@ watch(activeTab, (tab) => {
             <p v-if="settingsLoading" class="amber-muted">Loading settings...</p>
             <SettingsScopeEditor
               v-else-if="settingsError === null"
+              ref="settingsEditor"
               scope="repo"
               :chain="chain"
               :saving="settingsSaving"
@@ -727,6 +749,15 @@ watch(activeTab, (tab) => {
         again.
       </p>
     </ConfirmDialog>
+
+    <ConfirmDialog
+      v-model:visible="discardConfirmVisible"
+      title="Discard unsaved settings?"
+      message="This repository has settings changes that have not been saved. Closing the panel discards them."
+      confirm-label="Discard changes"
+      danger
+      @confirm="confirmDiscard"
+    />
   </Drawer>
 </template>
 
