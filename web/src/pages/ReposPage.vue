@@ -51,8 +51,9 @@ const error = ref<ApiClientError | null>(null);
 
 const page = ref(1);
 const perPage = ref(25);
-const sort = ref<RepoSortField>("display_name");
-const dir = ref<SortDirection>("asc");
+// Newest first by default: the repo you just added is the one you care about.
+const sort = ref<RepoSortField>("created_at");
+const dir = ref<SortDirection>("desc");
 
 const q = ref("");
 const forgeId = ref<number | null>(null);
@@ -200,7 +201,7 @@ function onPage(event: { page: number; rows: number }): void {
 }
 
 function onSort(event: { sortField?: unknown; sortOrder?: number | null }): void {
-  const field = typeof event.sortField === "string" ? event.sortField : "display_name";
+  const field = typeof event.sortField === "string" ? event.sortField : "created_at";
   sort.value = field as RepoSortField;
   dir.value = event.sortOrder === -1 ? "desc" : "asc";
   page.value = 1;
@@ -672,6 +673,12 @@ onBeforeUnmount(() => {
 
       <Column header="Size" sort-field="disk_usage_bytes" sortable>
         <template #body="{ data }">{{ humanBytes(data.diskUsageBytes) }}</template>
+      </Column>
+
+      <Column header="Added" sort-field="created_at" sortable>
+        <template #body="{ data }">
+          <span :title="absoluteTime(data.createdAt)">{{ relativeTime(data.createdAt) }}</span>
+        </template>
       </Column>
 
       <Column header="Status" :sortable="false">

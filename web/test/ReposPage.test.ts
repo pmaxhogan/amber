@@ -46,7 +46,8 @@ describe("Repos page lazy loading", () => {
     expect(api.listRepos).toHaveBeenCalledTimes(1);
     const [query] = (api.listRepos as unknown as { mock: { calls: unknown[][] } }).mock
       .calls[0] as [Record<string, unknown>];
-    expect(query).toMatchObject({ page: 1, perPage: 25, sort: "display_name", dir: "asc" });
+    // Newest first by default, so a fresh import surfaces at the top.
+    expect(query).toMatchObject({ page: 1, perPage: 25, sort: "created_at", dir: "desc" });
     expect(table(wrapper).props("totalRecords")).toBe(57);
     expect(table(wrapper).props("lazy")).toBe(true);
   });
