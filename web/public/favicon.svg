@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Amber">
+  <title>Amber</title>
+  <defs>
+    <radialGradient id="amber-fav-body" gradientUnits="userSpaceOnUse" cx="48" cy="46" r="96" fx="44" fy="34">
+      <stop offset="0" stop-color="#ffd98a"/>
+      <stop offset="0.35" stop-color="#f2a63c"/>
+      <stop offset="0.7" stop-color="#e8890f"/>
+      <stop offset="1" stop-color="#a9520a"/>
+    </radialGradient>
+  </defs>
+
+  <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="url(#amber-fav-body)"/>
+
+  <!-- inclusion: three commits, one branch, thick enough to survive 16px -->
+  <g fill="none" stroke="#5e2c0c" stroke-width="7" stroke-linecap="round">
+    <path d="M54 102 L54 70"/>
+    <path d="M54 102 C54 90 68 84 82 84"/>
+  </g>
+  <g fill="#5e2c0c">
+    <circle cx="54" cy="102" r="10"/>
+    <circle cx="54" cy="70" r="10"/>
+    <circle cx="82" cy="84" r="10"/>
+  </g>
+
+  <circle cx="59" cy="34" r="5" fill="#fff3d6" opacity="0.5"/>
+  <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="none" stroke="#8f4408" stroke-width="4" stroke-opacity="0.55" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 128" width="420" height="128" role="img" aria-label="amber">
+  <title>amber</title>
+  <!--
+    Intended typeface: Inter (600 / SemiBold), optical size ~large, tracking -2%.
+    Fallbacks below are all system-resident so the file needs no embedded font.
+    Fill is dual-safe by default (#c97615 clears 3:1 on both white and #14100d at
+    this display size); the prefers-color-scheme rules are an optimization only.
+
+    The empty space at the right of the viewBox is deliberate. "amber" ends near
+    x=320 in Segoe UI, but the advance width depends on which fallback the viewer
+    actually has, and a wider substitute (Arial or Helvetica Neue at 600) would be
+    clipped by the viewBox edge. Do not tighten the width to fit one font's metrics.
+  -->
+  <defs>
+    <radialGradient id="amber-wm-body" gradientUnits="userSpaceOnUse" cx="48" cy="46" r="96" fx="44" fy="34">
+      <stop offset="0" stop-color="#ffd98a"/>
+      <stop offset="0.35" stop-color="#f2a63c"/>
+      <stop offset="0.7" stop-color="#e8890f"/>
+      <stop offset="1" stop-color="#a9520a"/>
+    </radialGradient>
+    <linearGradient id="amber-wm-shade" gradientUnits="userSpaceOnUse" x1="30" y1="40" x2="100" y2="116">
+      <stop offset="0.8" stop-color="#7a3607" stop-opacity="0"/>
+      <stop offset="1" stop-color="#7a3607" stop-opacity="0.5"/>
+    </linearGradient>
+    <radialGradient id="amber-wm-hl">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="amber-wm-clip">
+      <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z"/>
+    </clipPath>
+  </defs>
+  <style>
+    .amber-wm-text { fill: #c97615; }
+    @media (prefers-color-scheme: dark) {
+      .amber-wm-text { fill: #f2a63c; }
+    }
+    @media (prefers-color-scheme: light) {
+      .amber-wm-text { fill: #9e4f0d; }
+    }
+  </style>
+
+  <g transform="translate(6 14) scale(0.78)">
+    <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="url(#amber-wm-body)"/>
+    <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="url(#amber-wm-shade)"/>
+    <g fill="none" stroke="#5e2c0c" stroke-width="4" stroke-linecap="round">
+      <path d="M54 108 L54 68"/>
+      <path d="M54 108 C64 108 78 102 78 88"/>
+      <path d="M78 88 C78 74 64 68 54 68"/>
+    </g>
+    <g fill="#5e2c0c">
+      <circle cx="54" cy="108" r="5.5"/>
+      <circle cx="54" cy="88" r="5.5"/>
+      <circle cx="54" cy="68" r="5.5"/>
+      <circle cx="78" cy="88" r="5.5"/>
+    </g>
+    <g clip-path="url(#amber-wm-clip)">
+      <ellipse rx="9" ry="16" transform="translate(50 50) rotate(-28)" fill="url(#amber-wm-hl)"/>
+      <circle cx="61" cy="32" r="3.5" fill="#fff3d6" opacity="0.5"/>
+      <path d="M40 46 C30 62 26 72 26 82" fill="none" stroke="#ffe7b8" stroke-width="3" stroke-linecap="round" opacity="0.35"/>
+    </g>
+    <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="none" stroke="#8f4408" stroke-width="3" stroke-opacity="0.5" stroke-linejoin="round"/>
+  </g>
+
+  <text class="amber-wm-text" x="124" y="88"
+        font-family="Inter, 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+        font-size="70" font-weight="600" letter-spacing="-1.5">amber</text>
+</svg>

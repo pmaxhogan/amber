@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Superseded runs on the same ref are cancelled.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION_PRIMARY: "26"
+  NODE_VERSION_COMPAT: "24"
+
+jobs:
+  lint:
+    name: Lint and typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION_PRIMARY }}
+          cache: npm
+
+      - run: npm ci
+
+      # shared must be built before the other workspaces can resolve its types.
+      - name: Build shared
+        run: npm run build -w shared
+
+      - name: ESLint
+        run: npx eslint .
+
+      - name: Prettier
+        run: npm run format:check
+
+      - name: ASCII dash check
+        run: npm run lint:ascii
+
+      - name: Typecheck
+        run: npm run typecheck
+
+  test:
+    name: Test (Node 26, coverage)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION_PRIMARY }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build shared
+        run: npm run build -w shared
+
+      - name: Test with coverage
+        run: npm run test:coverage
+
+      - name: Coverage ratchet
+        run: npm run coverage:ratchet
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 7
+
+  test-node24:
+    name: Test (Node 24 compat)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION_COMPAT }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build shared
+        run: npm run build -w shared
+
+      - name: Test
+        run: npm test
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION_PRIMARY }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build all workspaces
+        run: npm run build
+
+      - name: Check the server entrypoint was emitted
+        run: test -f server/dist/index.js
+
+      - name: Check the web bundle was emitted
+        run: test -f web/dist/index.html

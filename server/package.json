@@ -1,0 +1,21 @@
+{
+  "name": "@amber/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.ts",
+    "build": "tsc -b tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@amber/shared": "^0.1.0",
+    "fastify": "^5.10.0",
+    "jose": "^6.2.4",
+    "pino": "^10.3.1",
+    "pino-roll": "^4.0.0",
+    "zod": "^4.4.3"
+  }
+}

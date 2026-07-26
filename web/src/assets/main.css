@@ -1,0 +1,78 @@
+:root {
+  color-scheme: dark;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--p-surface-950, #17120b);
+  color: var(--p-surface-0, #f8fafc);
+}
+
+.amber-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.amber-header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--p-surface-800, #2b2118);
+}
+
+.amber-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 600;
+  font-size: 1.15rem;
+}
+
+/* 32px is a floor, not a preference: below it the commit graph inside the drop
+   stops resolving and the mark reads as a plain blob. */
+.amber-brand img {
+  width: 32px;
+  height: 32px;
+}
+
+.amber-nav {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.amber-nav a {
+  padding: 0.35rem 0.7rem;
+  border-radius: 6px;
+  color: inherit;
+  text-decoration: none;
+  opacity: 0.75;
+}
+
+.amber-nav a:hover {
+  opacity: 1;
+  background: var(--p-surface-800, #2b2118);
+}
+
+.amber-nav a.router-link-active {
+  opacity: 1;
+  color: var(--p-primary-color, #fbbf24);
+}
+
+.amber-main {
+  flex: 1;
+  padding: 1.5rem;
+}

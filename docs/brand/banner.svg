@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" width="1200" height="300" role="img" aria-label="Amber - git history, preserved.">
+  <title>Amber - git history, preserved.</title>
+  <defs>
+    <!-- extra stops: a long gentle tail keeps 8-bit quantization from stepping
+         into a visible ring at the glow's outer edge -->
+    <radialGradient id="amber-banner-glow" gradientUnits="userSpaceOnUse" cx="150" cy="150" r="640">
+      <stop offset="0" stop-color="#e8890f" stop-opacity="0.11"/>
+      <stop offset="0.3" stop-color="#d2760d" stop-opacity="0.06"/>
+      <stop offset="0.55" stop-color="#b4600c" stop-opacity="0.028"/>
+      <stop offset="0.78" stop-color="#b4600c" stop-opacity="0.01"/>
+      <stop offset="1" stop-color="#b4600c" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="amber-banner-body" gradientUnits="userSpaceOnUse" cx="48" cy="46" r="96" fx="44" fy="34">
+      <stop offset="0" stop-color="#ffd98a"/>
+      <stop offset="0.35" stop-color="#f2a63c"/>
+      <stop offset="0.7" stop-color="#e8890f"/>
+      <stop offset="1" stop-color="#a9520a"/>
+    </radialGradient>
+    <linearGradient id="amber-banner-shade" gradientUnits="userSpaceOnUse" x1="30" y1="40" x2="100" y2="116">
+      <stop offset="0.8" stop-color="#7a3607" stop-opacity="0"/>
+      <stop offset="1" stop-color="#7a3607" stop-opacity="0.5"/>
+    </linearGradient>
+    <radialGradient id="amber-banner-hl">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="amber-banner-rule" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="1200" y2="0">
+      <stop offset="0" stop-color="#e8890f" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#e8890f" stop-opacity="0"/>
+    </linearGradient>
+    <clipPath id="amber-banner-clip">
+      <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z"/>
+    </clipPath>
+  </defs>
+
+  <rect width="1200" height="300" fill="#14100d"/>
+  <rect width="1200" height="300" fill="url(#amber-banner-glow)"/>
+
+  <!-- faint commit graph motif, right side -->
+  <g fill="none" stroke="#e8890f" stroke-width="3" stroke-linecap="round" opacity="0.09">
+    <path d="M760 214 L1140 214"/>
+    <path d="M860 214 C900 214 916 190 916 166 L1060 166"/>
+    <path d="M1000 214 C1030 214 1044 240 1070 240 L1160 240"/>
+  </g>
+  <g fill="#e8890f" opacity="0.13">
+    <circle cx="860" cy="214" r="7"/>
+    <circle cx="1000" cy="214" r="7"/>
+    <circle cx="1120" cy="214" r="7"/>
+    <circle cx="916" cy="166" r="7"/>
+    <circle cx="1060" cy="166" r="7"/>
+    <circle cx="1070" cy="240" r="7"/>
+  </g>
+
+  <g transform="translate(78 84) scale(1.03)">
+    <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="url(#amber-banner-body)"/>
+    <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="url(#amber-banner-shade)"/>
+    <g fill="none" stroke="#5e2c0c" stroke-width="4" stroke-linecap="round">
+      <path d="M54 108 L54 68"/>
+      <path d="M54 108 C64 108 78 102 78 88"/>
+      <path d="M78 88 C78 74 64 68 54 68"/>
+    </g>
+    <g fill="#5e2c0c">
+      <circle cx="54" cy="108" r="5.5"/>
+      <circle cx="54" cy="88" r="5.5"/>
+      <circle cx="54" cy="68" r="5.5"/>
+      <circle cx="78" cy="88" r="5.5"/>
+    </g>
+    <g clip-path="url(#amber-banner-clip)">
+      <ellipse rx="9" ry="16" transform="translate(50 50) rotate(-28)" fill="url(#amber-banner-hl)"/>
+      <circle cx="61" cy="32" r="3.5" fill="#fff3d6" opacity="0.5"/>
+      <path d="M40 46 C30 62 26 72 26 82" fill="none" stroke="#ffe7b8" stroke-width="3" stroke-linecap="round" opacity="0.35"/>
+    </g>
+    <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="none" stroke="#8f4408" stroke-width="3" stroke-opacity="0.5" stroke-linejoin="round"/>
+  </g>
+
+  <text x="252" y="156" fill="#f5efe7"
+        font-family="Inter, 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+        font-size="78" font-weight="600" letter-spacing="-1.8">amber</text>
+  <text x="256" y="200" fill="#b8aa9a"
+        font-family="Inter, 'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif"
+        font-size="26" font-weight="400" letter-spacing="0.4">git history, preserved.</text>
+
+  <rect x="0" y="297" width="1200" height="3" fill="url(#amber-banner-rule)"/>
+</svg>

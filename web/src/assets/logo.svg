@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Amber logo: a drop of amber with a git commit graph preserved inside">
+  <title>Amber</title>
+  <defs>
+    <radialGradient id="amber-logo-body" gradientUnits="userSpaceOnUse" cx="48" cy="46" r="96" fx="44" fy="34">
+      <stop offset="0" stop-color="#ffd98a"/>
+      <stop offset="0.35" stop-color="#f2a63c"/>
+      <stop offset="0.7" stop-color="#e8890f"/>
+      <stop offset="1" stop-color="#a9520a"/>
+    </radialGradient>
+    <linearGradient id="amber-logo-shade" gradientUnits="userSpaceOnUse" x1="30" y1="40" x2="100" y2="116">
+      <stop offset="0.8" stop-color="#7a3607" stop-opacity="0"/>
+      <stop offset="1" stop-color="#7a3607" stop-opacity="0.5"/>
+    </linearGradient>
+    <radialGradient id="amber-logo-hl">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="amber-logo-clip">
+      <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- amber drop body -->
+  <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="url(#amber-logo-body)"/>
+  <!-- depth: warm shading held to the lower-right rim only -->
+  <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="url(#amber-logo-shade)"/>
+
+  <!-- the inclusion: a branch that diverges and merges back, preserved inside -->
+  <g fill="none" stroke="#5e2c0c" stroke-width="4" stroke-linecap="round">
+    <path d="M54 108 L54 68"/>
+    <path d="M54 108 C64 108 78 102 78 88"/>
+    <path d="M78 88 C78 74 64 68 54 68"/>
+  </g>
+  <g fill="#5e2c0c">
+    <circle cx="54" cy="108" r="5.5"/>
+    <circle cx="54" cy="88" r="5.5"/>
+    <circle cx="54" cy="68" r="5.5"/>
+    <circle cx="78" cy="88" r="5.5"/>
+  </g>
+
+  <!-- glassy highlight, clipped so nothing bleeds past the silhouette -->
+  <g clip-path="url(#amber-logo-clip)">
+    <ellipse rx="9" ry="16" transform="translate(50 50) rotate(-28)" fill="url(#amber-logo-hl)"/>
+    <circle cx="61" cy="32" r="3.5" fill="#fff3d6" opacity="0.5"/>
+    <path d="M40 46 C30 62 26 72 26 82" fill="none" stroke="#ffe7b8" stroke-width="3" stroke-linecap="round" opacity="0.35"/>
+  </g>
+
+  <!-- rim: gives the silhouette definition on white -->
+  <path d="M64 12 C76 30 102 60 102 82 A38 38 0 0 1 26 82 C26 60 52 30 64 12 Z" fill="none" stroke="#8f4408" stroke-width="3" stroke-opacity="0.5" stroke-linejoin="round"/>
+</svg>

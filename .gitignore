@@ -1,0 +1,22 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+*.local
+*.local.md
+*.local.yml
+*.local.yaml
+tmp/
+tmp-data/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+*.log
+.DS_Store
+.vite/
+
+# claude agent worktrees and session config
+.claude/
