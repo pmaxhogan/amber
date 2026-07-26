@@ -205,6 +205,10 @@ const plugin: FastifyPluginAsync<CfAccessOptions> = async (
         error: "unauthorized",
         message: "Valid Cloudflare Access authentication is required.",
       });
+      // Explicit: an async hook that has answered must not fall through to the
+      // handler. Fastify checks reply.sent, but the SSE route hijacks its reply
+      // and that lifecycle should not depend on a framework detail.
+      return reply;
     }
   });
 };

@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
@@ -488,5 +489,53 @@ describe("the real app guards every /api route", () => {
     const response = await app.inject({ method: "GET", url: "/healthz" });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ ok: true });
+  });
+
+  /**
+   * The one path a real deployment hits on every page load, and the only one
+   * where the auth hook meets a hijacked reply. EventSource cannot set request
+   * headers, so the browser authenticates the stream with the CF_Authorization
+   * cookie alone; both routes into the stream are checked here against a real
+   * socket, since app.inject would buffer a response that never ends.
+   */
+  it("streams /api/events to an authenticated client, cookie included", async () => {
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const { port } = app.server.address() as AddressInfo;
+    const token = await makeToken();
+
+    for (const headers of [
+      { [CF_ACCESS_HEADER]: token },
+      { cookie: `${CF_ACCESS_COOKIE}=${token}` },
+    ]) {
+      const controller = new AbortController();
+      const response = await fetch(`http://127.0.0.1:${String(port)}/api/events`, {
+        headers,
+        signal: controller.signal,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("text/event-stream");
+
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      expect(new TextDecoder().decode(first.value)).toContain(": connected");
+
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+    }
+  });
+
+  it("refuses the stream outright when the cookie carries a rejected token", async () => {
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const { port } = app.server.address() as AddressInfo;
+    const token = await makeToken({ email: "intruder@example.com" });
+
+    const response = await fetch(`http://127.0.0.1:${String(port)}/api/events`, {
+      headers: { cookie: `${CF_ACCESS_COOKIE}=${token}` },
+    });
+    expect(response.status).toBe(401);
+    // Rejected before the handler ran, so no stream was ever opened.
+    expect(response.headers.get("content-type")).toContain("application/json");
+    await response.body?.cancel();
   });
 });

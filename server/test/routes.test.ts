@@ -42,11 +42,11 @@ async function makeForge(host = "github.com"): Promise<number> {
   return response.json<{ id: number }>().id;
 }
 
-async function makeRepo(forgeId: number, path: string): Promise<number> {
+/** Imports a github.com repo, which also creates the forge if it is missing. */
+async function makeRepo(path: string): Promise<number> {
   const response = await json("POST", "/api/import", {
     text: `https://github.com/${path}`,
   });
-  void forgeId;
   return response.json<{ results: { repoId: number }[] }>().results[0]!.repoId;
 }
 
@@ -141,7 +141,7 @@ describe("DELETE /api/forges/:id", () => {
 
   it("409s while repositories still reference it", async () => {
     const id = await makeForge();
-    await makeRepo(id, "nodejs/node");
+    await makeRepo("nodejs/node");
     const response = await json("DELETE", `/api/forges/${String(id)}`);
     expect(response.statusCode).toBe(409);
     expect(response.json()).toMatchObject({ error: "conflict" });
@@ -378,6 +378,14 @@ describe("GET /api/repos", () => {
     expect((await json("GET", "/api/repos?dir=asc--")).statusCode).toBe(400);
   });
 
+  it("fails closed on a repeated parameter rather than picking one", async () => {
+    // Fastify parses a repeated key into an array, which no scalar schema
+    // accepts. Ambiguous input is rejected instead of silently resolved.
+    expect((await json("GET", "/api/repos?sort=path&sort=display_name")).statusCode).toBe(400);
+    expect((await json("GET", "/api/repos?dir=asc&dir=desc")).statusCode).toBe(400);
+    expect((await json("GET", "/api/repos?perPage=1&perPage=200")).statusCode).toBe(400);
+  });
+
   it("filters by q, forgeId, state, and outcome", async () => {
     expect((await json("GET", "/api/repos?q=node")).json()).toMatchObject({ total: 1 });
     expect((await json("GET", "/api/repos?q=NODE")).json()).toMatchObject({ total: 1 });
@@ -548,6 +556,14 @@ describe("DELETE /api/repos/:id", () => {
 
   it("succeeds when the backup directory was never created", async () => {
     expect((await json("DELETE", `/api/repos/${String(repoId)}?files=true`)).statusCode).toBe(204);
+  });
+
+  it("rejects a contradictory repeated files flag rather than guessing", async () => {
+    const dir = seedBackupDir();
+    const response = await json("DELETE", `/api/repos/${String(repoId)}?files=true&files=false`);
+    expect(response.statusCode).toBe(400);
+    expect(existsSync(dir)).toBe(true);
+    expect((await json("GET", `/api/repos/${String(repoId)}`)).statusCode).toBe(200);
   });
 
   it("refuses to touch the filesystem for a repo with a tampered slug", async () => {
