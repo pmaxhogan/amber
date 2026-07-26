@@ -19,7 +19,7 @@ import type {
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
 import { eventPayloadSchema } from "@amber/shared";
-import { deriveOutcome, type RepoRow } from "../api/types.ts";
+import { deriveOutcome, type AccountSyncRow, type RepoRow } from "../api/types.ts";
 import { forgeOrigin, humanBytes, pluralize, relativeTime, absoluteTime } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
 import { useEventsStore } from "../stores/events.ts";
@@ -61,6 +61,7 @@ const outcomeFilter = ref<"success" | "error" | "canceled" | null>(null);
 
 const forges = ref<Forge[]>([]);
 const accounts = ref<Account[]>([]);
+const accountSyncs = ref<AccountSyncRow[]>([]);
 
 const forgeById = computed(() => new Map(forges.value.map((forge) => [forge.id, forge])));
 const accountById = computed(() => new Map(accounts.value.map((account) => [account.id, account])));
@@ -70,6 +71,24 @@ const defaultAccountByForge = computed(
       accounts.value.filter((account) => account.isDefault).map((a) => [a.forgeId, a] as const),
     ),
 );
+
+const syncSourceById = computed(
+  () => new Map(accountSyncs.value.map((sync) => [sync.id, sync.source] as const)),
+);
+
+/**
+ * Where the repo came from. Origin is who created it, so a manual import that
+ * an account sync later adopted still reads Manual; a discovered repo whose
+ * sync was since deleted degrades to the generic Account label.
+ */
+function repoSource(row: RepoRow): string {
+  if (row.origin === "manual") return "Manual";
+  const source =
+    row.managedByAccountSyncId === null
+      ? undefined
+      : syncSourceById.value.get(row.managedByAccountSyncId);
+  return source === "starred" ? "Starred" : "Account";
+}
 
 const forgeOptions = computed(() => [
   { label: "All forges", value: null },
@@ -136,9 +155,14 @@ async function load(): Promise<void> {
 
 async function loadReferenceData(): Promise<void> {
   try {
-    const [forgeRows, accountRows] = await Promise.all([api.listForges(), api.listAccounts()]);
+    const [forgeRows, accountRows, syncRows] = await Promise.all([
+      api.listForges(),
+      api.listAccounts(),
+      api.listAccountSyncs(),
+    ]);
     forges.value = forgeRows;
     accounts.value = accountRows;
+    accountSyncs.value = syncRows;
   } catch {
     // The table still renders without the forge and account join; the columns
     // degrade to ids rather than the page failing outright.
@@ -608,6 +632,12 @@ onBeforeUnmount(() => {
             :severity="accountBadge(data).severity"
             :title="accountBadge(data).title"
           />
+        </template>
+      </Column>
+
+      <Column header="Source" :sortable="false">
+        <template #body="{ data }">
+          <span class="amber-muted">{{ repoSource(data) }}</span>
         </template>
       </Column>
 

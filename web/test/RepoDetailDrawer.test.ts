@@ -267,6 +267,55 @@ describe("drawer settings tab", () => {
   });
 });
 
+describe("drawer unsaved settings guard", () => {
+  async function dirtyEditor(wrapper: Awaited<ReturnType<typeof mountDrawer>>["wrapper"]) {
+    await openTab(wrapper, "settings");
+    // Any override marks the draft dirty; the button label is stable.
+    await clickButton(wrapper, "Override here");
+    await flush();
+  }
+
+  function discardDialog(wrapper: Awaited<ReturnType<typeof mountDrawer>>["wrapper"]) {
+    return wrapper
+      .findAllComponents(ConfirmDialog)
+      .find((entry) => entry.props("title") === "Discard unsaved settings?");
+  }
+
+  it("asks before closing over unsaved settings instead of silently dropping them", async () => {
+    const { wrapper } = await mountDrawer();
+    await dirtyEditor(wrapper);
+
+    await wrapper.findComponent({ name: "Drawer" }).vm.$emit("update:visible", false);
+    await flush();
+
+    expect(wrapper.emitted("update:visible")).toBeUndefined();
+    expect(discardDialog(wrapper)?.props("visible")).toBe(true);
+  });
+
+  it("closes and resets the draft once the discard is confirmed", async () => {
+    const { wrapper } = await mountDrawer();
+    await dirtyEditor(wrapper);
+
+    await wrapper.findComponent({ name: "Drawer" }).vm.$emit("update:visible", false);
+    await flush();
+    discardDialog(wrapper)?.vm.$emit("confirm");
+    await flush();
+
+    expect(wrapper.emitted("update:visible")?.[0]).toEqual([false]);
+    expect(wrapper.findComponent(SettingsScopeEditor).text()).not.toContain("pending change");
+  });
+
+  it("closes without asking when the settings draft is clean", async () => {
+    const { wrapper } = await mountDrawer();
+    await openTab(wrapper, "settings");
+
+    await wrapper.findComponent({ name: "Drawer" }).vm.$emit("update:visible", false);
+    await flush();
+
+    expect(wrapper.emitted("update:visible")?.[0]).toEqual([false]);
+  });
+});
+
 describe("drawer export tab", () => {
   it("downloads the chosen kind and format", async () => {
     const { wrapper, api } = await mountDrawer();

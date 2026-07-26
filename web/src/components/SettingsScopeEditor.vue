@@ -111,6 +111,9 @@ function selectOptions(key: SettingKey) {
 function fieldId(key: SettingKey): string {
   return `setting-${props.scope}-${key}`;
 }
+
+// The repo drawer asks before closing over a dirty editor.
+defineExpose({ hasChanges, discard });
 </script>
 
 <template>

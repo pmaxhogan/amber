@@ -7,7 +7,7 @@ import ConfirmDialog from "../src/components/ConfirmDialog.vue";
 import { routes } from "../src/router/index.ts";
 import { mountGlobals } from "./helpers/mount.ts";
 import { clickButton, findButton, flush } from "./helpers/dom.ts";
-import { makeAccount, makeForge, makeRepo, stubApi } from "./helpers/stubApi.ts";
+import { makeAccount, makeAccountSync, makeForge, makeRepo, stubApi } from "./helpers/stubApi.ts";
 import type { RepoRow } from "../src/api/types.ts";
 import type { AmberEvent } from "@amber/shared";
 import { useEventsStore } from "../src/stores/events.ts";
@@ -92,6 +92,36 @@ describe("Repos page selection and bulk actions", () => {
   it("hides the bulk bar until something is selected", async () => {
     const { wrapper } = await mountPage();
     expect(wrapper.find('[aria-label="Bulk actions"]').exists()).toBe(false);
+  });
+
+  it("labels where each repo came from: manual import, owned sync, or starred sync", async () => {
+    const api = buildApi({
+      listRepos: vi.fn().mockResolvedValue({
+        rows: [
+          makeRepo({ id: 1, origin: "manual", managedByAccountSyncId: null }),
+          makeRepo({ id: 2, origin: "account_sync", managedByAccountSyncId: 1 }),
+          makeRepo({ id: 3, origin: "account_sync", managedByAccountSyncId: 2 }),
+          // The managing sync was deleted: degrade to the generic label.
+          makeRepo({ id: 4, origin: "account_sync", managedByAccountSyncId: null }),
+        ],
+        total: 4,
+        page: 1,
+        perPage: 25,
+      }),
+      listAccountSyncs: vi
+        .fn()
+        .mockResolvedValue([
+          makeAccountSync({ id: 1, source: "owned" }),
+          makeAccountSync({ id: 2, source: "starred" }),
+        ]),
+    });
+    const { wrapper } = await mountPage(api);
+
+    const cells = wrapper
+      .findAll("td")
+      .map((cell) => cell.text())
+      .filter((text) => ["Manual", "Account", "Starred"].includes(text));
+    expect(cells).toEqual(["Manual", "Account", "Starred", "Account"]);
   });
 
   it("shows the bulk bar with a count once rows are selected", async () => {

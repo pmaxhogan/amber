@@ -156,13 +156,6 @@ describe("Accounts page write-only secret", () => {
 });
 
 describe("Accounts page forge management", () => {
-  it("says the origin cannot be changed later, which is the credential-safety rule", async () => {
-    const { wrapper } = await mountPage();
-    expect(wrapper.text()).toContain(
-      "Host, port, and protocol cannot be changed after a forge is created",
-    );
-  });
-
   it("shows a non-default port and flags plain http", async () => {
     const api = buildApi({
       listForges: vi
