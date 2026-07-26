@@ -199,7 +199,29 @@ ALTER TABLE repos
 CREATE INDEX idx_repos_origin ON repos (origin);
 `;
 
+/**
+ * Seed the two big public forges so a fresh install can import from them
+ * without any setup. A one-time migration rather than a boot seed on purpose:
+ * deleting either one is a normal edit that must stick, and a seed that runs
+ * every boot would resurrect them. The guards keep installs that already
+ * created a forge on these hosts (any protocol or port) untouched.
+ */
+const defaultForges = `
+INSERT INTO forges (protocol, host, port, kind, created_at, updated_at)
+SELECT 'https', 'github.com', NULL, 'github',
+       CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+       CAST(strftime('%s', 'now') AS INTEGER) * 1000
+WHERE NOT EXISTS (SELECT 1 FROM forges WHERE host = 'github.com');
+
+INSERT INTO forges (protocol, host, port, kind, created_at, updated_at)
+SELECT 'https', 'gitlab.com', NULL, 'gitlab',
+       CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+       CAST(strftime('%s', 'now') AS INTEGER) * 1000
+WHERE NOT EXISTS (SELECT 1 FROM forges WHERE host = 'gitlab.com');
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
+  { name: "003_default_forges", sql: defaultForges },
 ];

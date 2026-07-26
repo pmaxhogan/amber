@@ -128,17 +128,24 @@ describe("migrate", () => {
 });
 
 describe("schema constraints", () => {
+  /**
+   * A host of our own, so a collision here is with the row this hook wrote and
+   * never with one of the two forges migration 003 seeds.
+   */
+  const HOST = "forge.example.com";
+  let forgeId: number;
+
   beforeEach(() => {
     migrate(db, log);
-    db.run(
+    forgeId = db.run(
       "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       "https",
-      "github.com",
+      HOST,
       null,
-      "github",
+      "generic",
       1,
       1,
-    );
+    ).lastInsertRowid;
   });
 
   it("rejects a duplicate forge on the default port", () => {
@@ -146,9 +153,9 @@ describe("schema constraints", () => {
       db.run(
         "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
         "https",
-        "github.com",
+        HOST,
         null,
-        "github",
+        "generic",
         1,
         1,
       ),
@@ -160,9 +167,9 @@ describe("schema constraints", () => {
       db.run(
         "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
         "https",
-        "github.com",
+        HOST,
         8443,
-        "github",
+        "generic",
         1,
         1,
       ),
@@ -173,7 +180,7 @@ describe("schema constraints", () => {
     const insert = (username: string, isDefault: number) =>
       db.run(
         "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-        1,
+        forgeId,
         username,
         isDefault,
         1,
@@ -188,7 +195,7 @@ describe("schema constraints", () => {
     const insert = (path: string, slug: string, shortId: string) =>
       db.run(
         "INSERT INTO repos (forge_id, path, display_name, slug, short_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        1,
+        forgeId,
         path,
         path.slice(path.lastIndexOf("/") + 1),
         slug,

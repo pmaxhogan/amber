@@ -16,7 +16,16 @@ let app: AmberApp;
 let events: EventBus;
 let seen: AmberEvent[];
 
+/** Reuses the row migration 003 seeds for github.com and gitlab.com. */
 function seedForge(kind: string, host: string): number {
+  const existing = db.get<{ id: number }>(
+    "SELECT id FROM forges WHERE protocol = 'https' AND host = ? AND port IS NULL AND kind = ?",
+    host,
+    kind,
+  );
+  if (existing !== undefined) {
+    return existing.id;
+  }
   return db.run(
     "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
     "https",

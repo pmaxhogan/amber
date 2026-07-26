@@ -55,21 +55,35 @@ async function makeRepo(path: string): Promise<number> {
 // ---------------------------------------------------------------------------
 
 describe("GET/POST /api/forges", () => {
+  /**
+   * bitbucket.org throughout: a host with a detected kind that migration 003
+   * does not seed. Posting github.com would answer 200 for the seeded row and
+   * never exercise creation at all.
+   */
   it("creates a forge with a detected kind and lists it", async () => {
-    const created = await json("POST", "/api/forges", { host: "github.com" });
+    const created = await json("POST", "/api/forges", { host: "bitbucket.org" });
     expect(created.statusCode).toBe(201);
-    expect(created.json()).toMatchObject({ host: "github.com", kind: "github", protocol: "https" });
+    expect(created.json()).toMatchObject({
+      host: "bitbucket.org",
+      kind: "bitbucket",
+      protocol: "https",
+    });
 
     const list = await json("GET", "/api/forges");
     expect(list.statusCode).toBe(200);
-    expect(list.json()).toHaveLength(1);
+    expect(list.json<{ host: string }[]>().map((forge) => forge.host)).toEqual([
+      "bitbucket.org",
+      "github.com",
+      "gitlab.com",
+    ]);
   });
 
   it("is idempotent and answers 200 the second time", async () => {
-    await json("POST", "/api/forges", { host: "github.com" });
-    const again = await json("POST", "/api/forges", { host: "github.com" });
+    expect((await json("POST", "/api/forges", { host: "bitbucket.org" })).statusCode).toBe(201);
+    const again = await json("POST", "/api/forges", { host: "bitbucket.org" });
     expect(again.statusCode).toBe(200);
-    expect((await json("GET", "/api/forges")).json()).toHaveLength(1);
+    const hosts = (await json("GET", "/api/forges")).json<{ host: string }[]>();
+    expect(hosts.filter((forge) => forge.host === "bitbucket.org")).toHaveLength(1);
   });
 
   it("accepts an explicit kind and port", async () => {
@@ -111,8 +125,15 @@ describe("PATCH /api/forges/:id keeps the origin immutable", () => {
     expect(patched.json()).toMatchObject({ host: "github.com", protocol: "https", port: null });
 
     // Confirmed against a fresh read, not just the write response.
-    const list = await json("GET", "/api/forges");
-    expect(list.json()).toMatchObject([{ host: "github.com", protocol: "https", port: null }]);
+    const list = (await json("GET", "/api/forges")).json<
+      { id: number; host: string; protocol: string; port: number | null }[]
+    >();
+    expect(list.find((forge) => forge.id === id)).toMatchObject({
+      host: "github.com",
+      protocol: "https",
+      port: null,
+    });
+    expect(list.map((forge) => forge.host)).not.toContain("evil.example.com");
   });
 
   it("offers no other verb that could rewrite the host", async () => {
@@ -123,7 +144,9 @@ describe("PATCH /api/forges/:id keeps the origin immutable", () => {
       });
       expect(response.statusCode).toBe(404);
     }
-    expect((await json("GET", "/api/forges")).json()).toMatchObject([{ host: "github.com" }]);
+    const list = (await json("GET", "/api/forges")).json<{ id: number; host: string }[]>();
+    expect(list.find((forge) => forge.id === id)).toMatchObject({ host: "github.com" });
+    expect(list.map((forge) => forge.host)).not.toContain("evil.example.com");
   });
 
   it("404s for an unknown id and 400s for a non numeric one", async () => {
@@ -134,9 +157,10 @@ describe("PATCH /api/forges/:id keeps the origin immutable", () => {
 
 describe("DELETE /api/forges/:id", () => {
   it("removes an unused forge", async () => {
-    const id = await makeForge();
+    const id = await makeForge("git.example.com");
     expect((await json("DELETE", `/api/forges/${String(id)}`)).statusCode).toBe(204);
-    expect((await json("GET", "/api/forges")).json()).toHaveLength(0);
+    const hosts = (await json("GET", "/api/forges")).json<{ host: string }[]>();
+    expect(hosts.map((forge) => forge.host)).not.toContain("git.example.com");
   });
 
   it("409s while repositories still reference it", async () => {
@@ -757,13 +781,16 @@ describe("/api/settings", () => {
 
 describe("/api/import", () => {
   it("previews without writing anything", async () => {
+    // Against the pre-call listing, not zero: migration 003 seeds github.com,
+    // so a preview that wrote a forge would slip past a bare length check.
+    const before = (await json("GET", "/api/forges")).json();
     const response = await json("POST", "/api/import/preview", {
       text: ["https://github.com/nodejs/node", "git@github.com:torvalds/linux.git"].join("\n"),
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ summary: { total: 2, ok: 1, warning: 0, error: 1 } });
     expect((await json("GET", "/api/repos")).json()).toMatchObject({ total: 0 });
-    expect((await json("GET", "/api/forges")).json()).toHaveLength(0);
+    expect((await json("GET", "/api/forges")).json()).toEqual(before);
   });
 
   it("commits, creating forges and repos", async () => {

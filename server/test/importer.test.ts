@@ -29,6 +29,12 @@ afterEach(() => {
 
 const all = () => listRepos(db, { page: 1, perPage: 200, sort: "created_at", dir: "asc" });
 
+/** Migration 003 seeds these into every database before a test starts. */
+const SEEDED_HOSTS = new Set(["github.com", "gitlab.com"]);
+
+/** Only the forges an import created, so counts stay about the import. */
+const imported = () => listForges(db).filter((forge) => !SEEDED_HOSTS.has(forge.host));
+
 describe("previewImport", () => {
   it("parses a mixed block and summarizes it", () => {
     const preview = previewImport(
@@ -51,8 +57,12 @@ describe("previewImport", () => {
   });
 
   it("writes nothing", () => {
+    // Compared against the pre-call listing rather than zero: migration 003
+    // seeds github.com, so a preview that did write would be invisible to a
+    // bare length check.
+    const before = listForges(db);
     previewImport(db, "https://github.com/nodejs/node");
-    expect(listForges(db)).toHaveLength(0);
+    expect(listForges(db)).toEqual(before);
     expect(all().total).toBe(0);
   });
 
@@ -75,7 +85,7 @@ describe("previewImport", () => {
 
   it("warns when the account exists only on a different forge", () => {
     commitImport(db, "https://gitlab.com/a/b", { now: NOW });
-    const gitlabId = listForges(db)[0]!.id;
+    const gitlabId = listForges(db).find((forge) => forge.host === "gitlab.com")!.id;
     createAccount(db, KEY, {
       forgeId: gitlabId,
       username: "pmaxhogan",
@@ -96,17 +106,23 @@ describe("previewImport", () => {
 
 describe("commitImport creates forges and repos", () => {
   it("auto creates the forge with a detected kind", () => {
-    commitImport(db, "https://github.com/nodejs/node", { now: NOW });
-    const forges = listForges(db);
+    // bitbucket.org has a detected kind and is not one of the seeded hosts, so
+    // the import is what brings the row into being.
+    commitImport(db, "https://bitbucket.org/nodejs/node", { now: NOW });
+    const forges = imported();
     expect(forges).toHaveLength(1);
-    expect(forges[0]).toMatchObject({ host: "github.com", kind: "github", protocol: "https" });
+    expect(forges[0]).toMatchObject({
+      host: "bitbucket.org",
+      kind: "bitbucket",
+      protocol: "https",
+    });
   });
 
   it("creates one forge for many repos on the same host", () => {
-    commitImport(db, ["github.com/a/b", "github.com/c/d", "github.com/e/f"].join("\n"), {
+    commitImport(db, ["bitbucket.org/a/b", "bitbucket.org/c/d", "bitbucket.org/e/f"].join("\n"), {
       now: NOW,
     });
-    expect(listForges(db)).toHaveLength(1);
+    expect(imported()).toHaveLength(1);
     expect(all().total).toBe(3);
   });
 
@@ -114,13 +130,13 @@ describe("commitImport creates forges and repos", () => {
     commitImport(
       db,
       [
-        "https://github.com/a/b",
+        "https://bitbucket.org/a/b",
         "http://git.example.com/a/b",
         "https://git.example.com:8443/a/b",
       ].join("\n"),
       { now: NOW },
     );
-    expect(listForges(db)).toHaveLength(3);
+    expect(imported()).toHaveLength(3);
     expect(all().total).toBe(3);
   });
 

@@ -5,6 +5,7 @@ import { buildApp, type AmberApp } from "../src/app.ts";
 import { loadConfig, type Config } from "../src/config.ts";
 import { openDb, type Db } from "../src/db/db.ts";
 import { migrate } from "../src/db/migrate.ts";
+import { findForge } from "../src/domain/forges.ts";
 import { EventBus } from "../src/events.ts";
 import { createConsoleLogger } from "../src/logging.ts";
 
@@ -100,7 +101,15 @@ export async function createTempApp(
   };
 }
 
-/** Insert a forge directly, for tests that only care about what hangs off it. */
+/**
+ * Insert a forge directly, for tests that only care about what hangs off it.
+ *
+ * Migration 003 already seeds github.com and gitlab.com, so an origin that is
+ * spoken for is reused rather than retried against the identity index. A kind
+ * that disagrees with the existing row is a mistake, not something to paper
+ * over: a test wanting github.com classified as anything but 'github' has to
+ * build that row itself rather than silently receiving the seeded one.
+ */
 export function seedForge(
   db: Db,
   host = "github.com",
@@ -108,6 +117,16 @@ export function seedForge(
   protocol = "https",
   port: number | null = null,
 ): number {
+  const existing = findForge(db, protocol, host, port);
+  if (existing !== undefined) {
+    if (existing.kind !== kind) {
+      throw new Error(
+        `seedForge: ${protocol}://${host} already exists as kind '${existing.kind}', not '${kind}'`,
+      );
+    }
+    return existing.id;
+  }
+
   const now = Date.now();
   return db.run(
     "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",

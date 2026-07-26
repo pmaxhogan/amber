@@ -125,6 +125,11 @@ function baseDeps(provider: AccountSyncProvider, extra: DiscoveryDeps = {}): Dis
   };
 }
 
+/**
+ * A forge on a host of our own rather than github.com: the kind varies per test
+ * (a generic forge has to be refusable) and migration 003 already owns the
+ * github.com row with kind 'github' fixed.
+ */
 function seed(options: { kind?: string; secret?: Uint8Array | null } = {}): {
   forgeId: number;
   accountId: number;
@@ -132,7 +137,7 @@ function seed(options: { kind?: string; secret?: Uint8Array | null } = {}): {
   const forgeId = db.run(
     "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
     "https",
-    "github.com",
+    "forge.example.com",
     null,
     options.kind ?? "github",
     1,
@@ -335,7 +340,7 @@ describe("runAccountSync, owned", () => {
   });
 
   it("passes the forge origin, username and visibility to the provider", async () => {
-    db.run(
+    const forgeId = db.run(
       "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
       "http",
       "gitea.example.com",
@@ -343,10 +348,10 @@ describe("runAccountSync, owned", () => {
       "gitea",
       1,
       1,
-    );
+    ).lastInsertRowid;
     const accountId = db.run(
       "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-      1,
+      forgeId,
       "maintainer",
       1,
       1,
@@ -674,12 +679,12 @@ describe("runAccountSync, starred", () => {
 
 describe("scheduling helpers", () => {
   it("lists only enabled syncs that are due, never-run ones first", () => {
-    const { accountId } = seed();
+    const { forgeId, accountId } = seed();
     const owned = createSync(accountId, "owned");
     const starred = createSync(accountId, "starred");
     const disabled = db.run(
       `INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-      1,
+      forgeId,
       "other",
       0,
       1,

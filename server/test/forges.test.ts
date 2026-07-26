@@ -81,10 +81,13 @@ describe("upsertForge", () => {
   });
 
   it("is idempotent for the same origin", () => {
-    const first = upsertForge(db, { protocol: "https", host: "github.com", port: null });
-    const second = upsertForge(db, { protocol: "https", host: "GitHub.com", port: null });
+    // bitbucket.org rather than github.com: migration 003 seeds the latter, so
+    // the first upsert has to be the one that creates the row for this to say
+    // anything about de-duplication.
+    const first = upsertForge(db, { protocol: "https", host: "bitbucket.org", port: null });
+    const second = upsertForge(db, { protocol: "https", host: "BitBucket.org", port: null });
     expect(second.id).toBe(first.id);
-    expect(listForges(db)).toHaveLength(1);
+    expect(listForges(db).filter((forge) => forge.host === "bitbucket.org")).toHaveLength(1);
   });
 
   it("treats the default port and no port as the same origin", () => {
@@ -110,17 +113,19 @@ describe("upsertForge", () => {
     upsertForge(db, { protocol: "http", host: "git.example.com", port: null });
     upsertForge(db, { protocol: "https", host: "git.example.com", port: 8443 });
     upsertForge(db, { protocol: "https", host: "other.example.com", port: null });
-    expect(listForges(db)).toHaveLength(4);
+    // Scoped to the origins this test made, past the two migration 003 seeds.
+    expect(listForges(db).filter((forge) => forge.host.endsWith(".example.com"))).toHaveLength(4);
   });
 });
 
 describe("findForge and getForge", () => {
   it("finds an origin without creating it", () => {
-    expect(findForge(db, "https", "github.com", null)).toBeUndefined();
-    const forge = upsertForge(db, { protocol: "https", host: "github.com", port: null });
-    expect(findForge(db, "https", "github.com", null)?.id).toBe(forge.id);
-    expect(findForge(db, "https", "github.com", 443)?.id).toBe(forge.id);
-    expect(findForge(db, "http", "github.com", null)).toBeUndefined();
+    // A host migration 003 does not seed, so the opening miss is a real one.
+    expect(findForge(db, "https", "bitbucket.org", null)).toBeUndefined();
+    const forge = upsertForge(db, { protocol: "https", host: "bitbucket.org", port: null });
+    expect(findForge(db, "https", "bitbucket.org", null)?.id).toBe(forge.id);
+    expect(findForge(db, "https", "bitbucket.org", 443)?.id).toBe(forge.id);
+    expect(findForge(db, "http", "bitbucket.org", null)).toBeUndefined();
   });
 
   it("returns undefined for an unknown id", () => {
@@ -210,8 +215,11 @@ describe("listForges", () => {
   it("sorts by host", () => {
     upsertForge(db, { protocol: "https", host: "zeta.example.com", port: null });
     upsertForge(db, { protocol: "https", host: "alpha.example.com", port: null });
+    // github.com and gitlab.com come from migration 003 and sort in with the rest.
     expect(listForges(db).map((forge) => forge.host)).toEqual([
       "alpha.example.com",
+      "github.com",
+      "gitlab.com",
       "zeta.example.com",
     ]);
   });

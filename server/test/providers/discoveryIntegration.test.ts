@@ -35,18 +35,15 @@ afterEach(async () => {
   rmSync(backupsDir, { recursive: true, force: true });
 });
 
+/**
+ * The real GitHub provider derives api.github.com from the forge host, and the
+ * mock pool is keyed on that, so this has to be the github.com forge and no
+ * other. Migration 003 already seeded exactly that row.
+ */
 function seed(): { forgeId: number; accountId: number; syncId: number } {
-  const forgeId = Number(
-    db.run(
-      "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-      "https",
-      "github.com",
-      null,
-      "github",
-      1,
-      1,
-    ).lastInsertRowid,
-  );
+  const forgeId = db.get<{ id: number }>(
+    "SELECT id FROM forges WHERE protocol = 'https' AND host = 'github.com' AND port IS NULL",
+  )!.id;
   const accountId = Number(
     db.run(
       `INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at)

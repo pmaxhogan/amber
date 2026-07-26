@@ -22,19 +22,21 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+let forgeId: number;
+
 function seedAccount(username = "octocat"): number {
-  db.run(
+  forgeId = db.run(
     "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
     "https",
-    "github.com",
+    "forge.example.com",
     null,
-    "github",
+    "generic",
     1,
     1,
-  );
+  ).lastInsertRowid;
   const account = db.run(
     "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-    1,
+    forgeId,
     username,
     1,
     1,
@@ -109,7 +111,7 @@ describe("002_starred_sync", () => {
     expect(() =>
       db.run(
         "INSERT INTO repos (forge_id, path, display_name, slug, short_id, managed_by_account_sync_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        1,
+        forgeId,
         "nodejs/node",
         "node",
         "nodejs-node-aaaaaaaa",
@@ -127,7 +129,7 @@ describe("002_starred_sync", () => {
       origin === undefined
         ? db.run(
             "INSERT INTO repos (forge_id, path, display_name, slug, short_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            1,
+            forgeId,
             path,
             "x",
             `${path.replace("/", "-")}-${shortId}`,
@@ -137,7 +139,7 @@ describe("002_starred_sync", () => {
           )
         : db.run(
             "INSERT INTO repos (forge_id, path, display_name, slug, short_id, origin, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            1,
+            forgeId,
             path,
             "x",
             `${path.replace("/", "-")}-${shortId}`,
