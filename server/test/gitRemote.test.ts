@@ -395,6 +395,21 @@ describe("upload-pack transport details", () => {
   });
 });
 
+describe("plugin encapsulation", () => {
+  /**
+   * The /git routes install a catch all content type parser so a write attempt
+   * reaches the read-only explanation instead of a 415. Fastify encapsulates
+   * parsers per registration context; if that ever stopped holding, every JSON
+   * body in /api would silently arrive as a raw stream, and the agent who hit
+   * it would be debugging a completely different file. Guard it here.
+   */
+  it("keeps the git remote content type parsers off the root instance", () => {
+    expect(server.app.hasContentTypeParser("*")).toBe(false);
+    expect(server.app.hasContentTypeParser("application/x-git-upload-pack-request")).toBe(false);
+    expect(server.app.hasContentTypeParser("application/json")).toBe(true);
+  });
+});
+
 describe("the /api/git-remote admin API", () => {
   it("starts disabled, mints a password once, rotates it, and disables", async () => {
     const fresh = await startTestServer();
@@ -452,6 +467,18 @@ describe("the /api/git-remote admin API", () => {
       const disabled = await fresh.app.inject({ method: "POST", url: "/api/git-remote/disable" });
       expect(disabled.json()).toMatchObject({ enabled: false });
       // Disabling destroys the hash, so no live credential is left behind.
+      expect(
+        fresh.db.get("SELECT value FROM kv WHERE key = 'git_remote.password_hash'"),
+      ).toBeUndefined();
+
+      // Rotating a disabled remote is refused rather than writing a hash that
+      // nothing could use, which would break that invariant.
+      const rotateWhileOff = await fresh.app.inject({
+        method: "POST",
+        url: "/api/git-remote/rotate",
+      });
+      expect(rotateWhileOff.statusCode).toBe(409);
+      expect(rotateWhileOff.json()).toMatchObject({ error: "git_remote_disabled" });
       expect(
         fresh.db.get("SELECT value FROM kv WHERE key = 'git_remote.password_hash'"),
       ).toBeUndefined();

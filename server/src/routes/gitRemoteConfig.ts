@@ -3,6 +3,7 @@ import type { FastifyPluginAsync } from "fastify";
 import {
   disableGitRemote,
   enableGitRemote,
+  GitRemoteDisabledError,
   readGitRemoteState,
   rotateGitRemotePassword,
   toGitRemoteConfig,
@@ -30,10 +31,18 @@ export const gitRemoteConfigRoutes: FastifyPluginAsync = async (app) => {
     return { ...toGitRemoteConfig(state, ctx.config.publicOrigin), password };
   });
 
-  app.post("/git-remote/rotate", (): GitRemoteSecret => {
-    const { state, password } = rotateGitRemotePassword(ctx.db);
-    log.info("git remote password rotated");
-    return { ...toGitRemoteConfig(state, ctx.config.publicOrigin), password };
+  app.post("/git-remote/rotate", (_request, reply): GitRemoteSecret | void => {
+    try {
+      const { state, password } = rotateGitRemotePassword(ctx.db);
+      log.info("git remote password rotated");
+      return { ...toGitRemoteConfig(state, ctx.config.publicOrigin), password };
+    } catch (error) {
+      if (error instanceof GitRemoteDisabledError) {
+        reply.code(409).send({ error: "git_remote_disabled", message: error.message });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.post("/git-remote/disable", (): GitRemoteConfig => {

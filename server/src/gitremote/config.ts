@@ -105,10 +105,21 @@ export function enableGitRemote(db: Db): { state: GitRemoteState; password: stri
   return mintPassword(db, true);
 }
 
-/** Mints a fresh password without changing the enabled flag. */
+export class GitRemoteDisabledError extends Error {
+  override readonly name = "GitRemoteDisabledError";
+}
+
+/**
+ * Mints a fresh password, leaving the remote enabled. Rotating a disabled
+ * remote is refused rather than quietly writing a hash nothing can use: that
+ * would break the invariant that a disabled remote stores no credential at all.
+ * Enabling is the way to get a password back.
+ */
 export function rotateGitRemotePassword(db: Db): { state: GitRemoteState; password: string } {
-  const current = readGitRemoteState(db);
-  return mintPassword(db, current.enabled);
+  if (!readGitRemoteState(db).enabled) {
+    throw new GitRemoteDisabledError("The git remote is disabled. Enable it to get a password.");
+  }
+  return mintPassword(db, true);
 }
 
 /**

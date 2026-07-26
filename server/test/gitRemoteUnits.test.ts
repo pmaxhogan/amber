@@ -6,6 +6,7 @@ import {
   buildCloneUrlTemplate,
   disableGitRemote,
   enableGitRemote,
+  GitRemoteDisabledError,
   KV_ENABLED,
   readGitRemoteState,
   rotateGitRemotePassword,
@@ -175,7 +176,7 @@ describe("git remote kv state", () => {
     expect(state.rotatedAt).toBeGreaterThan(0);
   });
 
-  it("rotates without changing the enabled flag", () => {
+  it("rotates while enabled and refuses while disabled", () => {
     const first = enableGitRemote(db);
     const second = rotateGitRemotePassword(db);
     expect(second.password).not.toBe(first.password);
@@ -183,8 +184,9 @@ describe("git remote kv state", () => {
     expect(second.state.passwordHash).not.toBe(first.state.passwordHash);
 
     disableGitRemote(db);
-    const third = rotateGitRemotePassword(db);
-    expect(third.state.enabled).toBe(false);
+    expect(() => rotateGitRemotePassword(db)).toThrow(GitRemoteDisabledError);
+    // The invariant holds: a disabled remote stores no credential at all.
+    expect(readGitRemoteState(db).passwordHash).toBeNull();
   });
 
   it("destroys the hash on disable", () => {
