@@ -7,12 +7,35 @@ import type { Readable, Writable } from "node:stream";
  * Minimal hardened git spawn helper for the read-only serving paths (the smart
  * HTTP remote and the export endpoints).
  *
- * NOTE FOR A LATER MERGE: sync/gitCli.ts is the fetching side's wrapper and is
- * owned by the sync engine. The two overlap on environment scrubbing and the
- * kill timer; once both exist, fold this into gitCli.ts. It is kept separate
- * for now so the serving paths never depend on the fetch credential machinery,
- * which they must never use: nothing here ever takes a credential, a remote, or
- * a network protocol.
+ * Nothing here ever takes a credential, a remote, or a network protocol, which
+ * is the property that keeps the serving paths independent of the fetch
+ * credential machinery in sync/gitCli.ts.
+ *
+ * TODO: fold this into sync/gitCli.ts. Both wrappers scrub the environment,
+ * pin a kill timer, and track children for shutdown, and gitCli's spawnGit is
+ * already written as the streaming variant for upload-pack. The merge was
+ * deferred because it is not a rename; whoever does it must handle all of:
+ *
+ *  - Two consumers, not one: gitremote/routes.ts AND export/archive.ts, which
+ *    uses runGitOk and spawnGit for git archive, cat-file and ls-tree.
+ *  - Return type. spawnGit here returns ChildProcessByStdio<Writable, Readable,
+ *    Readable>, so child.stdin/stdout/stderr are non-null. gitCli's returns a
+ *    bare ChildProcess, where all three are nullable; gitremote pipes the
+ *    request body into stdin and streams stdout straight back, so every site
+ *    needs a null check or a typed wrapper.
+ *  - maxBuffer. 64MB here vs 4MB in gitCli. A large repository's ref
+ *    advertisement can exceed 4MB, so gitCli's cap has to be raised or made
+ *    per-call before anything serves through it.
+ *  - Four renamed exports the tests and callers use: liveGitProcessCount ->
+ *    activeGitProcessCount, GitSpawnError -> GitError, runGitCapture/runGitOk
+ *    -> runGit, and buildGitEnv, which gitCli keeps private as buildEnv.
+ *  - gitCli's spawnGit calls ensureGitRuntime(stateDir), so the serving paths
+ *    would gain a state-directory dependency they do not have today. Note the
+ *    flip side: that also means ensureGitRuntime does NOT currently harden the
+ *    serving paths, which do their own env scrubbing in buildGitEnv.
+ *
+ * gitRemote.test.ts, gitRemoteUnits.test.ts and export.test.ts all exercise
+ * this module directly and must stay green through the swap.
  */
 
 export interface GitSpawnOptions {
