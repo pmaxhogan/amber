@@ -1,9 +1,17 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * Smoke suite. It runs against the built Docker image started with
- * INSECURE_ALLOW_PUBLIC_ACCESS=1, which binds 127.0.0.1 inside the container,
- * so the compose file publishes the port and the tests talk to localhost.
+ * Smoke suite against the built Docker image.
+ *
+ * Reaching it needs a decision that is still open. INSECURE_ALLOW_PUBLIC_ACCESS
+ * binds 127.0.0.1 inside the container, and a published port DNATs to the
+ * container's own interface, so `docker run -p 8080:8080` plus a host-side
+ * request cannot work. build-image.yml sidesteps this by probing with
+ * `docker exec`, which is fine for curl but not for a browser.
+ *
+ * Whoever enables these tests picks one of: run the container with
+ * `--network host`, run Playwright inside the container, or stand up a real
+ * Cloudflare Access setup and drop the insecure flag.
  */
 const baseURL = process.env.AMBER_E2E_BASE_URL ?? "http://127.0.0.1:8080";
 

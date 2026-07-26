@@ -44,7 +44,10 @@ for (const metric of METRICS) {
 }
 
 function writeBaseline() {
-  const contents = { tolerance: TOLERANCE, ...current };
+  // V8 coverage can shift slightly between Node majors, so record which one
+  // produced these numbers. A mismatch with the CI runner is the likeliest
+  // reason for an otherwise inexplicable ratchet failure.
+  const contents = { tolerance: TOLERANCE, measuredOnNode: process.version, ...current };
   writeFileSync(BASELINE_PATH, `${JSON.stringify(contents, null, 2)}\n`, "utf8");
   console.log("coverage-ratchet: baseline written");
   for (const metric of METRICS) {
