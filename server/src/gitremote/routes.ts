@@ -10,14 +10,15 @@ import { readGitRemoteState } from "./config.ts";
 import { AuthThrottle } from "./throttle.ts";
 
 /**
- * Smart HTTP v2, read only. git-receive-pack is never spawned anywhere in the
- * codebase, so pushes are impossible by construction rather than by check: the
- * only service name this module will act on is the upload side, and it is
- * compared against a literal allow list before any process is created.
+ * Smart HTTP v2, read only. Pushes are impossible by construction rather than
+ * by check: the write side of the git protocol is not named anywhere in this
+ * codebase, so there is no code path that could spawn it. The only service this
+ * module will act on is the upload side, matched against a literal allow list
+ * before any process is created.
  *
- * Anything else under /git/ falls through to a 403 handler that never inspects
- * what was asked for, which is why the push service name does not appear here
- * at all.
+ * Everything else under /git/ falls through to a 403 handler that never
+ * inspects what was asked for, so no block list has to name the write service
+ * either.
  */
 
 /** The one and only service Amber will ever run for a client. */
