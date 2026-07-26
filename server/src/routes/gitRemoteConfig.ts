@@ -1,4 +1,4 @@
-import type { GitRemoteConfig, GitRemoteSecret } from "@amber/shared";
+import { updateGitRemoteSchema, type GitRemoteConfig, type GitRemoteSecret } from "@amber/shared";
 import type { FastifyPluginAsync } from "fastify";
 import {
   disableGitRemote,
@@ -6,8 +6,10 @@ import {
   GitRemoteDisabledError,
   readGitRemoteState,
   rotateGitRemotePassword,
+  setGitRemoteUsername,
   toGitRemoteConfig,
 } from "../gitremote/config.ts";
+import { parseBody } from "./validate.ts";
 
 /**
  * /api/git-remote enable, disable, and rotate.
@@ -24,6 +26,18 @@ export const gitRemoteConfigRoutes: FastifyPluginAsync = async (app) => {
     toGitRemoteConfig(readGitRemoteState(ctx.db), ctx.config.publicOrigin);
 
   app.get("/git-remote", (): GitRemoteConfig => view());
+
+  /**
+   * Renames the basic-auth user. Works enabled or disabled, and never touches
+   * the password: existing clones keep working only if their stored URL is
+   * updated too, which is why the response carries the fresh clone template.
+   */
+  app.patch("/git-remote", (request): GitRemoteConfig => {
+    const { username } = parseBody(updateGitRemoteSchema, request);
+    const state = setGitRemoteUsername(ctx.db, username);
+    log.info({ enabled: state.enabled }, "git remote username changed");
+    return toGitRemoteConfig(state, ctx.config.publicOrigin);
+  });
 
   app.post("/git-remote/enable", (): GitRemoteSecret => {
     const { state, password } = enableGitRemote(ctx.db);

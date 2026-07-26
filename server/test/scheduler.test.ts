@@ -1,8 +1,15 @@
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import type { ResolvedSettings, SyncErrorKind, SyncRun } from "@amber/shared";
+import {
+  eventPayloadSchemas,
+  type AmberEvent,
+  type ResolvedSettings,
+  type SyncErrorKind,
+  type SyncRun,
+} from "@amber/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db/db.ts";
+import { EventBus } from "../src/events.ts";
 import { backoffDelayMs, BACKOFF_BASE_MS, jitteredIntervalMs } from "../src/sync/backoff.ts";
 import { setNextSyncAt } from "../src/sync/repoStore.ts";
 import {
@@ -593,5 +600,66 @@ describe("graceful shutdown", () => {
     await scheduler.stop();
     expect(scheduler.status().activeSyncs).toBe(1);
     hold.get(repoId)?.();
+  });
+});
+
+describe("status.changed events", () => {
+  it("publishes the queue counters when they move and stays quiet when they do not", async () => {
+    const forgeId = insertForge(db, { host: "a.test" });
+    insertRepo(db, { forgeId, path: "acme/one" });
+    const events = new EventBus();
+    const seen: AmberEvent[] = [];
+    events.subscribe((event) => {
+      if (event.type === "status.changed") {
+        seen.push(event);
+      }
+    });
+
+    const scheduler = makeScheduler({ events });
+    await scheduler.start();
+    await new Promise((done) => setTimeout(done, 10));
+
+    expect(seen.length).toBeGreaterThan(0);
+    for (const event of seen) {
+      // The payload the header binds to, parsed by the shared contract.
+      expect(() => eventPayloadSchemas["status.changed"].parse(event.payload)).not.toThrow();
+    }
+
+    // An idle scheduler re-arms its timer constantly; that must not turn into
+    // a stream of identical events.
+    const before = seen.length;
+    scheduler.tick();
+    scheduler.tick();
+    expect(seen).toHaveLength(before);
+  });
+
+  it("reports a non-zero queue depth while a run is held open", async () => {
+    const forgeId = insertForge(db, { host: "a.test" });
+    const first = insertRepo(db, { forgeId, path: "acme/one" });
+    insertRepo(db, { forgeId, path: "acme/two" });
+    const hold = new Map<number, () => void>();
+    const events = new EventBus();
+    const seen: Record<string, unknown>[] = [];
+    events.subscribe((event) => {
+      if (event.type === "status.changed") {
+        seen.push(event.payload);
+      }
+    });
+
+    const scheduler = makeScheduler({
+      events,
+      runSync: fakeSync({ hold }),
+      globalSettings: globals({ max_concurrent_syncs: 1 }),
+    });
+    await scheduler.start();
+    await new Promise((done) => setTimeout(done, 10));
+
+    const busy = seen.map((payload) => eventPayloadSchemas["status.changed"].parse(payload));
+    expect(busy.some((status) => status.activeSyncs === 1)).toBe(true);
+    expect(busy.every((status) => status.breakerOpen === false)).toBe(true);
+
+    hold.get(first)?.();
+    await new Promise((done) => setTimeout(done, 10));
+    hold.forEach((release) => release());
   });
 });

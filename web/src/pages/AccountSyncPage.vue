@@ -6,14 +6,10 @@ import InputNumber from "primevue/inputnumber";
 import Select from "primevue/select";
 import Tag from "primevue/tag";
 import ToggleSwitch from "primevue/toggleswitch";
-import type { Account, AccountSyncVisibility, Forge } from "@amber/shared";
+import type { Account, AccountSyncSource, AccountSyncVisibility, Forge } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
-import {
-  STARRED_SUPPORTED_FORGE_KINDS,
-  type AccountSyncRow,
-  type AccountSyncSource,
-} from "../api/types.ts";
+import { STARRED_SUPPORTED_FORGE_KINDS, type AccountSyncRow } from "../api/types.ts";
 import { absoluteTime, relativeTime } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
 import AppIcon from "../components/AppIcon.vue";

@@ -21,7 +21,7 @@ export const importRoutes: FastifyPluginAsync = async (app) => {
     const result = commitImport(db, text);
     for (const line of result.results) {
       if (line.action === "created" && line.repoId !== undefined) {
-        events.publish("repo.created", { id: line.repoId });
+        events.publish("repo.created", { repoId: line.repoId });
       }
     }
     return result;

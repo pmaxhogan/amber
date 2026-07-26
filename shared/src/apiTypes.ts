@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  cloneModeSchema,
   settingScopeSchema,
   type ResolvedSettings,
   type SettingsExplanation,
@@ -184,8 +185,32 @@ export const repoSchema = z.object({
   lastFetchHead: z.string().nullable(),
   createdAt: epochMsSchema,
   updatedAt: epochMsSchema,
+
+  /**
+   * Denormalized read-only extras. `clone_mode` and `sync_enabled` are layered
+   * settings and the outcome pair belongs to the newest sync_runs row, so none
+   * of them are columns on `repos`. The listing endpoint resolves them for the
+   * whole page at once and attaches them here, because the repos table renders
+   * a mode column and an outcome icon per row and would otherwise need one
+   * request per row.
+   *
+   * Optional because only `GET /api/repos` populates them: the single-repo
+   * reads return the row as stored.
+   */
+  cloneMode: cloneModeSchema.optional(),
+  syncEnabled: z.boolean().optional(),
+  lastOutcome: syncOutcomeSchema.optional(),
+  lastErrorKind: syncErrorKindSchema.optional(),
 });
 export type Repo = z.infer<typeof repoSchema>;
+
+/** The extras `GET /api/repos` adds on top of the stored row. */
+export interface RepoListExtras {
+  cloneMode: z.infer<typeof cloneModeSchema>;
+  syncEnabled: boolean;
+  lastOutcome?: SyncOutcome;
+  lastErrorKind?: SyncErrorKind;
+}
 
 export const REPO_SORT_FIELDS = [
   "display_name",
@@ -335,7 +360,26 @@ export type SettingsScopeParams = z.infer<typeof settingsScopeParamsSchema>;
 export const settingsPatchSchema = z.record(z.string(), z.unknown());
 export type SettingsPatch = z.infer<typeof settingsPatchSchema>;
 
-/** What GET and PUT /api/settings/:scopeType/:scopeId? return. */
+/**
+ * What GET and PUT /api/settings/:scopeType/:scopeId? return.
+ *
+ * `values` is SPARSE: only the keys actually stored at this scope, never the
+ * resolved set. The distinction is load-bearing for the settings UI, which has
+ * to tell "set here to the same value as the default" apart from "inherited" -
+ * impossible if the server answered with resolved values.
+ *
+ * PUT takes the same shape of patch, where a null value CLEARS the override at
+ * this scope and lets resolution fall back to the next layer.
+ *
+ * Declared as a strict object rather than a record so that a client parsing it
+ * cannot quietly mistake the envelope keys for setting keys.
+ */
+export const scopeSettingsResponseSchema = z.object({
+  scopeType: settingScopeSchema,
+  scopeId: z.number().int().positive().nullable(),
+  values: z.record(z.string(), z.unknown()),
+});
+
 export interface ScopeSettingsResponse {
   scopeType: SettingsScopeParams["scopeType"];
   scopeId: number | null;
@@ -343,7 +387,23 @@ export interface ScopeSettingsResponse {
   values: Partial<ResolvedSettings>;
 }
 
+export const settingSourceSchema = z.union([settingScopeSchema, z.literal("default")]);
+export type SettingSource = z.infer<typeof settingSourceSchema>;
+
+/** One entry of the explain view: the winning value and the scope that won it. */
+export const settingExplanationSchema = z.object({
+  value: z.unknown(),
+  source: settingSourceSchema,
+  sourceId: z.number().int().positive().nullable(),
+});
+
 /** What GET /api/repos/:id/effective-settings returns. */
+export const effectiveSettingsResponseSchema = z.object({
+  repoId: idSchema,
+  settings: z.record(z.string(), z.unknown()),
+  explanation: z.record(z.string(), settingExplanationSchema),
+});
+
 export interface EffectiveSettingsResponse {
   repoId: number;
   settings: ResolvedSettings;
@@ -382,6 +442,16 @@ export const accountSyncSchema = z.object({
   updatedAt: epochMsSchema,
 });
 export type AccountSync = z.infer<typeof accountSyncSchema>;
+
+/**
+ * GET /api/account-syncs answers with a `rows` envelope rather than the bare
+ * array /api/forges and /api/accounts use. Kept as-is and pinned here so both
+ * sides agree, rather than churning a working route for symmetry.
+ */
+export const accountSyncListResponseSchema = z.object({
+  rows: z.array(accountSyncSchema),
+});
+export type AccountSyncListResponse = z.infer<typeof accountSyncListResponseSchema>;
 
 /**
  * Create payload. Named "upsert" for historical reasons: creating a second sync
@@ -437,6 +507,17 @@ export const gitRemoteSecretSchema = gitRemoteConfigSchema.extend({
 });
 export type GitRemoteSecret = z.infer<typeof gitRemoteSecretSchema>;
 
+/**
+ * PATCH /api/git-remote body. Only the username is editable; the password is
+ * never user-supplied, so there is deliberately no field for one. Renaming
+ * works whether the remote is enabled or disabled, so the new name is already
+ * in place the next time it is turned on.
+ */
+export const updateGitRemoteSchema = z.object({
+  username: z.string().trim().min(1).max(64),
+});
+export type UpdateGitRemote = z.infer<typeof updateGitRemoteSchema>;
+
 export const statusSchema = z.object({
   version: z.string(),
   insecureMode: z.boolean(),
@@ -484,5 +565,67 @@ export const amberEventSchema = z.object({
 });
 export type AmberEvent = z.infer<typeof amberEventSchema>;
 
+/**
+ * The pinned SSE payload contract.
+ *
+ * The envelope stays an open record so a publisher may attach extra diagnostic
+ * fields without breaking a client, but these keys are guaranteed present for
+ * their event type and the server is tested against them. Every repo-scoped
+ * event names its subject `repoId` - never `id` - so one client-side parse
+ * covers all of them.
+ */
+export const eventPayloadSchemas = {
+  "sync.started": z.object({ repoId: idSchema }),
+  "sync.finished": z.object({ repoId: idSchema, outcome: syncOutcomeSchema }),
+  "repo.created": z.object({ repoId: idSchema }),
+  "repo.updated": z.object({ repoId: idSchema }),
+  "repo.deleted": z.object({ repoId: idSchema }),
+  "account_sync.finished": z.object({ accountSyncId: idSchema }),
+  "status.changed": z.object({
+    activeSyncs: z.number().int().nonnegative(),
+    queueDepth: z.number().int().nonnegative(),
+    breakerOpen: z.boolean(),
+  }),
+} as const satisfies Record<AmberEventType, z.ZodType>;
+
+/**
+ * Every field any pinned payload may carry, all optional. Clients that handle
+ * several event types in one place parse against this and read the keys that
+ * apply to the type they matched.
+ */
+export const eventPayloadSchema = z.object({
+  repoId: idSchema.optional(),
+  accountSyncId: idSchema.optional(),
+  outcome: syncOutcomeSchema.optional(),
+  activeSyncs: z.number().int().nonnegative().optional(),
+  queueDepth: z.number().int().nonnegative().optional(),
+  breakerOpen: z.boolean().optional(),
+});
+export type EventPayload = z.infer<typeof eventPayloadSchema>;
+
 export const exportFormatSchema = z.enum(["zip", "tar.gz", "7z"]);
 export type ExportFormat = z.infer<typeof exportFormatSchema>;
+
+// ---------------------------------------------------------------------------
+// File manifest
+// ---------------------------------------------------------------------------
+
+/**
+ * One file in the manifest `GET /api/repos/:id/tree` returns. Only blobs are
+ * listed - the folder download recreates directories from the paths - so there
+ * is no entry type to discriminate on. `oid` is the blob id the matching
+ * `/blob` request resolves to.
+ */
+export const treeEntrySchema = z.object({
+  path: z.string().min(1),
+  mode: z.string(),
+  size: z.number().int().nonnegative(),
+  oid: z.string().min(1),
+});
+export type TreeEntry = z.infer<typeof treeEntrySchema>;
+
+/** Paged manifest. `ref` is the resolved commit the manifest was taken at. */
+export const treePageSchema = pageSchema(treeEntrySchema).extend({
+  ref: z.string().min(1),
+});
+export type TreePage = z.infer<typeof treePageSchema>;

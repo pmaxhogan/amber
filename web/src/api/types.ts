@@ -2,26 +2,23 @@ import { z } from "zod";
 import {
   accountSchema,
   accountSyncSchema,
-  cloneModeSchema,
   forgeSchema,
   pageSchema,
   repoSchema,
-  settingScopeSchema,
-  syncOutcomeSchema,
-  syncErrorKindSchema,
+  settingExplanationSchema,
   syncRunSchema,
-  upsertAccountSyncSchema,
   type SettingKey,
   type SettingScope,
+  type SettingSource,
 } from "@amber/shared";
 
 /**
- * Wire shapes the web app needs that shared/src/apiTypes.ts does not (yet)
- * declare. Everything here is additive on top of a shared schema so the later
- * integration pass can fold any of it back into shared without a rewrite.
+ * Web-side view of the API surface.
  *
- * Each block notes the assumption it encodes; those assumptions are the
- * API-contract questions reported alongside this work.
+ * Everything the two sides share now lives in shared/src/apiTypes.ts and is
+ * imported here; this file holds only the client-only helpers (derived display
+ * state, format lists, scope refs) plus thin aliases that keep call sites
+ * reading naturally.
  */
 
 // ---------------------------------------------------------------------------
@@ -29,20 +26,15 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * The repos table shows a "mode" column and a last-sync outcome icon. Neither
- * lives on `repos` in the data model: clone_mode is a layered setting and the
- * outcome belongs to the newest sync_run. Resolving either per row would be one
- * request per row, so the list endpoint is assumed to denormalize them.
+ * The repos table shows a mode column and a last-sync outcome icon. Neither is
+ * a column on `repos`: clone_mode is a layered setting and the outcome belongs
+ * to the newest sync_run, so `GET /api/repos` denormalizes them onto each row.
  *
- * They are optional so the UI degrades to "-" (mode) and an inferred outcome
- * (from lastSuccessAt / lastError) rather than failing to parse.
+ * They stay optional on the shared schema because only the listing populates
+ * them, which is why the UI still falls back to "-" for the mode and to an
+ * inferred outcome when it is rendering a row from some other endpoint.
  */
-export const repoRowSchema = repoSchema.extend({
-  cloneMode: cloneModeSchema.optional(),
-  syncEnabled: z.boolean().optional(),
-  lastOutcome: syncOutcomeSchema.optional(),
-  lastErrorKind: syncErrorKindSchema.optional(),
-});
+export const repoRowSchema = repoSchema;
 export type RepoRow = z.infer<typeof repoRowSchema>;
 
 export const repoPageSchema = pageSchema(repoRowSchema);
@@ -76,10 +68,9 @@ export function deriveOutcome(row: {
 // ---------------------------------------------------------------------------
 
 /**
- * ARCHITECTURE.md documents server-side pagination for /api/repos only, so the
- * other collections are read as bare arrays. A strict parse here is deliberate:
- * if the server envelopes them the integration pass fails loudly instead of
- * silently accepting either shape.
+ * Forges and accounts answer with bare arrays; account syncs answer with a
+ * `rows` envelope. The asymmetry is the server's, pinned in shared rather than
+ * papered over here.
  */
 export const forgeListSchema = z.array(forgeSchema);
 export const accountListSchema = z.array(accountSchema);
@@ -88,26 +79,8 @@ export const accountListSchema = z.array(accountSchema);
 // Account syncs
 // ---------------------------------------------------------------------------
 
-/**
- * `source` is in the data model (account_syncs.source, 'owned' | 'starred')
- * but missing from the shared accountSyncSchema. This is the one field the web
- * app genuinely cannot work without: the Account Sync page is specified to pick
- * between owned and starred discovery.
- */
-export const accountSyncSourceSchema = z.enum(["owned", "starred"]);
-export type AccountSyncSource = z.infer<typeof accountSyncSourceSchema>;
-
-export const accountSyncRowSchema = accountSyncSchema.extend({
-  source: accountSyncSourceSchema.default("owned"),
-});
+export const accountSyncRowSchema = accountSyncSchema;
 export type AccountSyncRow = z.infer<typeof accountSyncRowSchema>;
-
-export const accountSyncListSchema = z.array(accountSyncRowSchema);
-
-export const upsertAccountSyncBodySchema = upsertAccountSyncSchema.extend({
-  source: accountSyncSourceSchema.default("owned"),
-});
-export type UpsertAccountSyncBody = z.input<typeof upsertAccountSyncBodySchema>;
 
 /** Starred discovery is GitHub-only for now; the UI blocks it elsewhere. */
 export const STARRED_SUPPORTED_FORGE_KINDS = ["github"] as const;
@@ -117,26 +90,14 @@ export const STARRED_SUPPORTED_FORGE_KINDS = ["github"] as const;
 // ---------------------------------------------------------------------------
 
 /**
- * GET /api/settings/:scopeType/:scopeId? is read as the overrides STORED at
- * that scope, sparse - not the resolved values. The specified UI ("inherited
- * vs set" plus a clear-override control) is impossible with resolved values,
- * because a value equal to the default is indistinguishable from an inherited
- * one.
+ * The overrides STORED at one scope, sparse. Not the resolved values: the
+ * "inherited vs set here" distinction the settings UI is built on is
+ * impossible against resolved values, because a value equal to the default
+ * reads identically to an inherited one.
  */
-export const settingsOverridesSchema = z.record(z.string(), z.unknown());
 export type SettingsOverrides = Partial<Record<SettingKey, unknown>>;
 
-export const settingSourceSchema = z.union([settingScopeSchema, z.literal("default")]);
-export type SettingSource = z.infer<typeof settingSourceSchema>;
-
-export const settingExplanationSchema = z.object({
-  value: z.unknown(),
-  source: settingSourceSchema,
-  sourceId: z.number().int().nullable().default(null),
-});
-
-/** Shape of GET /api/repos/:id/effective-settings, keyed by setting key. */
-export const effectiveSettingsSchema = z.record(z.string(), settingExplanationSchema);
+export type { SettingSource };
 
 export interface SettingExplanation {
   value: unknown;
@@ -144,6 +105,8 @@ export interface SettingExplanation {
   sourceId: number | null;
 }
 export type EffectiveSettings = Partial<Record<SettingKey, SettingExplanation>>;
+
+export { settingExplanationSchema };
 
 /** Which scope a settings editor is pointed at. */
 export interface SettingsScopeRef {
@@ -161,39 +124,4 @@ export type ExportFormatValue = (typeof EXPORT_FORMATS)[number];
 export const EXPORT_KINDS = ["source", "gitdir"] as const;
 export type ExportKind = (typeof EXPORT_KINDS)[number];
 
-/**
- * GET /api/repos/:id/tree returns a paged file manifest. Only the path is
- * load-bearing for the folder download; size drives the progress bar when the
- * server supplies it.
- */
-export const treeEntrySchema = z.object({
-  path: z.string().min(1),
-  size: z.number().int().nonnegative().nullable().default(null),
-  type: z.enum(["blob", "tree"]).default("blob"),
-  mode: z.string().optional(),
-});
-export type TreeEntry = z.infer<typeof treeEntrySchema>;
-
-export const treePageSchema = pageSchema(treeEntrySchema);
-export type TreePage = z.infer<typeof treePageSchema>;
-
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
-
-/**
- * AmberEvent.payload is `Record<string, unknown>` in the contract. These are
- * the payload fields the UI reads; every one is optional and a payload that
- * does not match is ignored rather than thrown on, so an unexpected shape
- * degrades to a stale row instead of a broken page.
- */
-export const eventPayloadSchema = z.object({
-  repoId: z.number().int().positive().optional(),
-  repo: repoRowSchema.partial().optional(),
-  accountSyncId: z.number().int().positive().optional(),
-  outcome: syncOutcomeSchema.optional(),
-  activeSyncs: z.number().int().nonnegative().optional(),
-  queueDepth: z.number().int().nonnegative().optional(),
-  breakerOpen: z.boolean().optional(),
-});
-export type EventPayload = z.infer<typeof eventPayloadSchema>;
+export type { TreeEntry, TreePage } from "@amber/shared";

@@ -189,6 +189,8 @@ export class Scheduler {
   #started = false;
   #stopping = false;
 
+  #lastPublishedStatus: SchedulerStatus | undefined;
+
   #breakerWindow: { forgeId: number }[] = [];
   #breakerOpenUntil = 0;
   #breakerPauseMs = BREAKER_BASE_PAUSE_MS;
@@ -503,10 +505,34 @@ export class Scheduler {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * Push the queue counters out over SSE so the header does not have to poll.
+   *
+   * Called from #arm, which runs after every state change (start, enqueue,
+   * tick, and each finished run), and deduped against the last published
+   * triple: an idle instance re-arms its timer constantly and must not turn
+   * that into a stream of identical events.
+   */
+  #publishStatus(): void {
+    const next = this.status();
+    const last = this.#lastPublishedStatus;
+    if (
+      last !== undefined &&
+      last.queueDepth === next.queueDepth &&
+      last.activeSyncs === next.activeSyncs &&
+      last.breakerOpen === next.breakerOpen
+    ) {
+      return;
+    }
+    this.#lastPublishedStatus = next;
+    this.#options.events?.publish("status.changed", { ...next });
+  }
+
   #arm(): void {
     if (this.#stopping || !this.#started) {
       return;
     }
+    this.#publishStatus();
     if (this.#timer !== undefined) {
       clearTimeout(this.#timer);
       this.#timer = undefined;

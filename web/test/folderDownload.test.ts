@@ -10,8 +10,8 @@ import { stubApi } from "./helpers/stubApi.ts";
 import type { ApiClient } from "../src/api/client.ts";
 import type { TreeEntry } from "../src/api/types.ts";
 
-function entry(path: string, type: "blob" | "tree" = "blob"): TreeEntry {
-  return { path, size: 10, type, mode: "100644" };
+function entry(path: string): TreeEntry {
+  return { path, size: 10, mode: "100644", oid: `oid-${path}` };
 }
 
 interface FakeDirectory {
@@ -133,10 +133,11 @@ describe("fetchManifest", () => {
     expect(listTree).toHaveBeenCalledTimes(1);
   });
 
-  it("drops tree entries, since only blobs get written", async () => {
+  it("keeps every manifest row, because the server lists blobs only", async () => {
     const api = stubApi({
       listTree: vi.fn().mockResolvedValue({
-        rows: [entry("src", "tree"), entry("src/index.ts")],
+        ref: "abc123",
+        rows: [entry("src/index.ts"), entry("README.md")],
         total: 2,
         page: 1,
         perPage: 200,
@@ -145,7 +146,7 @@ describe("fetchManifest", () => {
 
     const entries = await fetchManifest(api, 7);
 
-    expect(entries.map((row) => row.path)).toEqual(["src/index.ts"]);
+    expect(entries.map((row) => row.path)).toEqual(["src/index.ts", "README.md"]);
   });
 });
 

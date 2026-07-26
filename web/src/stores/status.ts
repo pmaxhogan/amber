@@ -1,8 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import type { Status } from "@amber/shared";
+import { eventPayloadSchema, type Status } from "@amber/shared";
 import { ApiClientError, normalizeError, type ApiClient } from "../api/client.ts";
-import { eventPayloadSchema } from "../api/types.ts";
 import type { AmberEvent } from "@amber/shared";
 
 /** How long to coalesce event-driven status refreshes. */

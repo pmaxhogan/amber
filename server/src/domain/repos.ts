@@ -8,12 +8,15 @@ import type {
   RepoOrigin,
   RepoSortField,
   RepoState,
+  SyncErrorKind,
+  SyncOutcome,
   SyncRun,
   UpdateRepo,
 } from "@amber/shared";
 import type { Db } from "../db/db.ts";
 import { conflict, invalid, isUniqueViolation, notFound } from "./errors.ts";
 import { requireForge } from "./forges.ts";
+import { resolveSettingsForRepos } from "./settings.ts";
 
 /**
  * `forge_id` is IMMUTABLE. A repo cannot be re-pointed at another forge, which
@@ -223,6 +226,14 @@ const LAST_OUTCOME_SQL = `(
   LIMIT 1
 )`;
 
+/** The error classification of that same run, null on a successful one. */
+const LAST_ERROR_KIND_SQL = `(
+  SELECT sr.error_kind FROM sync_runs sr
+  WHERE sr.repo_id = repos.id
+  ORDER BY sr.started_at DESC, sr.id DESC
+  LIMIT 1
+)`;
+
 /** Escape the LIKE wildcards so a search for "100%" is not a match-anything. */
 function likePattern(term: string): string {
   return `%${term.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
@@ -262,16 +273,39 @@ export function listRepos(db: Db, query: RepoListQuery): Page<Repo> {
   const direction = DIR_SQL[query.dir];
   const offset = (query.page - 1) * query.perPage;
 
-  const rows = db.all<RepoRow>(
-    `SELECT ${REPO_COLUMNS} FROM repos ${whereSql}
-     ORDER BY ${orderBy} ${direction}, repos.id ${direction}
-     LIMIT ? OFFSET ?`,
+  const rows = db.all<RepoRow & { last_outcome: string | null; last_error_kind: string | null }>(
+    `SELECT ${REPO_COLUMNS},
+            ${LAST_OUTCOME_SQL} AS last_outcome,
+            ${LAST_ERROR_KIND_SQL} AS last_error_kind
+       FROM repos ${whereSql}
+      ORDER BY ${orderBy} ${direction}, repos.id ${direction}
+      LIMIT ? OFFSET ?`,
     ...params,
     query.perPage,
     offset,
   );
 
-  return { rows: rows.map(toRepo), total, page: query.page, perPage: query.perPage };
+  // One batch resolve for the whole page. The listing renders a mode column and
+  // a sync-enabled state per row, neither of which is a column on `repos`;
+  // resolving them per row would be several queries each.
+  const settings = resolveSettingsForRepos(
+    db,
+    rows.map((row) => row.id),
+  );
+
+  const listed = rows.map((row): Repo => {
+    const resolved = settings.get(row.id);
+    return {
+      ...toRepo(row),
+      cloneMode: resolved?.clone_mode,
+      syncEnabled: resolved?.sync_enabled,
+      lastOutcome: row.last_outcome === null ? undefined : (row.last_outcome as SyncOutcome),
+      lastErrorKind:
+        row.last_error_kind === null ? undefined : (row.last_error_kind as SyncErrorKind),
+    };
+  });
+
+  return { rows: listed, total, page: query.page, perPage: query.perPage };
 }
 
 export function countRepos(db: Db): number {

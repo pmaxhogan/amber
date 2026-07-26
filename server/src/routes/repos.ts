@@ -69,7 +69,9 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
       }
     }
     for (const id of result.ids) {
-      events.publish(body.action === "delete" ? "repo.deleted" : "repo.updated", { id });
+      events.publish(body.action === "delete" ? "repo.deleted" : "repo.updated", {
+        repoId: id,
+      });
     }
     return result;
   });
@@ -82,7 +84,7 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
   app.patch("/repos/:id", (request): Repo => {
     const { id } = parseParams(idParamsSchema, request);
     const repo = updateRepo(db, id, parseBody(updateRepoSchema, request));
-    events.publish("repo.updated", { id: repo.id });
+    events.publish("repo.updated", { repoId: repo.id });
     return repo;
   });
 
@@ -90,7 +92,7 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
     const { id } = parseParams(idParamsSchema, request);
     const { files } = parseQuery(deleteRepoQuerySchema, request);
     await deleteRepo(db, id, { withFiles: files, removeFiles });
-    events.publish("repo.deleted", { id });
+    events.publish("repo.deleted", { repoId: id });
     void reply.code(204);
     return null;
   });
@@ -104,7 +106,7 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
     const { id } = parseParams(idParamsSchema, request);
     const repo = requestSyncNow(db, id);
     scheduler?.enqueueNow(id);
-    events.publish("repo.updated", { id });
+    events.publish("repo.updated", { repoId: id });
     return repo;
   });
 

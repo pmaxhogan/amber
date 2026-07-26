@@ -71,7 +71,8 @@ export async function fetchManifest(
     if (entries.length >= result.total || result.rows.length === 0) break;
     page += 1;
   }
-  return entries.filter((entry) => entry.type === "blob");
+  // The manifest lists blobs only; directories are recreated from the paths.
+  return entries;
 }
 
 /** Create every intermediate directory for a repo-relative path. */

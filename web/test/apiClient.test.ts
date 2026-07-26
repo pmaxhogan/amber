@@ -133,7 +133,15 @@ describe("requests", () => {
   });
 
   it("serializes a JSON body and sets the content type", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(jsonResponse({ affected: 3 }));
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse({
+        action: "pause",
+        requested: 3,
+        affected: 3,
+        ids: [1, 2, 3],
+        missing: [],
+      }),
+    );
     const api = clientWith(fetchImpl as unknown as typeof fetch);
 
     await api.bulkRepos([1, 2, 3], "pause");
@@ -150,7 +158,9 @@ describe("requests", () => {
 
   it("builds the settings path without an id at global scope", async () => {
     // A fresh Response per call: a body can only be read once.
-    const fetchImpl = vi.fn(async () => jsonResponse({ clone_mode: "mirror" }));
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ scopeType: "global", scopeId: null, values: { clone_mode: "mirror" } }),
+    );
     const api = clientWith(fetchImpl as unknown as typeof fetch);
 
     await api.getSettings({ scopeType: "global", scopeId: null });

@@ -1,16 +1,24 @@
 import { z } from "zod";
 import {
   accountSchema,
+  accountSyncListResponseSchema,
+  accountSyncSchema,
   amberEventSchema,
   apiErrorSchema,
+  bulkRepoResponseSchema,
+  effectiveSettingsResponseSchema,
   forgeSchema,
   gitRemoteConfigSchema,
   gitRemoteSecretSchema,
   healthSchema,
   importCommitResponseSchema,
   importPreviewResponseSchema,
+  scopeSettingsResponseSchema,
   statusSchema,
+  treePageSchema,
   type Account,
+  type BulkRepoResponse,
+  type UpsertAccountSync,
   type AmberEvent,
   type BulkRepoAction,
   type CreateAccount,
@@ -31,15 +39,11 @@ import {
 } from "@amber/shared";
 import {
   accountListSchema,
-  accountSyncListSchema,
   accountSyncRowSchema,
-  effectiveSettingsSchema,
   forgeListSchema,
   repoPageSchema,
   repoRowSchema,
-  settingsOverridesSchema,
   syncRunPageSchema,
-  treePageSchema,
   type AccountSyncRow,
   type EffectiveSettings,
   type ExportFormatValue,
@@ -50,7 +54,6 @@ import {
   type SettingsScopeRef,
   type SyncRunPage,
   type TreePage,
-  type UpsertAccountSyncBody,
 } from "./types.ts";
 
 /**
@@ -326,11 +329,11 @@ export function createApiClient(options: ApiClientOptions = {}) {
     ids: number[],
     action: BulkRepoAction,
     files = false,
-  ): Promise<{ affected?: number }> =>
+  ): Promise<BulkRepoResponse> =>
     request("/api/repos/bulk", {
       method: "POST",
       body: { ids, action, files },
-      schema: z.object({ affected: z.number().int().nonnegative().optional() }),
+      schema: bulkRepoResponseSchema,
     });
 
   // -------------------------------------------------------------------------
@@ -343,9 +346,14 @@ export function createApiClient(options: ApiClientOptions = {}) {
       : `/api/settings/${scope.scopeType}/${scope.scopeId}`;
   }
 
+  /**
+   * Both settings calls answer with a {scopeType, scopeId, values} envelope
+   * whose `values` holds only the overrides stored AT that scope. Unwrapping
+   * here keeps every call site working in override maps.
+   */
   const getSettings = (scope: SettingsScopeRef, signal?: AbortSignal): Promise<SettingsOverrides> =>
-    request(settingsPath(scope), { schema: settingsOverridesSchema, signal }).then(
-      (raw_) => raw_ as SettingsOverrides,
+    request(settingsPath(scope), { schema: scopeSettingsResponseSchema, signal }).then(
+      (body) => body.values as SettingsOverrides,
     );
 
   /** A null value clears the override for that key at this scope. */
@@ -356,33 +364,36 @@ export function createApiClient(options: ApiClientOptions = {}) {
     request(settingsPath(scope), {
       method: "PUT",
       body: patch,
-      schema: settingsOverridesSchema,
-    }).then((raw_) => raw_ as SettingsOverrides);
+      schema: scopeSettingsResponseSchema,
+    }).then((body) => body.values as SettingsOverrides);
 
+  /** The explain view wants only the per-key breakdown, not the merged values. */
   const getEffectiveSettings = (repoId: number, signal?: AbortSignal): Promise<EffectiveSettings> =>
     request(`/api/repos/${repoId}/effective-settings`, {
-      schema: effectiveSettingsSchema,
+      schema: effectiveSettingsResponseSchema,
       signal,
-    }).then((raw_) => raw_ as EffectiveSettings);
+    }).then((body) => body.explanation as EffectiveSettings);
 
   // -------------------------------------------------------------------------
   // Account syncs
   // -------------------------------------------------------------------------
 
   const listAccountSyncs = (signal?: AbortSignal): Promise<AccountSyncRow[]> =>
-    request("/api/account-syncs", { schema: accountSyncListSchema, signal });
+    request("/api/account-syncs", { schema: accountSyncListResponseSchema, signal }).then(
+      (body) => body.rows,
+    );
 
-  const createAccountSync = (input: UpsertAccountSyncBody): Promise<AccountSyncRow> =>
+  const createAccountSync = (input: UpsertAccountSync): Promise<AccountSyncRow> =>
     request("/api/account-syncs", { method: "POST", body: input, schema: accountSyncRowSchema });
 
   const updateAccountSync = (
     id: number,
-    input: Partial<UpsertAccountSyncBody>,
+    input: Partial<UpsertAccountSync>,
   ): Promise<AccountSyncRow> =>
     request(`/api/account-syncs/${id}`, {
       method: "PATCH",
       body: input,
-      schema: accountSyncRowSchema,
+      schema: accountSyncSchema,
     });
 
   const deleteAccountSync = (id: number): Promise<void> =>

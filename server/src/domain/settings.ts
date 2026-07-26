@@ -47,22 +47,68 @@ function loadScopeValues(db: Db, scope: SettingScope, scopeId: number | null): S
 
   const values: ScopeValues = new Map();
   for (const row of rows) {
-    if (!isSettingKey(row.key)) {
-      continue;
-    }
-    let decoded: unknown;
-    try {
-      decoded = JSON.parse(row.value);
-    } catch {
-      continue;
-    }
-    const parsed = parseSettingValue(row.key, decoded);
-    if (parsed.ok) {
-      values.set(row.key, parsed.value);
-    }
+    absorb(values, row.key, row.value);
   }
   return values;
 }
+
+/**
+ * Decode one stored row into a scope map. A key that is no longer in the
+ * registry, or a value that no longer validates, is skipped rather than
+ * thrown on: one stale row must not break resolution for every other key.
+ */
+function absorb(into: ScopeValues, key: string, encoded: string): void {
+  if (!isSettingKey(key)) {
+    return;
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(encoded);
+  } catch {
+    return;
+  }
+  const parsed = parseSettingValue(key, decoded);
+  if (parsed.ok) {
+    into.set(key, parsed.value);
+  }
+}
+
+/**
+ * Every stored override for a whole set of scope ids, in one query.
+ *
+ * The batch reads exist because the repos listing resolves settings for up to
+ * 200 rows at once, and the per-repo path costs a repo lookup plus up to four
+ * scope queries each. Reading each scope once for the entire page keeps a page
+ * load at a fixed handful of queries no matter how many rows it holds.
+ */
+function loadScopeValuesMany(
+  db: Db,
+  scope: SettingScope,
+  scopeIds: readonly number[],
+): Map<number, ScopeValues> {
+  const out = new Map<number, ScopeValues>();
+  if (scopeIds.length === 0) {
+    return out;
+  }
+  const placeholders = scopeIds.map(() => "?").join(", ");
+  const rows = db.all<{ scope_id: number; key: string; value: string }>(
+    `SELECT scope_id, key, value FROM settings
+      WHERE scope_type = ? AND scope_id IN (${placeholders})`,
+    scope,
+    ...scopeIds,
+  );
+  for (const row of rows) {
+    let values = out.get(row.scope_id);
+    if (values === undefined) {
+      values = new Map();
+      out.set(row.scope_id, values);
+    }
+    absorb(values, row.key, row.value);
+  }
+  return out;
+}
+
+const EMPTY_SCOPE_VALUES: ScopeValues = new Map();
 
 interface RepoScopeRow {
   id: number;
@@ -165,6 +211,87 @@ export function resolveSettings(db: Db, repoId: number): ResolvedSettings {
 /** Same resolution, but reporting which scope supplied each value. */
 export function explainSettings(db: Db, repoId: number): SettingsExplanation {
   return explainFromLayers(layersForRepo(db, repoId));
+}
+
+/**
+ * Resolve settings for many repos at once, in a fixed number of queries: one
+ * for the repo rows, one for the forges' default accounts, and one per scope.
+ * The result maps repo id to its fully-merged settings; ids that name no repo
+ * are simply absent rather than throwing, because the caller is working from a
+ * page of rows that another request may have deleted from under it.
+ */
+export function resolveSettingsForRepos(
+  db: Db,
+  repoIds: readonly number[],
+): Map<number, ResolvedSettings> {
+  const out = new Map<number, ResolvedSettings>();
+  if (repoIds.length === 0) {
+    return out;
+  }
+
+  const placeholders = repoIds.map(() => "?").join(", ");
+  const repos = db.all<RepoScopeRow>(
+    `SELECT id, forge_id, account_override_id, force_anonymous
+       FROM repos WHERE id IN (${placeholders})`,
+    ...repoIds,
+  );
+  if (repos.length === 0) {
+    return out;
+  }
+
+  const forgeIds = [...new Set(repos.map((repo) => repo.forge_id))];
+  const defaultAccountByForge = new Map<number, number>();
+  const forgePlaceholders = forgeIds.map(() => "?").join(", ");
+  for (const row of db.all<{ id: number; forge_id: number }>(
+    `SELECT id, forge_id FROM accounts
+      WHERE is_default = 1 AND forge_id IN (${forgePlaceholders})`,
+    ...forgeIds,
+  )) {
+    defaultAccountByForge.set(row.forge_id, row.id);
+  }
+
+  const accountIdByRepo = new Map<number, number | null>();
+  for (const repo of repos) {
+    accountIdByRepo.set(
+      repo.id,
+      repo.force_anonymous === 1
+        ? null
+        : (repo.account_override_id ?? defaultAccountByForge.get(repo.forge_id) ?? null),
+    );
+  }
+
+  const accountIds = [
+    ...new Set([...accountIdByRepo.values()].filter((id): id is number => id !== null)),
+  ];
+
+  const globalValues = loadScopeValues(db, "global", null);
+  const repoValues = loadScopeValuesMany(db, "repo", repoIds);
+  const accountValues = loadScopeValuesMany(db, "account", accountIds);
+  const forgeValues = loadScopeValuesMany(db, "forge", forgeIds);
+
+  for (const repo of repos) {
+    const layers: Layer[] = [
+      { scope: "repo", scopeId: repo.id, values: repoValues.get(repo.id) ?? EMPTY_SCOPE_VALUES },
+    ];
+    const accountId = accountIdByRepo.get(repo.id) ?? null;
+    if (accountId !== null) {
+      layers.push({
+        scope: "account",
+        scopeId: accountId,
+        values: accountValues.get(accountId) ?? EMPTY_SCOPE_VALUES,
+      });
+    }
+    layers.push({
+      scope: "forge",
+      scopeId: repo.forge_id,
+      values: forgeValues.get(repo.forge_id) ?? EMPTY_SCOPE_VALUES,
+    });
+    layers.push({ scope: "global", scopeId: null, values: globalValues });
+
+    out.set(repo.id, settingsFromExplanation(explainFromLayers(layers)));
+  }
+
+  return out;
 }
 
 /** Global settings with no repo context, for the scheduler's own knobs. */

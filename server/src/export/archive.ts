@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { createGzip } from "node:zlib";
-import type { ExportFormat } from "@amber/shared";
+import type { ExportFormat, TreeEntry as SharedTreeEntry } from "@amber/shared";
 import { TarArchive, ZipArchive } from "archiver";
 import { runGitOk, spawnGit } from "../gitSpawn.ts";
 
@@ -21,12 +21,8 @@ import { runGitOk, spawnGit } from "../gitSpawn.ts";
  * - the repository directory always comes from the database row.
  */
 
-export interface TreeEntry {
-  path: string;
-  mode: string;
-  size: number;
-  oid: string;
-}
+/** One manifest row. Defined in shared so the web parser cannot drift from it. */
+export type TreeEntry = SharedTreeEntry;
 
 export class ExportError extends Error {
   override readonly name = "ExportError";

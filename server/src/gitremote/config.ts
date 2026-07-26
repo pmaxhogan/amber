@@ -105,6 +105,17 @@ export function enableGitRemote(db: Db): { state: GitRemoteState; password: stri
   return mintPassword(db, true);
 }
 
+/**
+ * Renames the basic-auth user. Deliberately independent of the enabled flag and
+ * of the password: the name is not a secret and carries no entropy, so changing
+ * it neither invalidates the stored hash nor requires the remote to be on. A
+ * rename while disabled is simply the name the next enable will use.
+ */
+export function setGitRemoteUsername(db: Db, username: string): GitRemoteState {
+  writeKv(db, KV_USERNAME, username);
+  return readGitRemoteState(db);
+}
+
 export class GitRemoteDisabledError extends Error {
   override readonly name = "GitRemoteDisabledError";
 }

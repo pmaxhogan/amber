@@ -1,6 +1,12 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
-import { exportFormatSchema, MAX_PER_PAGE, type ExportFormat, type Repo } from "@amber/shared";
+import {
+  exportFormatSchema,
+  MAX_PER_PAGE,
+  type ExportFormat,
+  type Repo,
+  type TreePage,
+} from "@amber/shared";
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
@@ -13,7 +19,6 @@ import {
   streamGitDirArchive,
   streamSourceArchive,
   type ArchiveHandle,
-  type TreeEntry,
 } from "../export/archive.ts";
 import { getRepo } from "../domain/repos.ts";
 import { repoDirFor } from "../repoDir.ts";
@@ -32,14 +37,6 @@ const treeQuerySchema = refQuerySchema.extend({
 });
 
 const blobQuerySchema = refQuerySchema.extend({ path: z.string().min(1).max(4096) });
-
-export interface TreePage {
-  ref: string;
-  rows: TreeEntry[];
-  total: number;
-  page: number;
-  perPage: number;
-}
 
 /**
  * Content-Disposition carries a display name and a ref, both of which are user

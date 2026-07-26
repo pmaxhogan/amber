@@ -18,7 +18,8 @@ import type {
 } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
-import { deriveOutcome, eventPayloadSchema, type RepoRow } from "../api/types.ts";
+import { eventPayloadSchema } from "@amber/shared";
+import { deriveOutcome, type RepoRow } from "../api/types.ts";
 import { forgeOrigin, humanBytes, pluralize, relativeTime, absoluteTime } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
 import { useEventsStore } from "../stores/events.ts";
@@ -613,6 +614,12 @@ onBeforeUnmount(() => {
       <Column header="Mode" :sortable="false">
         <template #body="{ data }">
           <span class="mono">{{ data.cloneMode ?? "-" }}</span>
+          <span
+            v-if="data.syncEnabled === false"
+            class="amber-muted repo-cell__path"
+            title="Syncing is switched off for this repository by a settings override."
+            >sync off</span
+          >
         </template>
       </Column>
 
@@ -620,7 +627,9 @@ onBeforeUnmount(() => {
         <template #body="{ data }">
           <div class="repo-cell">
             <OutcomeBadge :outcome="deriveOutcome(data)" :label="relativeTime(data.lastSyncAt)" />
-            <span class="repo-cell__path">{{ absoluteTime(data.lastSyncAt) }}</span>
+            <span class="repo-cell__path" :title="absoluteTime(data.lastSyncAt)">
+              {{ data.lastErrorKind ?? absoluteTime(data.lastSyncAt) }}
+            </span>
           </div>
         </template>
       </Column>
