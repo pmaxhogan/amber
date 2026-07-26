@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { ConfigError, loadConfig } from "../src/config.ts";
 
 const cfEnv = {
-  CF_ACCESS_TEAM_DOMAIN: "maxhogan.cloudflareaccess.com",
+  CF_ACCESS_TEAM_DOMAIN: "example.cloudflareaccess.com",
   CF_ACCESS_AUD: "a".repeat(64),
-  CF_ACCESS_ALLOWED_EMAILS: "pmaxhogan@gmail.com",
+  CF_ACCESS_ALLOWED_EMAILS: "owner@example.com",
 };
 
 describe("loadConfig - authentication gate", () => {
   it("boots when Cloudflare Access is fully configured", () => {
     const config = loadConfig({ ...cfEnv, DATA_DIR: "/data" });
     expect(config.insecureMode).toBe(false);
-    expect(config.cfAccess?.teamDomain).toBe("maxhogan.cloudflareaccess.com");
-    expect(config.cfAccess?.allowedEmails).toEqual(["pmaxhogan@gmail.com"]);
+    expect(config.cfAccess?.teamDomain).toBe("example.cloudflareaccess.com");
+    expect(config.cfAccess?.allowedEmails).toEqual(["owner@example.com"]);
   });
 
   it("refuses to boot with no auth and no insecure flag", () => {
@@ -125,7 +125,7 @@ describe("loadConfig - validation", () => {
     const config = loadConfig({ INSECURE_ALLOW_PUBLIC_ACCESS: "1", DATA_DIR: "/d" });
     expect(config.port).toBe(8080);
     expect(config.logLevel).toBe("info");
-    expect(config.publicOrigin).toBe("https://amber.maxhogan.dev");
+    expect(config.publicOrigin).toBe("http://localhost:8080");
   });
 
   it("strips a trailing slash from PUBLIC_ORIGIN", () => {

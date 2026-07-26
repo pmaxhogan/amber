@@ -44,8 +44,9 @@ docker compose -f docker-compose.local.yml up --build
 
 Amber has no built-in login. It expects to sit behind an authenticating proxy;
 the supported setup is a Cloudflare Tunnel with a Cloudflare Access application
-in front of it, and the server verifies the Access JWT on every request. See
-[`deploy/README.md`](deploy/README.md) for the full runbook.
+in front of it, and the server verifies the Access JWT on every request.
+[`deploy/docker-compose.example.yml`](deploy/docker-compose.example.yml) is a
+starting point for a real deployment.
 
 For local development you can set `INSECURE_ALLOW_PUBLIC_ACCESS=1`, which skips
 authentication entirely. Amber then binds `127.0.0.1` only, no matter what

@@ -1,0 +1,57 @@
+# Example production deployment. Copy it, change the two paths, and set the
+# uid to whoever owns the data directory on your host.
+#
+# Amber has no login of its own. It expects an authenticating proxy in front of
+# it and verifies that proxy's JWT on every request. The reference setup is a
+# Cloudflare Tunnel plus a Cloudflare Access application, configured through
+# CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD, and CF_ACCESS_ALLOWED_EMAILS in the env
+# file below.
+#
+# If you enable the read-only git remote, give its path a second Access
+# application with a Bypass policy. Otherwise git clients hit the SSO page
+# instead of the HTTP basic auth the remote expects.
+
+services:
+  amber:
+    image: ghcr.io/pmaxhogan/amber:latest
+    container_name: amber
+    pull_policy: always
+    restart: unless-stopped
+    # Needs to be able to write the data directory. Nothing in the image needs
+    # root, so use whichever uid:gid owns that directory on the host.
+    user: "1000:1000"
+    env_file:
+      - /srv/amber/.env
+    volumes:
+      # Amber creates backups/, state/, and logs/ inside this on first boot.
+      - /srv/amber:/data
+    ports:
+      - "8080:8080"
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Optional. Pulls a new :latest within a couple of minutes of a publish.
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: amber-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command:
+      # Label scoped: this sidecar only ever touches containers that opt in
+      # above, so it cannot restart anything else running on the host.
+      - --label-enable
+      - --cleanup
+      - --rolling-restart
+      - --interval
+      - "120"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

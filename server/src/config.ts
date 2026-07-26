@@ -41,7 +41,9 @@ export const envSchema = z.object({
   CF_ACCESS_ALLOWED_EMAILS: csvEmails.optional(),
   INSECURE_ALLOW_PUBLIC_ACCESS: booleanFlag.default(false),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
-  PUBLIC_ORIGIN: z.string().url().default("https://amber.maxhogan.dev"),
+  // Used to build the clone URLs shown in the UI. Deployments must set this;
+  // the default only makes sense for local development.
+  PUBLIC_ORIGIN: z.string().url().default("http://localhost:8080"),
 });
 
 export type Env = z.infer<typeof envSchema>;

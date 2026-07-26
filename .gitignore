@@ -5,6 +5,9 @@ coverage/
 .env.*
 !.env.example
 *.local
+*.local.md
+*.local.yml
+*.local.yaml
 tmp/
 tmp-data/
 test-results/

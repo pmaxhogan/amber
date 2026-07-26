@@ -262,7 +262,7 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   `Content-Encoding: gzip` - git clients send gzip), stdout streamed back as
   `application/x-git-upload-pack-result`. No request body buffering to disk.
 - `:slug` accepts the repo slug with optional trailing `.git`.
-  Clone URL shown in UI: `https://<user>:<pass>@amber.maxhogan.dev/git/<slug>.git`.
+  Clone URL shown in UI: `https://<user>:<pass>@<PUBLIC_ORIGIN host>/git/<slug>.git`.
 - Anything else under `/git/` (notably `service=git-receive-pack` or
   `POST /git-receive-pack`) -> 403 with a plain explanation. receive-pack is never
   spawned anywhere in the codebase; read-only holds by construction.
@@ -273,7 +273,8 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   when absent/wrong; per-IP failure throttling (in-memory token bucket).
 - Disabled (default): all /git routes return 404. Toggle + rotate live in the UI.
 - CF Access: main app enforces SSO; a second CF Access application scoped to
-  `amber.maxhogan.dev/git` carries a Bypass policy so git clients reach basic auth.
+  the deployment host's `/git` path carries a Bypass policy so git clients reach
+  basic auth.
 
 ## Export (export/archive.ts)
 
@@ -370,7 +371,8 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
 `STATE_DIR=$DATA_DIR/state`, `LOGS_DIR=$DATA_DIR/logs`, each overridable),
 `AMBER_SECRET_KEY`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`,
 `CF_ACCESS_ALLOWED_EMAILS`, `INSECURE_ALLOW_PUBLIC_ACCESS`, `LOG_LEVEL` (info),
-`PUBLIC_ORIGIN` (https://amber.maxhogan.dev, used for clone URLs).
+`PUBLIC_ORIGIN` (used for clone URLs; defaults to http://localhost:8080, so any
+real deployment must set it).
 `.env.example` documents every var; config.ts reads ONLY through zod validation.
 Everything not deployment-fundamental is a DB setting managed in the UI, not env.
 
@@ -445,20 +447,19 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
 - Watchtower on the NAS pulls `:latest` within ~2 min of publish (label-scoped,
   same pattern as mkvid).
 
-## Deployment (TrueNAS)
+## Deployment
 
-- Dataset `/mnt/alpha/apps/amber` (owner `apps`), mounted as `/data`; subdirs
-  `backups/`, `state/`, `logs/` created by the app at boot if missing (entrypoint
-  runs as the `apps` UID via compose `user:`, no root needed since the dataset is
-  apps-owned).
-- `deploy/docker-compose.nas.yml`: service `amber` (image ghcr.io/pmaxhogan/amber:
-  latest, env_file /mnt/alpha/apps/amber/.env, volume /mnt/alpha/apps/amber:/data,
-  watchtower labels, json-file logging caps, pull_policy always, restart
-  unless-stopped) + label-scoped watchtower sidecar. TrueNAS custom app name:
-  `amber` -> tunnel service URL `http://amber.ix-amber.svc.cluster.local:8080`.
-- Cloudflare: tunnel public hostname `amber.maxhogan.dev` (dashboard-managed);
-  CF Access app "Amber" (Google IdP only, instant auth/skip-picker, policy: allow
-  only pmaxhogan@gmail.com, custom amber logo) + second app on
-  `amber.maxhogan.dev/git` with Bypass Everyone policy.
-- `.env` on the NAS holds only: PORT, AMBER_SECRET_KEY, CF_ACCESS_TEAM_DOMAIN,
+- A single data directory (any host path) mounted as `/data`; subdirs
+  `backups/`, `state/`, `logs/` created by the app at boot if missing. The
+  container needs no root: compose sets `user:` to whichever uid owns that
+  directory on the host.
+- `deploy/docker-compose.example.yml`: service `amber` (image
+  ghcr.io/pmaxhogan/amber:latest, env_file and volume both pointing at the data
+  directory, watchtower labels, json-file logging caps, pull_policy always,
+  restart unless-stopped) plus an optional label-scoped watchtower sidecar.
+- Fronted by an authenticating proxy. The reference setup is a Cloudflare
+  Tunnel with a CF Access application on the public hostname, plus a second
+  Access application on that host's `/git` path with a Bypass Everyone policy
+  so git clients reach HTTP basic auth rather than the SSO page.
+- The deployment `.env` holds only: PORT, AMBER_SECRET_KEY, CF_ACCESS_TEAM_DOMAIN,
   CF_ACCESS_AUD, CF_ACCESS_ALLOWED_EMAILS, PUBLIC_ORIGIN, LOG_LEVEL.
