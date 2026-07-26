@@ -13,6 +13,7 @@ import ConfirmDialog from "../components/ConfirmDialog.vue";
 import CopyField from "../components/CopyField.vue";
 import ErrorState from "../components/ErrorState.vue";
 import PageHeader from "../components/PageHeader.vue";
+import ListSkeleton from "../components/ListSkeleton.vue";
 
 const api = useApi();
 const toast = useToaster();
@@ -148,7 +149,7 @@ onMounted(() => void load());
       <Button label="I have saved it" severity="secondary" size="small" @click="dismissReveal" />
     </div>
 
-    <p v-if="loading" class="amber-muted">Loading...</p>
+    <ListSkeleton v-if="loading" :rows="3" label="Loading the git remote settings" />
 
     <div v-else-if="error === null" class="amber-stack remote-grid">
       <article class="amber-card">

@@ -21,6 +21,7 @@ import ConfirmDialog from "../components/ConfirmDialog.vue";
 import EmptyState from "../components/EmptyState.vue";
 import ErrorState from "../components/ErrorState.vue";
 import PageHeader from "../components/PageHeader.vue";
+import ListSkeleton from "../components/ListSkeleton.vue";
 
 const api = useApi();
 const toast = useToaster();
@@ -220,7 +221,7 @@ onMounted(() => void load());
 
     <ErrorState :error="error" title="Could not load account syncs" @retry="load" />
 
-    <p v-if="loading" class="amber-muted">Loading account syncs...</p>
+    <ListSkeleton v-if="loading" :rows="3" label="Loading account syncs" />
 
     <EmptyState
       v-else-if="accounts.length === 0 && error === null"

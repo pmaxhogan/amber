@@ -28,6 +28,7 @@ import EmptyState from "../components/EmptyState.vue";
 import ErrorState from "../components/ErrorState.vue";
 import OutcomeBadge from "../components/OutcomeBadge.vue";
 import PageHeader from "../components/PageHeader.vue";
+import ListSkeleton from "../components/ListSkeleton.vue";
 
 // The drawer pulls in the tab set, the settings editor, and the export tooling.
 // None of that belongs in the bundle a user downloads to read a table.
@@ -404,14 +405,21 @@ function accountBadge(row: RepoRow): AccountBadge {
   };
 }
 
+// Unsubscribed explicitly on unmount. Leaving it to the store's
+// onScopeDispose fallback would risk a listener per visit to this route, and
+// each stale handler still holds the rows it saw, so one sync.finished would
+// fan out into a refetch per leaked subscription.
+let offEvents: (() => void) | null = null;
+
 onMounted(() => {
   void loadReferenceData();
   void load();
-  events.on(handleEvent);
+  offEvents = events.on(handleEvent);
 });
 
 onBeforeUnmount(() => {
   inflight?.abort();
+  offEvents?.();
   if (searchTimer !== null) clearTimeout(searchTimer);
   if (refreshTimer !== null) clearTimeout(refreshTimer);
 });
@@ -572,7 +580,7 @@ onBeforeUnmount(() => {
         >
           <Button label="Import your first repository" @click="router.push('/import')" />
         </EmptyState>
-        <p v-else class="amber-muted repos-loading">Loading repositories...</p>
+        <ListSkeleton v-else :rows="5" label="Loading repositories" />
       </template>
 
       <Column selection-mode="multiple" header-style="width: 3rem" :sortable="false" />

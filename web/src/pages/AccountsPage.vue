@@ -19,6 +19,7 @@ import CredentialHelp from "../components/CredentialHelp.vue";
 import EmptyState from "../components/EmptyState.vue";
 import ErrorState from "../components/ErrorState.vue";
 import PageHeader from "../components/PageHeader.vue";
+import ListSkeleton from "../components/ListSkeleton.vue";
 
 const api = useApi();
 const toast = useToaster();
@@ -287,7 +288,7 @@ onMounted(() => void load());
 
     <ErrorState :error="error" title="Could not load forges" @retry="load" />
 
-    <p v-if="loading" class="amber-muted">Loading forges...</p>
+    <ListSkeleton v-if="loading" :rows="3" label="Loading forges" />
 
     <EmptyState
       v-else-if="forges.length === 0 && error === null"

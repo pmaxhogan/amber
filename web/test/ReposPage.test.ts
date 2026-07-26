@@ -9,6 +9,8 @@ import { mountGlobals } from "./helpers/mount.ts";
 import { clickButton, findButton, flush } from "./helpers/dom.ts";
 import { makeAccount, makeForge, makeRepo, stubApi } from "./helpers/stubApi.ts";
 import type { RepoRow } from "../src/api/types.ts";
+import type { AmberEvent } from "@amber/shared";
+import { useEventsStore } from "../src/stores/events.ts";
 
 const ROWS: RepoRow[] = [
   makeRepo({ id: 1, displayName: "node", path: "nodejs/node" }),
@@ -214,5 +216,100 @@ describe("Repos page states", () => {
 
     expect(wrapper.text()).toContain("Could not load the repository list");
     expect(findButton(wrapper, "Try again")).toBeDefined();
+  });
+});
+
+describe("Repos page live updates", () => {
+  function frame(type: string, payload: Record<string, unknown>): AmberEvent {
+    return { type, at: 1_700_000_000_000, payload } as AmberEvent;
+  }
+
+  const settleRefresh = () => new Promise((resolve) => setTimeout(resolve, 450));
+
+  function listCalls(api: ReturnType<typeof buildApi>): number {
+    return (api.listRepos as unknown as { mock: { calls: unknown[][] } }).mock.calls.length;
+  }
+
+  it("marks a row syncing without refetching anything", async () => {
+    const { wrapper, api } = await mountPage();
+    const events = useEventsStore();
+
+    events.dispatch(frame("sync.started", { repoId: 1 }));
+    await flush();
+
+    expect(wrapper.find(".repo-status--syncing").exists()).toBe(true);
+    expect(api.getRepo).not.toHaveBeenCalled();
+  });
+
+  it("patches the finished row in place rather than reloading the page", async () => {
+    const api = buildApi({
+      getRepo: vi.fn().mockResolvedValue(makeRepo({ id: 1, displayName: "node", state: "paused" })),
+    });
+    const { wrapper } = await mountPage(api);
+    const events = useEventsStore();
+    const before = listCalls(api);
+
+    events.dispatch(frame("sync.finished", { repoId: 1 }));
+    await settleRefresh();
+    await flush();
+
+    expect(api.getRepo).toHaveBeenCalledWith(1);
+    // The whole point: no refetch storm behind a row-level change.
+    expect(listCalls(api)).toBe(before);
+    expect(wrapper.find(".repo-status--syncing").exists()).toBe(false);
+  });
+
+  it("coalesces a burst of events into one refetch per row", async () => {
+    const api = buildApi({ getRepo: vi.fn().mockResolvedValue(makeRepo({ id: 1 })) });
+    await mountPage(api);
+    const events = useEventsStore();
+
+    for (let i = 0; i < 5; i += 1) events.dispatch(frame("sync.finished", { repoId: 1 }));
+    await settleRefresh();
+    await flush();
+
+    expect(api.getRepo).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores an event for a repository that is not on this page", async () => {
+    const { api } = await mountPage();
+    const events = useEventsStore();
+
+    events.dispatch(frame("sync.finished", { repoId: 999 }));
+    await settleRefresh();
+    await flush();
+
+    expect(api.getRepo).not.toHaveBeenCalled();
+  });
+
+  it("offers a refresh rather than guessing when the list gains or loses a row", async () => {
+    const { wrapper, api } = await mountPage();
+    const events = useEventsStore();
+
+    events.dispatch(frame("repo.created", {}));
+    events.dispatch(frame("repo.deleted", { repoId: 2 }));
+    await flush();
+
+    expect(wrapper.find(".repos-stale").text()).toContain("2 changes");
+    expect(api.getRepo).not.toHaveBeenCalled();
+
+    await clickButton(wrapper, "Refresh");
+    await flush();
+    expect(wrapper.find(".repos-stale").exists()).toBe(false);
+  });
+
+  it("stops listening once unmounted, so revisiting the route cannot double up", async () => {
+    // A leaked subscription keeps the rows it captured alive, turning a single
+    // event into one refetch per past visit to this route.
+    const api = buildApi({ getRepo: vi.fn().mockResolvedValue(makeRepo({ id: 1 })) });
+    const { wrapper } = await mountPage(api);
+    const events = useEventsStore();
+
+    wrapper.unmount();
+    events.dispatch(frame("sync.finished", { repoId: 1 }));
+    await settleRefresh();
+    await flush();
+
+    expect(api.getRepo).not.toHaveBeenCalled();
   });
 });

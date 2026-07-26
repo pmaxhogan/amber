@@ -21,11 +21,15 @@ const events = useEventsStore();
 useThemeStore();
 
 let stopPolling: (() => void) | null = null;
+// Held explicitly rather than trusting the store's onScopeDispose fallback:
+// that only fires inside an active effect scope, and a listener that outlives
+// its component turns one event into a duplicated handler per remount.
+let offEvents: (() => void) | null = null;
 
 onMounted(() => {
   void status.load(api);
   events.connect(api.eventsUrl());
-  events.on((event) => status.applyEvent(event));
+  offEvents = events.on((event) => status.applyEvent(event));
   // A slow poll covers anything the event stream does not announce.
   const handle = setInterval(() => void status.load(), 60_000);
   stopPolling = () => clearInterval(handle);
@@ -33,6 +37,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopPolling?.();
+  offEvents?.();
   events.disconnect();
 });
 </script>

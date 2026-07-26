@@ -9,6 +9,7 @@ import { forgeOrigin } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
 import ErrorState from "../components/ErrorState.vue";
 import PageHeader from "../components/PageHeader.vue";
+import ListSkeleton from "../components/ListSkeleton.vue";
 import SettingsScopeEditor from "../components/SettingsScopeEditor.vue";
 
 const api = useApi();
@@ -186,7 +187,7 @@ onMounted(async () => {
     <p v-if="!ready" class="amber-muted scope-empty">
       Pick {{ scope === "forge" ? "a forge" : "an account" }} to edit its settings.
     </p>
-    <p v-else-if="loading" class="amber-muted scope-empty">Loading settings...</p>
+    <ListSkeleton v-else-if="loading" :rows="5" label="Loading settings" />
     <SettingsScopeEditor
       v-else-if="error === null"
       :scope="scope"
