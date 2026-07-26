@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import Button from "primevue/button";
 import Checkbox from "primevue/checkbox";
@@ -28,7 +28,10 @@ import EmptyState from "../components/EmptyState.vue";
 import ErrorState from "../components/ErrorState.vue";
 import OutcomeBadge from "../components/OutcomeBadge.vue";
 import PageHeader from "../components/PageHeader.vue";
-import RepoDetailDrawer from "../components/RepoDetailDrawer.vue";
+
+// The drawer pulls in the tab set, the settings editor, and the export tooling.
+// None of that belongs in the bundle a user downloads to read a table.
+const RepoDetailDrawer = defineAsyncComponent(() => import("../components/RepoDetailDrawer.vue"));
 
 const api = useApi();
 const router = useRouter();
@@ -658,6 +661,7 @@ onBeforeUnmount(() => {
     </ConfirmDialog>
 
     <RepoDetailDrawer
+      v-if="drawerRepo"
       v-model:visible="drawerVisible"
       :repo="drawerRepo"
       :forges="forges"

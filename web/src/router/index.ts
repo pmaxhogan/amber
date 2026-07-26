@@ -1,30 +1,50 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router";
-import AboutPage from "../pages/AboutPage.vue";
-import AccountSyncPage from "../pages/AccountSyncPage.vue";
-import AccountsPage from "../pages/AccountsPage.vue";
-import GitRemotePage from "../pages/GitRemotePage.vue";
-import ImportPage from "../pages/ImportPage.vue";
 import ReposPage from "../pages/ReposPage.vue";
-import SettingsPage from "../pages/SettingsPage.vue";
 
+/**
+ * Repos is the landing route, so it is bundled eagerly. Every other page is a
+ * dynamic import: the settings editor, the import preview, and the account
+ * forms each pull in PrimeVue components nobody needs to download to look at a
+ * repository list.
+ */
 export const routes: RouteRecordRaw[] = [
   { path: "/", name: "repos", component: ReposPage, meta: { title: "Repos" } },
-  { path: "/import", name: "import", component: ImportPage, meta: { title: "Import" } },
-  { path: "/accounts", name: "accounts", component: AccountsPage, meta: { title: "Accounts" } },
+  {
+    path: "/import",
+    name: "import",
+    component: () => import("../pages/ImportPage.vue"),
+    meta: { title: "Import" },
+  },
+  {
+    path: "/accounts",
+    name: "accounts",
+    component: () => import("../pages/AccountsPage.vue"),
+    meta: { title: "Accounts" },
+  },
   {
     path: "/account-sync",
     name: "account-sync",
-    component: AccountSyncPage,
+    component: () => import("../pages/AccountSyncPage.vue"),
     meta: { title: "Account Sync" },
   },
-  { path: "/settings", name: "settings", component: SettingsPage, meta: { title: "Settings" } },
+  {
+    path: "/settings",
+    name: "settings",
+    component: () => import("../pages/SettingsPage.vue"),
+    meta: { title: "Settings" },
+  },
   {
     path: "/git-remote",
     name: "git-remote",
-    component: GitRemotePage,
+    component: () => import("../pages/GitRemotePage.vue"),
     meta: { title: "Git Remote" },
   },
-  { path: "/about", name: "about", component: AboutPage, meta: { title: "About" } },
+  {
+    path: "/about",
+    name: "about",
+    component: () => import("../pages/AboutPage.vue"),
+    meta: { title: "About" },
+  },
   { path: "/:pathMatch(.*)*", redirect: "/" },
 ];
 
