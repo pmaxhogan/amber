@@ -17,7 +17,7 @@
   ],
   "//typescript": "Pinned to 6.x, not the latest 7.x: typescript-eslint 8.65 declares peer typescript '>=4.8.4 <6.1.0', so TS 7 would break linting. Deviation from ARCHITECTURE.md (which suggested falling back to 5.x) - 6.0.3 is the newest release typescript-eslint accepts. Revisit when typescript-eslint ships TS 7 support.",
   "scripts": {
-    "dev": "concurrently -n server,web -c yellow,magenta \"npm:dev:server\" \"npm:dev:web\"",
+    "dev": "npm run build -w shared && concurrently -n server,web -c yellow,magenta \"npm:dev:server\" \"npm:dev:web\"",
     "dev:server": "npm run dev -w server",
     "dev:web": "npm run dev -w web",
     "build": "npm run build -w shared && npm run build -w server && npm run build -w web",
