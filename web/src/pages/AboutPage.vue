@@ -16,6 +16,12 @@ const events = useEventsStore();
 
 const status = computed(() => statusStore.status);
 
+/** A bare commit SHA is shortened for display; the full value sits in the title. */
+const displayVersion = computed(() => {
+  const raw = status.value?.version ?? "";
+  return /^[0-9a-f]{20,}$/i.test(raw) ? raw.slice(0, 12) : raw;
+});
+
 const stats = computed(() => {
   const current = status.value;
   if (current === null) return [];
@@ -51,6 +57,11 @@ onMounted(reload);
           reachable over HTTPS, on a schedule, and can serve those mirrors back out as a read-only
           git remote.
         </p>
+        <p class="about-hero__links">
+          <a href="https://github.com/pmaxhogan/amber" target="_blank" rel="noopener noreferrer">
+            github.com/pmaxhogan/amber
+          </a>
+        </p>
       </div>
     </div>
 
@@ -66,7 +77,7 @@ onMounted(reload);
         <dl class="about-facts">
           <div>
             <dt>Version</dt>
-            <dd class="mono">{{ status.version }}</dd>
+            <dd class="mono" :title="status.version">{{ displayVersion }}</dd>
           </div>
           <div>
             <dt>Authentication</dt>
@@ -132,6 +143,20 @@ onMounted(reload);
   max-width: 66ch;
 }
 
+/* Two classes so this outranks the type selector's margin: 0 above. */
+.about-hero .about-hero__links {
+  margin-top: 0.5rem;
+}
+
+.about-hero__links a {
+  color: var(--p-primary-color);
+  text-decoration: none;
+}
+
+.about-hero__links a:hover {
+  text-decoration: underline;
+}
+
 .about-grid {
   max-width: 56rem;
 }
@@ -160,6 +185,9 @@ onMounted(reload);
 
 .about-facts dd {
   margin: 0.2rem 0 0;
+  /* Grid cells must contain long values (a full commit SHA), not overflow. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .about-stats {
