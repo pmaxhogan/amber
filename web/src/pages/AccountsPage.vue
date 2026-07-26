@@ -321,6 +321,7 @@ onMounted(() => void load());
               :options="FORGE_KINDS.map((kind) => ({ label: kind, value: kind }))"
               option-label="label"
               option-value="value"
+              :input-id="`forge-kind-${forge.id}`"
               :aria-label="`Forge kind for ${forge.host}`"
               size="small"
               @update:model-value="changeForgeKind(forge, $event)"
@@ -452,7 +453,7 @@ onMounted(() => void load());
       <template #footer>
         <Button label="Cancel" severity="secondary" text @click="forgeDialog = false" />
         <Button
-          label="Add forge"
+          label="Create forge"
           :loading="forgeBusy"
           :disabled="forgeForm.host.trim() === ''"
           @click="saveForge"
@@ -520,7 +521,7 @@ onMounted(() => void load());
         />
         <Button label="Cancel" severity="secondary" text @click="accountDialog = false" />
         <Button
-          :label="isEditing ? 'Save' : 'Add account'"
+          :label="isEditing ? 'Save' : 'Create account'"
           :loading="accountBusy"
           :disabled="accountForm.username.trim() === ''"
           @click="saveAccount"

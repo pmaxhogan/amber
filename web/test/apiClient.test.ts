@@ -37,18 +37,16 @@ describe("buildQuery", () => {
 
 describe("error normalization", () => {
   it("keeps the server problem code and message from a conforming error body", async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValue(
-        jsonResponse(
-          {
-            error: "forge_immutable",
-            message: "Host cannot be changed",
-            details: { field: "host" },
-          },
-          400,
-        ),
-      );
+    const fetchImpl = vi.fn().mockResolvedValue(
+      jsonResponse(
+        {
+          error: "forge_immutable",
+          message: "Host cannot be changed",
+          details: { field: "host" },
+        },
+        400,
+      ),
+    );
     const api = clientWith(fetchImpl as unknown as typeof fetch);
 
     const error = await api.listForges().catch((cause: unknown) => cause);

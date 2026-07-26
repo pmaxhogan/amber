@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import Password from "primevue/password";
+import Select from "primevue/select";
 import AccountsPage from "../src/pages/AccountsPage.vue";
+import ConfirmDialog from "../src/components/ConfirmDialog.vue";
 import { mountGlobals } from "./helpers/mount.ts";
 import { clickButton, findButton, flush } from "./helpers/dom.ts";
 import { makeAccount, makeForge, stubApi } from "./helpers/stubApi.ts";
@@ -152,7 +154,119 @@ describe("Accounts page write-only secret", () => {
   });
 });
 
-describe("Accounts page empty state", () => {
+describe("Accounts page forge management", () => {
+  it("says the origin cannot be changed later, which is the credential-safety rule", async () => {
+    const { wrapper } = await mountPage();
+    expect(wrapper.text()).toContain(
+      "Host, port, and protocol cannot be changed after a forge is created",
+    );
+  });
+
+  it("shows a non-default port and flags plain http", async () => {
+    const api = buildApi({
+      listForges: vi
+        .fn()
+        .mockResolvedValue([
+          makeForge({ id: 1, protocol: "http", host: "git.local", port: 8080, kind: "gitea" }),
+        ]),
+      listAccounts: vi.fn().mockResolvedValue([]),
+    });
+    const { wrapper } = await mountPage(api);
+
+    expect(wrapper.text()).toContain("http://git.local:8080");
+    expect(wrapper.text()).toContain("port 8080");
+    expect(wrapper.find(".forge-card__insecure").text()).toContain(
+      "credentials would travel unencrypted",
+    );
+  });
+
+  it("says fetches are anonymous when a forge has no accounts", async () => {
+    const api = buildApi({ listAccounts: vi.fn().mockResolvedValue([]) });
+    const { wrapper } = await mountPage(api);
+
+    expect(wrapper.text()).toContain("Amber fetches its repositories anonymously");
+  });
+
+  it("creates a forge from the dialog", async () => {
+    const api = buildApi({ createForge: vi.fn().mockResolvedValue(FORGE) });
+    const { wrapper } = await mountPage(api);
+
+    await clickButton(wrapper, "Add forge");
+    await flush();
+    await wrapper.find("#forge-host").setValue("git.example.com");
+    await flush();
+    await clickButton(wrapper, "Create forge");
+    await flush();
+
+    expect(api.createForge).toHaveBeenCalledWith({
+      protocol: "https",
+      host: "git.example.com",
+      port: null,
+      kind: undefined,
+    });
+  });
+
+  it("keeps the create button inert while the host is blank", async () => {
+    const { wrapper } = await mountPage();
+
+    await clickButton(wrapper, "Add forge");
+    await flush();
+
+    expect(findButton(wrapper, "Create forge")?.attributes().disabled).toBeDefined();
+  });
+
+  it("updates only the kind, the one mutable forge field", async () => {
+    const api = buildApi({ updateForge: vi.fn().mockResolvedValue(FORGE) });
+    const { wrapper } = await mountPage(api);
+
+    const kindSelect = wrapper
+      .findAllComponents(Select)
+      .find((select) => select.props("inputId") === "forge-kind-1");
+    await kindSelect?.vm.$emit("update:modelValue", "gitea");
+    await flush();
+
+    expect(api.updateForge).toHaveBeenCalledWith(1, "gitea");
+  });
+
+  it("confirms before removing a forge and explains what goes with it", async () => {
+    const { wrapper, api } = await mountPage();
+
+    await clickButton(wrapper, "Remove forge");
+    await flush();
+
+    expect(api.deleteForge).not.toHaveBeenCalled();
+    const dialog = wrapper
+      .findAllComponents(ConfirmDialog)
+      .find((entry) => entry.props("visible") === true);
+    expect(String(dialog?.props("message"))).toContain("deletes its accounts");
+
+    dialog?.vm.$emit("confirm");
+    await flush();
+    expect(api.deleteForge).toHaveBeenCalledWith(1);
+  });
+
+  it("adds an account to a specific forge", async () => {
+    const api = buildApi({ createAccount: vi.fn().mockResolvedValue(ACCOUNTS[0]) });
+    const { wrapper } = await mountPage(api);
+
+    await clickButton(wrapper, "Add account");
+    await flush();
+    await wrapper.find("#account-username").setValue("new-user");
+    await flush();
+    await clickButton(wrapper, "Create account");
+    await flush();
+
+    expect(api.createAccount).toHaveBeenCalledWith({
+      forgeId: 1,
+      username: "new-user",
+      secret: null,
+      // The forge already has a default, so a new account does not steal it.
+      isDefault: false,
+    });
+  });
+});
+
+describe("Accounts page states", () => {
   it("explains what a forge is when there are none", async () => {
     const api = buildApi({
       listForges: vi.fn().mockResolvedValue([]),
@@ -162,5 +276,24 @@ describe("Accounts page empty state", () => {
 
     expect(wrapper.text()).toContain("No forges yet");
     expect(findButton(wrapper, "Add a forge")).toBeDefined();
+  });
+
+  it("offers a retry when the forge list cannot be read", async () => {
+    const api = buildApi({ listForges: vi.fn().mockRejectedValue(new TypeError("nope")) });
+    const { wrapper } = await mountPage(api);
+
+    expect(wrapper.text()).toContain("Could not load forges");
+    await clickButton(wrapper, "Try again");
+    await flush();
+
+    expect(api.listForges).toHaveBeenCalledTimes(2);
+  });
+
+  it("still renders when the repo counts cannot be read", async () => {
+    const api = buildApi({ listRepos: vi.fn().mockRejectedValue(new TypeError("nope")) });
+    const { wrapper } = await mountPage(api);
+
+    expect(wrapper.findAll(".account-table tbody tr")).toHaveLength(2);
+    expect(wrapper.text()).toContain("0 repos");
   });
 });
