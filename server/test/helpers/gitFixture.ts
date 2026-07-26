@@ -239,4 +239,3 @@ export async function enableRemote(server: TestServer): Promise<{
   const body = response.json() as { username: string; password: string };
   return { username: body.username, password: body.password };
 }
-

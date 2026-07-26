@@ -395,6 +395,73 @@ describe("upload-pack transport details", () => {
   });
 });
 
+describe("the /api/git-remote admin API", () => {
+  it("starts disabled, mints a password once, rotates it, and disables", async () => {
+    const fresh = await startTestServer();
+    try {
+      const adminSlug = "fixtures-admin-13579bdf";
+      await createRepoFixture(fresh.backupsDir, adminSlug);
+      insertRepoRow(fresh.db, { slug: adminSlug });
+      const url = `${fresh.baseUrl}/git/${adminSlug}.git/info/refs?service=git-upload-pack`;
+
+      const initial = await fresh.app.inject({ method: "GET", url: "/api/git-remote" });
+      expect(initial.statusCode).toBe(200);
+      expect(initial.json()).toEqual({
+        enabled: false,
+        username: "amber",
+        cloneUrlTemplate: "https://amber:{password}@amber.example.com/git/{slug}.git",
+        rotatedAt: null,
+      });
+      expect(initial.body).not.toContain('password":"');
+
+      const enabled = await fresh.app.inject({ method: "POST", url: "/api/git-remote/enable" });
+      expect(enabled.statusCode).toBe(200);
+      const first = enabled.json() as { enabled: boolean; password: string; rotatedAt: number };
+      expect(first.enabled).toBe(true);
+      expect(first.password).toHaveLength(32);
+      expect(first.rotatedAt).toBeGreaterThan(0);
+
+      // The password is returned once and never again.
+      const afterEnable = await fresh.app.inject({ method: "GET", url: "/api/git-remote" });
+      expect(afterEnable.json()).not.toHaveProperty("password");
+      expect(afterEnable.body).not.toContain(first.password);
+
+      // It is stored hashed, so it cannot be recovered from the database.
+      const stored = fresh.db.get<{ value: string }>(
+        "SELECT value FROM kv WHERE key = 'git_remote.password_hash'",
+      );
+      expect(stored?.value).toMatch(/^scrypt\$32768\$8\$1\$/);
+      expect(stored?.value).not.toContain(first.password);
+
+      expect(
+        (await fetch(url, { headers: { authorization: basic("amber", first.password) } })).status,
+      ).toBe(200);
+
+      const rotated = await fresh.app.inject({ method: "POST", url: "/api/git-remote/rotate" });
+      const second = rotated.json() as { password: string; enabled: boolean };
+      expect(second.password).not.toBe(first.password);
+      expect(second.enabled).toBe(true);
+
+      expect(
+        (await fetch(url, { headers: { authorization: basic("amber", first.password) } })).status,
+      ).toBe(401);
+      expect(
+        (await fetch(url, { headers: { authorization: basic("amber", second.password) } })).status,
+      ).toBe(200);
+
+      const disabled = await fresh.app.inject({ method: "POST", url: "/api/git-remote/disable" });
+      expect(disabled.json()).toMatchObject({ enabled: false });
+      // Disabling destroys the hash, so no live credential is left behind.
+      expect(
+        fresh.db.get("SELECT value FROM kv WHERE key = 'git_remote.password_hash'"),
+      ).toBeUndefined();
+    } finally {
+      await fresh.close();
+      rmSync(fresh.dataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the disabled remote", () => {
   it("returns 404 for every /git path, even with valid credentials", async () => {
     const fresh = await startTestServer();
