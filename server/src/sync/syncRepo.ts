@@ -562,6 +562,15 @@ async function readDefaultBranch(authed: GitRunOptions, log: Logger): Promise<st
  * forever. Tags archive on any change at all: a retagged annotated tag can
  * point at the same commit through a brand new tag object, and the ancestry
  * test would wave that through.
+ *
+ * Deviation from ARCHITECTURE.md worth knowing before "fixing" it: the doc
+ * also describes archiving a ref "which vanished upstream while we still have
+ * it". Paranoid mode never prunes, so a ref the origin deleted does not change
+ * locally at all: the local ref IS the preserved tip, and an archive copy of a
+ * ref that still exists would be noise. The only way to detect an upstream
+ * deletion would be an extra ls-remote round trip per sync, which buys no
+ * durability. The vanished branch here is the one where a previous
+ * non-paranoid sync pruned before paranoid mode was turned on.
  */
 async function archiveLostTips(
   before: Map<string, string>,

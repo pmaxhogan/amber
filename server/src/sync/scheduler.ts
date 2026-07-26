@@ -110,6 +110,25 @@ class MinHeap {
     return this.#items[0];
   }
 
+  /**
+   * Move a queued repo to the front as a manual run. Decreasing a key can
+   * violate the heap anywhere, and the queue is only ever as long as the repo
+   * list, so it is rebuilt rather than carrying an index for a rare operation.
+   */
+  promote(repoId: number): boolean {
+    const target = this.#items.find((entry) => entry.repoId === repoId);
+    if (target === undefined) {
+      return false;
+    }
+    target.dueAt = 0;
+    target.manual = true;
+    const all = this.#items.splice(0, this.#items.length);
+    for (const entry of all) {
+      this.push(entry);
+    }
+    return true;
+  }
+
   #sink(start: number): void {
     let index = start;
     for (;;) {
@@ -227,7 +246,16 @@ export class Scheduler {
 
   /** Manual sync: jumps the queue. */
   enqueueNow(repoId: number): void {
-    if (this.#running.has(repoId) || this.#queued.has(repoId)) {
+    if (this.#running.has(repoId)) {
+      // Already syncing; the caller is getting what it asked for.
+      return;
+    }
+    if (this.#queued.has(repoId)) {
+      // Already waiting, but possibly hours out and as a scheduled run. Promote
+      // it so "sync now" means now, and so it ignores sync_enabled.
+      this.#heap.promote(repoId);
+      this.#pump();
+      this.#arm();
       return;
     }
     const forgeId = forgeIdForRepo(this.#options.db, repoId);
@@ -324,6 +352,13 @@ export class Scheduler {
       const entry = this.#heap.pop();
       if (entry === undefined) {
         break;
+      }
+      if (this.#running.has(entry.repoId)) {
+        // Belt and braces: one repo is one queue entry, so this should be
+        // impossible, and a double dispatch would fetch into the same directory
+        // twice at once.
+        this.#queued.delete(entry.repoId);
+        continue;
       }
       const forgeCount = [...this.#runningForge.values()].filter(
         (forgeId) => forgeId === entry.forgeId,

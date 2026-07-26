@@ -322,7 +322,31 @@ describe("sync now", () => {
     expect(queued).toContain(first);
   });
 
-  it("ignores a manual sync for a repo that is already queued or gone", async () => {
+  it("promotes a repo that is already waiting in the queue", async () => {
+    const forgeId = insertForge(db, { host: "a.test" });
+    const first = insertRepo(db, { forgeId, path: "acme/first" });
+    insertRepo(db, { forgeId, path: "acme/second" });
+    const last = insertRepo(db, { forgeId, path: "acme/last" });
+
+    const hold = new Map<number, () => void>();
+    const scheduler = makeScheduler({
+      runSync: fakeSync({ hold }),
+      globalSettings: globals({ max_concurrent_syncs: 1, max_concurrent_per_forge: 1 }),
+    });
+    await scheduler.start();
+    await new Promise((done) => setTimeout(done, 5));
+    expect(started).toEqual([first]);
+    expect(scheduler.status().queueDepth).toBe(2);
+
+    // Already queued, but behind another repo. Sync now must still mean now.
+    scheduler.enqueueNow(last);
+    hold.get(first)?.();
+    await new Promise((done) => setTimeout(done, 10));
+
+    expect(started[1]).toBe(last);
+  });
+
+  it("ignores a manual sync for a repo that is already running or gone", async () => {
     const forgeId = insertForge(db, { host: "a.test" });
     const repoId = insertRepo(db, { forgeId, path: "acme/one" });
     const hold = new Map<number, () => void>();

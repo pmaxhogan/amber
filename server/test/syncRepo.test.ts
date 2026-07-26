@@ -4,7 +4,7 @@ import type { AmberEventType } from "@amber/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db/db.ts";
 import { runGit } from "../src/sync/gitCli.ts";
-import { listSyncRuns, RUN_RETENTION_COUNT } from "../src/sync/repoStore.ts";
+import { listSyncRuns, loadSyncTarget, RUN_RETENTION_COUNT } from "../src/sync/repoStore.ts";
 import {
   archiveStamp,
   buildRemoteUrl,
@@ -173,6 +173,19 @@ describe("bare mode", () => {
     expect(repo?.last_fetch_head).toBe(await origin.revParse("main"));
     expect(repo?.consecutive_failures).toBe(0);
     expect(repo?.last_error).toBeNull();
+  });
+
+  it("resolves the repo against its own forge row", () => {
+    const forgeId = db.get<{ forge_id: number }>(
+      "SELECT forge_id FROM repos WHERE id = ?",
+      repoId,
+    )?.forge_id;
+    const target = loadSyncTarget(db, repoId);
+    // A credential is only ever looked up through this forge, so mixing the
+    // two id columns up would hand a token to the wrong host.
+    expect(target?.forge.id).toBe(forgeId);
+    expect(target?.repo.id).toBe(repoId);
+    expect(target?.forge.host).toBe("origin.test");
   });
 
   it("stores a credential free remote url", async () => {
