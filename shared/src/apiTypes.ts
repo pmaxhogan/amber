@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { settingScopeSchema } from "./settingsRegistry.ts";
+import {
+  settingScopeSchema,
+  type ResolvedSettings,
+  type SettingsExplanation,
+} from "./settingsRegistry.ts";
 
 /**
  * Core wire shapes shared by the Fastify routes and the Vue client. Server
@@ -9,6 +13,24 @@ import { settingScopeSchema } from "./settingsRegistry.ts";
 
 export const idSchema = z.number().int().positive();
 export const epochMsSchema = z.number().int().nonnegative();
+
+/** `:id` route params arrive as strings, so they are coerced. */
+export const idParamsSchema = z.object({
+  id: z.coerce.number().int().positive(),
+});
+export type IdParams = z.infer<typeof idParamsSchema>;
+
+/**
+ * A query string flag. z.coerce.boolean() treats "false" as true, which is the
+ * wrong answer for `?files=false`, so the accepted spellings are explicit.
+ */
+export const queryFlagSchema = z
+  .union([z.boolean(), z.string()])
+  .transform((raw) => (typeof raw === "boolean" ? raw : raw.trim().toLowerCase()))
+  .pipe(z.union([z.boolean(), z.enum(["1", "0", "true", "false", "yes", "no", ""])]))
+  .transform((raw) =>
+    typeof raw === "boolean" ? raw : raw === "1" || raw === "true" || raw === "yes",
+  );
 
 // ---------------------------------------------------------------------------
 // Pagination
@@ -182,8 +204,20 @@ export const updateRepoSchema = z.object({
   state: repoStateSchema.optional(),
   accountOverrideId: idSchema.nullable().optional(),
   forceAnonymous: z.boolean().optional(),
+  /**
+   * Renames stay on the same host: forgeId is deliberately absent, because a
+   * repo must never be re-pointed at a forge whose credentials it would then
+   * inherit.
+   */
+  path: z.string().min(1).optional(),
 });
 export type UpdateRepo = z.infer<typeof updateRepoSchema>;
+
+/** `DELETE /api/repos/:id?files=true` also removes the backup directory. */
+export const deleteRepoQuerySchema = z.object({
+  files: queryFlagSchema.default(false),
+});
+export type DeleteRepoQuery = z.infer<typeof deleteRepoQuerySchema>;
 
 export const bulkRepoActionSchema = z.enum(["pause", "resume", "sync", "delete"]);
 export type BulkRepoAction = z.infer<typeof bulkRepoActionSchema>;
@@ -195,6 +229,16 @@ export const bulkRepoRequestSchema = z.object({
   files: z.boolean().default(false),
 });
 export type BulkRepoRequest = z.infer<typeof bulkRepoRequestSchema>;
+
+export const bulkRepoResponseSchema = z.object({
+  action: bulkRepoActionSchema,
+  requested: z.number().int().nonnegative(),
+  affected: z.number().int().nonnegative(),
+  ids: z.array(idSchema),
+  /** Requested ids that no longer exist. A stale multi-select is not an error. */
+  missing: z.array(idSchema),
+});
+export type BulkRepoResponse = z.infer<typeof bulkRepoResponseSchema>;
 
 // ---------------------------------------------------------------------------
 // Sync runs
@@ -281,6 +325,22 @@ export type SettingsScopeParams = z.infer<typeof settingsScopeParamsSchema>;
 /** Values are validated per key against the registry, not here. */
 export const settingsPatchSchema = z.record(z.string(), z.unknown());
 export type SettingsPatch = z.infer<typeof settingsPatchSchema>;
+
+/** What GET and PUT /api/settings/:scopeType/:scopeId? return. */
+export interface ScopeSettingsResponse {
+  scopeType: SettingsScopeParams["scopeType"];
+  scopeId: number | null;
+  /** Only the keys stored at this scope; absent keys fall through on resolve. */
+  values: Partial<ResolvedSettings>;
+}
+
+/** What GET /api/repos/:id/effective-settings returns. */
+export interface EffectiveSettingsResponse {
+  repoId: number;
+  settings: ResolvedSettings;
+  /** Which scope supplied each value, for the settings explain view. */
+  explanation: SettingsExplanation;
+}
 
 // ---------------------------------------------------------------------------
 // Account sync
