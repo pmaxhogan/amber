@@ -7,8 +7,20 @@ import type { Db } from "./db/db.ts";
 import { EventBus } from "./events.ts";
 import { gitRemotePlugin } from "./gitremote/routes.ts";
 import { apiRoutes } from "./routes/index.ts";
-import { cfAccessPlugin } from "./security/cfAccess.ts";
+import { cfAccessPlugin, type CfAccessKeyGetter } from "./security/cfAccess.ts";
 import { APP_VERSION } from "./version.ts";
+
+/**
+ * The slice of the sync scheduler the API needs. Declared structurally rather
+ * than imported from sync/ so the two modules stay independent; the Scheduler
+ * class satisfies it. Absent until the sync engine is wired in, in which case
+ * /api/status reports an idle queue and "sync now" falls back to persisting
+ * next_sync_at, which the scheduler picks up on its next wake.
+ */
+export interface SchedulerHandle {
+  status(): { queueDepth: number; activeSyncs: number; breakerOpen: boolean };
+  enqueueNow(repoId: number): void;
+}
 
 /** Everything a route plugin needs. Decorated onto the Fastify instance. */
 export interface AppContext {
@@ -17,6 +29,7 @@ export interface AppContext {
   db: Db;
   events: EventBus;
   version: string;
+  scheduler?: SchedulerHandle;
 }
 
 export interface BuildAppDeps {
@@ -25,6 +38,9 @@ export interface BuildAppDeps {
   db: Db;
   events?: EventBus;
   version?: string;
+  scheduler?: SchedulerHandle;
+  /** Test seam for the CF Access JWKS. Omitted in production. */
+  cfAccessGetKey?: CfAccessKeyGetter;
 }
 
 declare module "fastify" {
@@ -56,6 +72,7 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
     db: deps.db,
     events: deps.events ?? new EventBus(),
     version: deps.version ?? APP_VERSION,
+    ...(deps.scheduler === undefined ? {} : { scheduler: deps.scheduler }),
   };
 
   const app = Fastify({
@@ -73,7 +90,10 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
   app.get("/healthz", (): Health => ({ ok: true, version: ctx.version }));
 
   // No-op in insecure mode; otherwise guards everything except /healthz and /git/*.
-  await app.register(cfAccessPlugin, { config: ctx.config });
+  await app.register(cfAccessPlugin, {
+    config: ctx.config,
+    ...(deps.cfAccessGetKey === undefined ? {} : { getKey: deps.cfAccessGetKey }),
+  });
 
   await app.register(apiRoutes, { prefix: "/api" });
   await app.register(gitRemotePlugin, { ctx });

@@ -1,0 +1,414 @@
+import Fastify from "fastify";
+import {
+  createLocalJWKSet,
+  exportJWK,
+  generateKeyPair,
+  SignJWT,
+  type CryptoKey,
+  type JSONWebKeySet,
+  type JWK,
+} from "jose";
+import { beforeAll, describe, expect, it } from "vitest";
+import { loadConfig, type Config } from "../src/config.ts";
+import { createConsoleLogger } from "../src/logging.ts";
+import {
+  cfAccessPlugin,
+  CF_ACCESS_COOKIE,
+  CF_ACCESS_HEADER,
+  extractToken,
+  isPublicPath,
+  requestPathname,
+  type CfAccessKeyGetter,
+} from "../src/security/cfAccess.ts";
+
+const TEAM_DOMAIN = "amber-test.cloudflareaccess.com";
+const ISSUER = `https://${TEAM_DOMAIN}`;
+const AUD = "aud-0123456789abcdef";
+const ALLOWED = "max@unbroker.com";
+
+let privateKey: CryptoKey;
+let getKey: CfAccessKeyGetter;
+/** A second, unrelated keypair: tokens signed with it must never verify. */
+let foreignKey: CryptoKey;
+
+beforeAll(async () => {
+  const pair = await generateKeyPair("RS256", { extractable: true });
+  privateKey = pair.privateKey;
+  const jwk: JWK = { ...(await exportJWK(pair.publicKey)), kid: "test-key", alg: "RS256" };
+  const jwks: JSONWebKeySet = { keys: [jwk] };
+  getKey = createLocalJWKSet(jwks);
+
+  const other = await generateKeyPair("RS256", { extractable: true });
+  foreignKey = other.privateKey;
+});
+
+interface TokenOptions {
+  issuer?: string;
+  audience?: string;
+  email?: string | null;
+  expiresIn?: string;
+  notBefore?: string;
+  key?: CryptoKey;
+}
+
+async function makeToken(options: TokenOptions = {}): Promise<string> {
+  const claims: Record<string, unknown> = { sub: "user-1" };
+  const email = options.email === undefined ? ALLOWED : options.email;
+  if (email !== null) {
+    claims["email"] = email;
+  }
+
+  let jwt = new SignJWT(claims)
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuedAt()
+    .setIssuer(options.issuer ?? ISSUER)
+    .setAudience(options.audience ?? AUD)
+    .setExpirationTime(options.expiresIn ?? "5m");
+
+  if (options.notBefore !== undefined) {
+    jwt = jwt.setNotBefore(options.notBefore);
+  }
+  return jwt.sign(options.key ?? privateKey);
+}
+
+function secureConfig(): Config {
+  return loadConfig({
+    DATA_DIR: "/tmp/amber-cfaccess-test",
+    CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
+    CF_ACCESS_AUD: AUD,
+    CF_ACCESS_ALLOWED_EMAILS: `${ALLOWED}, someone-else@unbroker.com`,
+  });
+}
+
+/** A minimal server carrying the plugin plus one route per public prefix. */
+async function buildGuarded(overrides: { config?: Config; getKey?: CfAccessKeyGetter } = {}) {
+  const app = Fastify({ loggerInstance: createConsoleLogger("silent") });
+  await app.register(cfAccessPlugin, {
+    config: overrides.config ?? secureConfig(),
+    ...("getKey" in overrides ? { getKey: overrides.getKey } : { getKey }),
+  });
+  app.get("/api/repos", () => ({ ok: true }));
+  app.get("/healthz", () => ({ ok: true }));
+  app.get("/healthzz", () => ({ ok: true }));
+  app.get("/git", () => ({ ok: true }));
+  app.get("/git/some-repo.git/info/refs", () => ({ ok: true }));
+  app.get("/GIT/some-repo", () => ({ ok: true }));
+  await app.ready();
+  return app;
+}
+
+describe("requestPathname", () => {
+  it("drops the query string and the fragment", () => {
+    expect(requestPathname("/api/repos")).toBe("/api/repos");
+    expect(requestPathname("/api/repos?q=/healthz")).toBe("/api/repos");
+    expect(requestPathname("/api/repos#/healthz")).toBe("/api/repos");
+    expect(requestPathname("")).toBe("/");
+  });
+});
+
+describe("isPublicPath", () => {
+  const prefixes = ["/healthz", "/git/"];
+
+  it("matches the exact public paths", () => {
+    expect(isPublicPath("/healthz", prefixes)).toBe(true);
+    expect(isPublicPath("/healthz/", prefixes)).toBe(true);
+    expect(isPublicPath("/git/x", prefixes)).toBe(true);
+    expect(isPublicPath("/git/x/info/refs", prefixes)).toBe(true);
+  });
+
+  it("does not let a longer path borrow a public prefix", () => {
+    expect(isPublicPath("/healthzz", prefixes)).toBe(false);
+    expect(isPublicPath("/healthz-admin", prefixes)).toBe(false);
+    expect(isPublicPath("/healthzfoo", prefixes)).toBe(false);
+  });
+
+  it("keeps bare /git authenticated, since the doc only exempts /git/*", () => {
+    expect(isPublicPath("/git", prefixes)).toBe(false);
+    expect(isPublicPath("/gitfoo", prefixes)).toBe(false);
+  });
+
+  it("is case sensitive", () => {
+    expect(isPublicPath("/GIT/x", prefixes)).toBe(false);
+    expect(isPublicPath("/Healthz", prefixes)).toBe(false);
+  });
+
+  it("does not treat an api path as public just because it mentions one", () => {
+    expect(isPublicPath("/api/healthz", prefixes)).toBe(false);
+    expect(isPublicPath("/api/repos", prefixes)).toBe(false);
+  });
+});
+
+describe("extractToken", () => {
+  const req = (headers: Record<string, string | string[]>) =>
+    ({ headers }) as unknown as Parameters<typeof extractToken>[0];
+
+  it("prefers the header", () => {
+    expect(
+      extractToken(req({ [CF_ACCESS_HEADER]: "header-token", cookie: `${CF_ACCESS_COOKIE}=ck` })),
+    ).toBe("header-token");
+  });
+
+  it("falls back to the cookie", () => {
+    expect(extractToken(req({ cookie: `${CF_ACCESS_COOKIE}=cookie-token` }))).toBe("cookie-token");
+  });
+
+  it("finds the cookie among others and ignores similarly named ones", () => {
+    expect(
+      extractToken(req({ cookie: `a=1; ${CF_ACCESS_COOKIE}=wanted; NOT_${CF_ACCESS_COOKIE}=no` })),
+    ).toBe("wanted");
+    expect(extractToken(req({ cookie: `cf_authorization=lowercase` }))).toBeNull();
+  });
+
+  it("returns null when there is nothing usable", () => {
+    expect(extractToken(req({}))).toBeNull();
+    expect(extractToken(req({ [CF_ACCESS_HEADER]: "   " }))).toBeNull();
+    expect(extractToken(req({ cookie: `${CF_ACCESS_COOKIE}=` }))).toBeNull();
+    expect(extractToken(req({ cookie: "novalue" }))).toBeNull();
+  });
+
+  it("takes the first value when the header arrives more than once", () => {
+    expect(extractToken(req({ [CF_ACCESS_HEADER]: ["first", "second"] }))).toBe("first");
+  });
+});
+
+describe("cfAccessPlugin request guarding", () => {
+  it("accepts a valid token in the header", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken() },
+    });
+    expect(response.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("accepts a valid token from the CF_Authorization cookie", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { cookie: `${CF_ACCESS_COOKIE}=${await makeToken()}` },
+    });
+    expect(response.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("rejects a request with no token at all", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({ method: "GET", url: "/api/repos" });
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: "unauthorized" });
+    await app.close();
+  });
+
+  it("rejects an expired token", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ expiresIn: "-10m" }) },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("rejects a token that is not valid yet", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ notBefore: "10m" }) },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("rejects the wrong audience", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ audience: "some-other-aud" }) },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("rejects the wrong issuer", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: {
+        [CF_ACCESS_HEADER]: await makeToken({ issuer: "https://evil.cloudflareaccess.com" }),
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("rejects an email that is not on the allow list", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ email: "intruder@example.com" }) },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("rejects a token with no email claim", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ email: null }) },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("compares the allow list case insensitively", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ email: "MAX@Unbroker.COM" }) },
+    });
+    expect(response.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("rejects a token signed by an unknown key", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ key: foreignKey }) },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("rejects malformed tokens without crashing", async () => {
+    const app = await buildGuarded();
+    for (const token of ["not-a-jwt", "a.b", "a.b.c", "...", "eyJhbGciOiJub25lIn0..", " "]) {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/repos",
+        headers: { [CF_ACCESS_HEADER]: token },
+      });
+      expect(response.statusCode).toBe(401);
+    }
+    await app.close();
+  });
+
+  it("rejects an unsigned alg:none token", async () => {
+    const app = await buildGuarded();
+    const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+    const payload = Buffer.from(
+      JSON.stringify({ iss: ISSUER, aud: AUD, email: ALLOWED, exp: Date.now() / 1000 + 600 }),
+    ).toString("base64url");
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: `${header}.${payload}.` },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("never echoes the rejected token in the response body", async () => {
+    const app = await buildGuarded();
+    const token = await makeToken({ email: "intruder@example.com" });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: token },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(response.body).not.toContain(token);
+    expect(response.body).not.toContain("intruder@example.com");
+    await app.close();
+  });
+});
+
+describe("public prefixes", () => {
+  it("lets /healthz and /git/* through with no token", async () => {
+    const app = await buildGuarded();
+    expect((await app.inject({ method: "GET", url: "/healthz" })).statusCode).toBe(200);
+    expect(
+      (await app.inject({ method: "GET", url: "/git/some-repo.git/info/refs" })).statusCode,
+    ).toBe(200);
+    await app.close();
+  });
+
+  it("still guards paths that merely start like a public one", async () => {
+    const app = await buildGuarded();
+    expect((await app.inject({ method: "GET", url: "/healthzz" })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/git" })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/GIT/some-repo" })).statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("does not let a query string smuggle a public path", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({ method: "GET", url: "/api/repos?next=/healthz" });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("guards unrouted paths too, so a 404 cannot confirm what exists", async () => {
+    const app = await buildGuarded();
+    const response = await app.inject({ method: "GET", url: "/api/does-not-exist" });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("guards every method, not just GET", async () => {
+    const app = await buildGuarded();
+    for (const method of ["POST", "PATCH", "DELETE", "PUT"] as const) {
+      const response = await app.inject({ method, url: "/api/repos" });
+      expect(response.statusCode).toBe(401);
+    }
+    await app.close();
+  });
+});
+
+describe("fail closed configuration", () => {
+  it("verifies against the remote JWKS when no key getter is injected", async () => {
+    // No network is available for amber-test.cloudflareaccess.com, so a real
+    // verification attempt must fail. What matters is that the absent option
+    // does not silently skip validation.
+    const app = Fastify({ loggerInstance: createConsoleLogger("silent") });
+    await app.register(cfAccessPlugin, { config: secureConfig() });
+    app.get("/api/repos", () => ({ ok: true }));
+    await app.ready();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/repos",
+      headers: { [CF_ACCESS_HEADER]: await makeToken() },
+    });
+    expect(response.statusCode).toBe(401);
+    await app.close();
+  });
+
+  it("refuses to register when Access is unconfigured and insecure mode is off", async () => {
+    const app = Fastify({ loggerInstance: createConsoleLogger("silent") });
+    const config: Config = { ...secureConfig(), cfAccess: null, insecureMode: false };
+    await expect(app.register(cfAccessPlugin, { config, getKey }).ready()).rejects.toThrow(
+      /Refusing to serve/,
+    );
+    await app.close();
+  });
+
+  it("installs no hook at all in insecure mode", async () => {
+    const config = loadConfig({ INSECURE_ALLOW_PUBLIC_ACCESS: "1", DATA_DIR: "/tmp/amber-ins" });
+    const app = await buildGuarded({ config });
+    expect((await app.inject({ method: "GET", url: "/api/repos" })).statusCode).toBe(200);
+    await app.close();
+  });
+});
