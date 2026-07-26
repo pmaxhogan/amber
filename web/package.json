@@ -1,0 +1,28 @@
+{
+  "name": "@amber/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@amber/shared": "^0.1.0",
+    "@primeuix/themes": "^3.0.0",
+    "@primeuix/utils": "^0.8.0",
+    "pinia": "^4.0.2",
+    "primevue": "^5.0.0",
+    "vue": "^3.5.40",
+    "vue-router": "^5.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/test-utils": "^2.4.11",
+    "happy-dom": "^20.11.1",
+    "vite": "^8.1.5",
+    "vue-tsc": "^3.3.8"
+  }
+}
