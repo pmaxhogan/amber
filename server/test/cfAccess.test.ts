@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Fastify from "fastify";
+import Fastify, { type InjectOptions } from "fastify";
 import {
   createLocalJWKSet,
   exportJWK,
@@ -27,6 +27,40 @@ import {
   requestPathname,
   type CfAccessKeyGetter,
 } from "../src/security/cfAccess.ts";
+
+type InjectMethod = NonNullable<InjectOptions["method"]>;
+
+interface RegisteredRoute {
+  method: InjectMethod;
+  url: string;
+}
+
+/**
+ * Turns `printRoutes({ commonPrefix: false })` output, which is one
+ * "prefix /url (METHOD, METHOD)" line per route, into injectable requests.
+ * Path parameters and wildcards get concrete stand-ins; the guard runs before
+ * any handler, so the values only need to route.
+ */
+function parseRegisteredRoutes(printed: string): RegisteredRoute[] {
+  const routes: RegisteredRoute[] = [];
+  for (const line of printed.split("\n")) {
+    const match = /(\/\S*)\s+\(([^)]+)\)\s*$/.exec(line);
+    const rawUrl = match?.[1];
+    const rawMethods = match?.[2];
+    if (rawUrl === undefined || rawMethods === undefined) {
+      continue;
+    }
+    const url = rawUrl.replace(/:[^/]+/g, "1").replace(/\*/g, "x");
+    const methods = rawMethods.split(",").map((method) => method.trim());
+    // HEAD is Fastify's automatic companion to GET, so testing GET covers it.
+    const method = methods.find((candidate) => candidate !== "HEAD") ?? methods[0];
+    if (method === undefined) {
+      continue;
+    }
+    routes.push({ method: method as InjectMethod, url });
+  }
+  return routes;
+}
 
 const TEAM_DOMAIN = "amber-test.cloudflareaccess.com";
 const ISSUER = `https://${TEAM_DOMAIN}`;
@@ -459,6 +493,9 @@ describe("the real app guards every /api route", () => {
       "/api/forges",
       "/api/accounts",
       "/api/settings/global",
+      "/api/account-syncs",
+      "/api/git-remote",
+      "/api/repos/1/export/source.zip",
       "/api/events",
     ]) {
       const response = await app.inject({ method: "GET", url });
@@ -467,6 +504,32 @@ describe("the real app guards every /api route", () => {
     expect((await app.inject({ method: "POST", url: "/api/import", payload: {} })).statusCode).toBe(
       401,
     );
+  });
+
+  /**
+   * The list above is readable but goes stale the moment a route module is
+   * added. This walks what Fastify actually registered instead, so a new route
+   * that forgets the guard fails here rather than shipping unauthenticated.
+   */
+  it("rejects every registered route except /healthz and /git", async () => {
+    const routes = parseRegisteredRoutes(app.printRoutes({ commonPrefix: false }));
+    expect(routes.length).toBeGreaterThan(20);
+
+    const guarded = routes.filter(
+      (route) => !route.url.startsWith("/git/") && route.url !== "/healthz",
+    );
+    // Every /api route plus nothing else unauthenticated: if this ever drops to
+    // zero the parser broke and the assertions below would vacuously pass.
+    expect(guarded.length).toBeGreaterThan(20);
+
+    for (const route of guarded) {
+      const response = await app.inject({
+        method: route.method,
+        url: route.url,
+        payload: route.method === "GET" ? undefined : {},
+      });
+      expect(response.statusCode, `${route.method} ${route.url}`).toBe(401);
+    }
   });
 
   it("serves the same routes with a valid token", async () => {

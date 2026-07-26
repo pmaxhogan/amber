@@ -5,6 +5,7 @@ import type {
   PaginationQuery,
   Repo,
   RepoListQuery,
+  RepoOrigin,
   RepoSortField,
   RepoState,
   SyncRun,
@@ -40,6 +41,7 @@ interface RepoRow {
   disk_usage_bytes: number | null;
   default_branch: string | null;
   last_fetch_head: string | null;
+  origin: string;
   created_at: number;
   updated_at: number;
 }
@@ -48,7 +50,8 @@ const REPO_COLUMNS = `repos.id, repos.forge_id, repos.path, repos.display_name, 
   repos.short_id, repos.account_override_id, repos.force_anonymous,
   repos.managed_by_account_sync_id, repos.state, repos.next_sync_at, repos.consecutive_failures,
   repos.last_sync_at, repos.last_success_at, repos.last_error, repos.disk_usage_bytes,
-  repos.default_branch, repos.last_fetch_head, repos.created_at, repos.updated_at`;
+  repos.default_branch, repos.last_fetch_head, repos.origin, repos.created_at,
+  repos.updated_at`;
 
 function toRepo(row: RepoRow): Repo {
   return {
@@ -70,6 +73,7 @@ function toRepo(row: RepoRow): Repo {
     diskUsageBytes: row.disk_usage_bytes,
     defaultBranch: row.default_branch,
     lastFetchHead: row.last_fetch_head,
+    origin: row.origin as RepoOrigin,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

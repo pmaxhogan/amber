@@ -11,6 +11,8 @@ import {
   buildSlug as domainBuildSlug,
   generateShortId as domainGenerateShortId,
   deleteRepo as domainDeleteRepo,
+  type DeleteRepoOptions,
+  type RepoFileRemover,
 } from "../domain/repos.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
@@ -50,7 +52,8 @@ const SHORT_ID_ATTEMPTS = 5;
 export interface DiscoveryRepoHelpers {
   generateShortId: () => string;
   buildSlug: (path: string, shortId: string) => string;
-  deleteRepo: (db: Db, id: number, withFiles: boolean) => Promise<void>;
+  /** domain/repos.ts deleteRepo, so the real one is assignable unchanged. */
+  deleteRepo: (db: Db, id: number, options?: DeleteRepoOptions) => Promise<void>;
 }
 
 export interface DiscoveryDeps {
@@ -68,6 +71,11 @@ export interface DiscoveryDeps {
    * seam so tests do not need the whole domain layer wired up.
    */
   repos?: Partial<DiscoveryRepoHelpers>;
+  /**
+   * Deletes a repo's backup directory. Required for a confirmed unstar to free
+   * disk; without it domain deleteRepo refuses and the backup is kept.
+   */
+  removeFiles?: RepoFileRemover;
   decryptSecret?: (key: Buffer, blob: Buffer) => string;
   providerFor?: (kind: ForgeKind) => AccountSyncProvider | undefined;
 }
@@ -193,10 +201,20 @@ export async function runAccountSyncDetailed(
   const log = (deps.log ?? createConsoleLogger("silent")).child({ mod: "discovery" });
   const now = deps.now ?? Date.now;
   const random = deps.random ?? Math.random;
+  // domain deleteRepo refuses to drop backup files without a remover, and a
+  // confirmed unstar is the one case that should free disk, so the remover the
+  // caller supplied is bound in here rather than left to the call site.
+  const { removeFiles } = deps;
   const helpers: DiscoveryRepoHelpers = {
     generateShortId: deps.repos?.generateShortId ?? domainGenerateShortId,
     buildSlug: deps.repos?.buildSlug ?? domainBuildSlug,
-    deleteRepo: deps.repos?.deleteRepo ?? domainDeleteRepo,
+    deleteRepo:
+      deps.repos?.deleteRepo ??
+      ((database, id, options = {}): Promise<void> =>
+        domainDeleteRepo(database, id, {
+          ...options,
+          ...(removeFiles === undefined ? {} : { removeFiles }),
+        })),
   };
   const decrypt = deps.decryptSecret ?? domainDecryptSecret;
   const providerFor = deps.providerFor ?? providerForKind;
@@ -579,7 +597,7 @@ async function reconcileUnstarred(
     }
 
     try {
-      await args.helpers.deleteRepo(args.db, repo.id, true);
+      await args.helpers.deleteRepo(args.db, repo.id, { withFiles: true });
       removed += 1;
       args.log.info(
         { accountSyncId: args.accountSyncId, repoId: repo.id, path: repo.path },

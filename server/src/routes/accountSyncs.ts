@@ -15,6 +15,7 @@ import {
   supportsStarredSync,
   type DiscoveryDeps,
 } from "../providers/discovery.ts";
+import { createBackupFileRemover } from "./repos.ts";
 
 /** /api/account-syncs CRUD and manual run. */
 
@@ -56,7 +57,13 @@ function listAccountSyncs(db: Db, accountId?: number): AccountSync[] {
 export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
   const { db, log, config, events } = app.amber;
 
-  const deps: DiscoveryDeps = { log, secretKey: config.secretKey };
+  // A starred sync that confirms an unstar upstream deletes the backup files
+  // too, so it needs the same remover the repo delete route uses.
+  const deps: DiscoveryDeps = {
+    log,
+    secretKey: config.secretKey,
+    removeFiles: createBackupFileRemover(config),
+  };
 
   app.get("/account-syncs", (request, reply) => {
     const query = listQuerySchema.safeParse(request.query);

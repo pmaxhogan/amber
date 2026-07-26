@@ -115,8 +115,8 @@ function baseDeps(provider: AccountSyncProvider, extra: DiscoveryDeps = {}): Dis
       },
       buildSlug: (path, shortId) =>
         `${path.replace(/[^a-zA-Z0-9]+/g, "-").toLowerCase()}-${shortId}`,
-      deleteRepo: (database, id, withFiles) => {
-        deletions.push({ id, withFiles });
+      deleteRepo: (database, id, options) => {
+        deletions.push({ id, withFiles: options?.withFiles === true });
         database.run("DELETE FROM repos WHERE id = ?", id);
         return Promise.resolve();
       },
