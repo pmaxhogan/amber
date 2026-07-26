@@ -1,0 +1,33 @@
+# Local full-stack test against a real build of the image.
+#
+#   docker compose -f docker-compose.local.yml up --build
+#
+# INSECURE_ALLOW_PUBLIC_ACCESS=1 disables authentication AND forces the server
+# to bind 127.0.0.1 inside the container, so the published port below will not
+# reach it. Use `docker compose -f docker-compose.local.yml exec amber curl
+# http://127.0.0.1:8080/healthz` to probe it, or set up Cloudflare Access and
+# drop the flag to use the published port.
+
+services:
+  amber:
+    build:
+      context: .
+      args:
+        AMBER_VERSION: local
+    image: amber:local
+    container_name: amber-local
+    environment:
+      INSECURE_ALLOW_PUBLIC_ACCESS: "1"
+      DATA_DIR: /data
+      LOG_LEVEL: debug
+      PUBLIC_ORIGIN: http://127.0.0.1:8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./tmp-data:/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
