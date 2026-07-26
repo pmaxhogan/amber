@@ -23,6 +23,15 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # PrimeVue 5 moved to the commercial PrimeUI license model, which needs a
+      # per-deployment key Amber cannot ship in a public repo. Stay on 4.x MIT.
+      - dependency-name: primevue
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@primeuix/themes"
+        update-types:
+          - version-update:semver-major
     commit-message:
       prefix: "deps"
       include: scope

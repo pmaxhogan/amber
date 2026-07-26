@@ -31,6 +31,17 @@ npm run build            # shared -> server -> web
 - `e2e/` - Playwright smoke suite: UI flows against the built server, plus a
   separate check of the built Docker image from inside the container.
 
+## Dependency pins
+
+- **PrimeVue stays on 4.x, `@primeuix/themes` on 2.x.** PrimeVue 5 switched to
+  the commercial PrimeUI license model: every deployment, free Community tier
+  included, needs a registered key and renders an "Invalid PrimeUI License"
+  banner without one. Amber is public and clone-and-deploy, so there is no key
+  to embed. 4.x is MIT. `.github/dependabot.yml` ignores both majors; do not
+  bump them past 4.x/2.x unless PrimeVue relicenses.
+- **TypeScript stays on 6.x**, not 7.x - typescript-eslint's peer range caps it.
+  See the `//typescript` note in the root `package.json`.
+
 ## Commit messages
 
 **Conventional Commits, always**: `type(scope): summary`.

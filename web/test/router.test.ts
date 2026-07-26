@@ -8,6 +8,17 @@ import {
   amberSurface,
 } from "../src/theme/amber-preset.ts";
 
+/**
+ * `@primeuix/themes` 2.x types `Preset["semantic"]` as an open object, so the
+ * merged preset has to be viewed structurally before these assertions can read
+ * into it. Only the branches asserted below are declared.
+ */
+type SemanticView = {
+  primary?: Record<string, string>;
+  colorScheme?: Record<string, { primary?: { color?: string; contrastColor?: string } }>;
+};
+const semantic = amberPreset.semantic as SemanticView | undefined;
+
 describe("router config", () => {
   it("uses the Repos page as the default route", () => {
     expect(routes[0]?.path).toBe("/");
@@ -65,18 +76,18 @@ describe("amber theme preset", () => {
 
   it("builds a preset with an amber primary in both color schemes", () => {
     // definePreset merges onto Aura, which already supplies color/hoverColor.
-    expect(amberPreset.semantic?.primary).toMatchObject(amberPalette);
+    expect(semantic?.primary).toMatchObject(amberPalette);
     // Dark reaches for 500, light for 700. The same scale position does not
     // clear contrast in both schemes, so these must not be unified.
-    expect(amberPreset.semantic?.colorScheme?.dark?.primary?.color).toBe("{primary.500}");
-    expect(amberPreset.semantic?.colorScheme?.light?.primary?.color).toBe("{primary.700}");
+    expect(semantic?.colorScheme?.dark?.primary?.color).toBe("{primary.500}");
+    expect(semantic?.colorScheme?.light?.primary?.color).toBe("{primary.700}");
   });
 
   it("never puts white text on an amber fill", () => {
     // White on amber-500 measures 2.6:1 and fails WCAG AA at any size, so the
     // dark scheme's on-primary color is a warm near-black (6.4:1). If someone
     // "fixes" this to #ffffff every filled primary button silently regresses.
-    expect(amberPreset.semantic?.colorScheme?.dark?.primary?.contrastColor).toBe("#2a1a0b");
+    expect(semantic?.colorScheme?.dark?.primary?.contrastColor).toBe("#2a1a0b");
   });
 
   it("never reaches for Aura's stock amber primitive", () => {

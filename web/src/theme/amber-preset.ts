@@ -2,12 +2,12 @@ import { definePreset } from "@primeuix/themes";
 import Aura from "@primeuix/themes/aura";
 
 /**
- * Amber - PrimeVue 5 theme preset.
+ * Amber - PrimeVue 4 theme preset.
  *
  * Dark-first. See palette.md for the measured contrast ratios behind every
  * value here. Three constraints are load-bearing:
  *
- *  - primary contrastColor is a warm near-black, never white. PrimeVue 5 has
+ *  - primary contrastColor is a warm near-black, never white. PrimeVue has
  *    no inverseColor token; contrastColor is the one components consume.
  *    White on amber-500 is 2.6:1 and fails at any size.
  *  - Dark mode uses primary 400/500; light mode uses 600/700. The same scale

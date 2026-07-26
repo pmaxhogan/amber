@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "//primevue": "Pinned to the 4.x line, and @primeuix/themes to the matching 2.x line, because PrimeVue 5 moved to the commercial PrimeUI license model (@primeui/license-manager): every deployment, including the free Community tier, needs a registered key and renders an 'Invalid PrimeUI License' banner without one. Amber is a public clone-and-deploy project, so there is no key we can ship. 4.x is MIT. Dependabot is told to skip both majors in .github/dependabot.yml. Revisit only if PrimeVue relicenses.",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -11,10 +12,9 @@
   },
   "dependencies": {
     "@amber/shared": "^0.1.0",
-    "@primeuix/themes": "^3.0.0",
-    "@primeuix/utils": "^0.8.0",
+    "@primeuix/themes": "^2.0.3",
     "pinia": "^4.0.2",
-    "primevue": "^5.0.0",
+    "primevue": "^4.5.5",
     "vue": "^3.5.40",
     "vue-router": "^5.2.0",
     "zod": "^4.4.3"

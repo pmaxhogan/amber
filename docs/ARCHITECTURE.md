@@ -17,8 +17,14 @@ note in the PR/commit message and a doc update.
   vue-tsc / typescript-eslint / vitest are incompatible with TS7, fall back to the
   latest 5.x and leave a comment in package.json.
 - npm workspaces monorepo: `shared/`, `server/`, `web/`, `e2e/`.
-- Server: Fastify 5. Frontend: Vue 3 + Vite 8 SPA + PrimeVue 5 (+ @primeuix/themes),
+- Server: Fastify 5. Frontend: Vue 3 + Vite 8 SPA + PrimeVue 4 (+ @primeuix/themes 2),
   pinia, vue-router. Validation: zod 4 in `shared/`, inferred types on both sides.
+  PrimeVue is pinned to the 4.x MIT line: 5.x adopted the commercial PrimeUI license
+  model, where every deployment - including the free Community tier - needs a
+  registered key and shows an "Invalid PrimeUI License" banner without one. Amber is
+  a public clone-and-deploy project, so there is no key to ship. `@primeuix/themes`
+  tracks that at 2.x, and `.github/dependabot.yml` ignores both majors. Revisit only
+  if PrimeVue relicenses.
 - DB: built-in `node:sqlite`. No ORM. Hand-rolled typed data layer + migration runner.
 - Logging: pino 10 only. Never console.*. stdout (NDJSON) + pino-roll size-rotated
   files in `$LOGS_DIR`. Child loggers per module (`log.child({ mod: "sync" })`).
@@ -490,13 +496,15 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   README and the CF Access app icon.
 - Pages: Repos (default; dense DataTable, lazy server-side mode, multi-select +
   bulk bar, detail drawer with runs/errors/settings/export/clone), Import
-  (textarea -> preview table -> commit), Accounts (forges + accounts CRUD,
+  (textarea -> preview table -> commit), Forges & Accounts (forges + accounts CRUD,
   default badges, write-only password fields; the add/edit account form shows
   forge-kind-specific credential help - for GitHub: link to
   https://github.com/settings/personal-access-tokens/new and instruct: create a
   fine-grained PAT, expiration "No expiration", repository access as broad as you
-  want backed up, and under Permissions grant ONLY "Contents: Read-only"
-  (Metadata read-only is added automatically); analogous short notes for GitLab
+  want backed up, and under Permissions grant "Contents: Read-only" plus, when
+  starred-repo account sync will be used, the Account permission
+  "Starring: Read-only" - nothing else (Metadata read-only is added
+  automatically); analogous short notes for GitLab
   (personal access token, read_repository scope), Bitbucket (app password /
   API token with repository read), and Gitea (access token, repository read)), Account Sync (per-account
   enable/visibility/interval), Settings (global editor + scope pickers, each field
