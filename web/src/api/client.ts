@@ -18,7 +18,7 @@ import {
   treePageSchema,
   type Account,
   type BulkRepoResponse,
-  type UpsertAccountSync,
+  type UpsertAccountSyncInput,
   type AmberEvent,
   type BulkRepoAction,
   type CreateAccount,
@@ -383,12 +383,12 @@ export function createApiClient(options: ApiClientOptions = {}) {
       (body) => body.rows,
     );
 
-  const createAccountSync = (input: UpsertAccountSync): Promise<AccountSyncRow> =>
+  const createAccountSync = (input: UpsertAccountSyncInput): Promise<AccountSyncRow> =>
     request("/api/account-syncs", { method: "POST", body: input, schema: accountSyncRowSchema });
 
   const updateAccountSync = (
     id: number,
-    input: Partial<UpsertAccountSync>,
+    input: Partial<UpsertAccountSyncInput>,
   ): Promise<AccountSyncRow> =>
     request(`/api/account-syncs/${id}`, {
       method: "PATCH",

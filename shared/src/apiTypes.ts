@@ -466,6 +466,11 @@ export const upsertAccountSyncSchema = z.object({
   intervalMinutes: z.number().int().min(1).default(360),
 });
 export type UpsertAccountSync = z.infer<typeof upsertAccountSyncSchema>;
+/**
+ * What a CALLER passes. Every defaulted field is optional here, unlike the
+ * inferred output type where the defaults have already been applied.
+ */
+export type UpsertAccountSyncInput = z.input<typeof upsertAccountSyncSchema>;
 
 /** accountId and source are immutable: change either by deleting and recreating. */
 export const updateAccountSyncSchema = z.object({
