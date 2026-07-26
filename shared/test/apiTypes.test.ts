@@ -106,6 +106,7 @@ describe("bulk and account sync payloads", () => {
   it("defaults account sync to every repo every 6 hours", () => {
     expect(upsertAccountSyncSchema.parse({ accountId: 2 })).toEqual({
       accountId: 2,
+      source: "owned",
       visibility: "all",
       enabled: true,
       intervalMinutes: 360,

@@ -138,6 +138,14 @@ export type UpdateAccount = z.infer<typeof updateAccountSchema>;
 export const repoStateSchema = z.enum(["active", "paused"]);
 export type RepoState = z.infer<typeof repoStateSchema>;
 
+/**
+ * How the repo row came to exist. Account sync only ever auto-removes rows it
+ * created itself, so a manually imported repo that a later account sync links
+ * to keeps origin 'manual'.
+ */
+export const repoOriginSchema = z.enum(["manual", "account_sync"]);
+export type RepoOrigin = z.infer<typeof repoOriginSchema>;
+
 export const syncOutcomeSchema = z.enum(["success", "error", "canceled"]);
 export type SyncOutcome = z.infer<typeof syncOutcomeSchema>;
 
@@ -164,6 +172,7 @@ export const repoSchema = z.object({
   accountOverrideId: idSchema.nullable(),
   forceAnonymous: z.boolean(),
   managedByAccountSyncId: idSchema.nullable(),
+  origin: repoOriginSchema,
   state: repoStateSchema,
   nextSyncAt: epochMsSchema.nullable(),
   consecutiveFailures: z.number().int().nonnegative(),
@@ -349,9 +358,19 @@ export interface EffectiveSettingsResponse {
 export const accountSyncVisibilitySchema = z.enum(["all", "public", "private"]);
 export type AccountSyncVisibility = z.infer<typeof accountSyncVisibilitySchema>;
 
+/**
+ * 'owned' backs up the repositories the account itself owns; 'starred' backs up
+ * whatever that account currently stars (GitHub only for now). An account may
+ * have one of each, hence UNIQUE(account_id, source).
+ */
+export const accountSyncSourceSchema = z.enum(["owned", "starred"]);
+export type AccountSyncSource = z.infer<typeof accountSyncSourceSchema>;
+
 export const accountSyncSchema = z.object({
   id: idSchema,
   accountId: idSchema,
+  source: accountSyncSourceSchema,
+  /** Meaningful for source 'owned' only; starred syncs always take the full list. */
   visibility: accountSyncVisibilitySchema,
   enabled: z.boolean(),
   intervalMinutes: z.number().int().min(1),
@@ -364,13 +383,41 @@ export const accountSyncSchema = z.object({
 });
 export type AccountSync = z.infer<typeof accountSyncSchema>;
 
+/**
+ * Create payload. Named "upsert" for historical reasons: creating a second sync
+ * with the same (accountId, source) is a conflict, not an update.
+ */
 export const upsertAccountSyncSchema = z.object({
   accountId: idSchema,
+  source: accountSyncSourceSchema.default("owned"),
+  /** Ignored by starred syncs, which the routes reject rather than silently drop. */
   visibility: accountSyncVisibilitySchema.default("all"),
   enabled: z.boolean().default(true),
   intervalMinutes: z.number().int().min(1).default(360),
 });
 export type UpsertAccountSync = z.infer<typeof upsertAccountSyncSchema>;
+
+/** accountId and source are immutable: change either by deleting and recreating. */
+export const updateAccountSyncSchema = z.object({
+  visibility: accountSyncVisibilitySchema.optional(),
+  enabled: z.boolean().optional(),
+  intervalMinutes: z.number().int().min(1).optional(),
+});
+export type UpdateAccountSync = z.infer<typeof updateAccountSyncSchema>;
+
+/** What one discovery run did. `removed` and `retained` stay 0 for owned syncs. */
+export const accountSyncRunResultSchema = z.object({
+  accountSync: accountSyncSchema,
+  discovered: z.number().int().nonnegative(),
+  created: z.number().int().nonnegative(),
+  linked: z.number().int().nonnegative(),
+  /** Present upstream but gone from the listing; never deleted, only counted. */
+  vanished: z.number().int().nonnegative(),
+  removed: z.number().int().nonnegative(),
+  retained: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+});
+export type AccountSyncRunResult = z.infer<typeof accountSyncRunResultSchema>;
 
 // ---------------------------------------------------------------------------
 // Git remote and status

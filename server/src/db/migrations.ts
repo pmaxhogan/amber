@@ -141,4 +141,65 @@ CREATE TABLE kv (
 );
 `;
 
-export const migrations: readonly Migration[] = [{ name: "001_initial", sql: initial }];
+/**
+ * Account syncs gain a `source`: an account can back up the repositories it
+ * owns and, separately, the repositories it stars. That turns the old
+ * UNIQUE(account_id) into UNIQUE(account_id, source), which SQLite can only
+ * express by rebuilding the table.
+ *
+ * Repos gain an `origin`: only rows an account sync created may ever be removed
+ * automatically, so a manually imported repo that a starred sync later links to
+ * stays 'manual' and survives an unstar.
+ *
+ * PRAGMA foreign_keys cannot be toggled inside a transaction and the migration
+ * runner wraps every migration in one, so the usual "turn foreign keys off,
+ * rebuild, turn them back on" dance is unavailable. The rebuild below is safe
+ * without it: dropping the parent table only trips a foreign key check when a
+ * child row actually references it, and the rename restores the name before the
+ * transaction commits.
+ */
+const starredSync = `
+CREATE TABLE account_syncs_002 (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  account_id       INTEGER NOT NULL REFERENCES accounts (id) ON DELETE CASCADE,
+  source           TEXT    NOT NULL DEFAULT 'owned' CHECK (source IN ('owned', 'starred')),
+  -- Applies to source 'owned' only; a starred sync always takes the full list.
+  visibility       TEXT    NOT NULL DEFAULT 'all' CHECK (visibility IN ('all', 'public', 'private')),
+  enabled          INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 1),
+  next_run_at      INTEGER NULL,
+  last_run_at      INTEGER NULL,
+  last_error       TEXT    NULL,
+  repos_discovered INTEGER NULL,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  UNIQUE (account_id, source)
+);
+
+INSERT INTO account_syncs_002 (
+  id, account_id, source, visibility, enabled, interval_minutes,
+  next_run_at, last_run_at, last_error, repos_discovered, created_at, updated_at
+)
+SELECT
+  id, account_id, 'owned', visibility, enabled, interval_minutes,
+  next_run_at, last_run_at, last_error, repos_discovered, created_at, updated_at
+FROM account_syncs;
+
+DROP TABLE account_syncs;
+
+ALTER TABLE account_syncs_002 RENAME TO account_syncs;
+
+CREATE INDEX idx_account_syncs_due ON account_syncs (next_run_at) WHERE enabled = 1;
+CREATE INDEX idx_account_syncs_account ON account_syncs (account_id);
+
+ALTER TABLE repos
+  ADD COLUMN origin TEXT NOT NULL DEFAULT 'manual'
+  CHECK (origin IN ('manual', 'account_sync'));
+
+CREATE INDEX idx_repos_origin ON repos (origin);
+`;
+
+export const migrations: readonly Migration[] = [
+  { name: "001_initial", sql: initial },
+  { name: "002_starred_sync", sql: starredSync },
+];
