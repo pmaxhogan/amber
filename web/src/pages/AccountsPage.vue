@@ -343,11 +343,6 @@ onMounted(() => void load());
           </div>
         </header>
 
-        <p class="amber-note forge-card__immutable">
-          Host, port, and protocol cannot be changed after a forge is created. That is what stops a
-          stored credential from ever being pointed at a different host.
-        </p>
-
         <table v-if="(accountsByForge.get(forge.id) ?? []).length > 0" class="account-table">
           <thead>
             <tr>
@@ -583,10 +578,6 @@ onMounted(() => void load());
 
 .forge-card__insecure {
   color: var(--amber-warn);
-}
-
-.forge-card__immutable {
-  margin: 0.75rem 0;
 }
 
 .account-table {
