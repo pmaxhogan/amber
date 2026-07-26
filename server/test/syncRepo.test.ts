@@ -444,3 +444,36 @@ describe("credential lifecycle", () => {
     expect(getAccount(db, accountId)?.lastUsedAt).toBeNull();
   });
 });
+
+describe("HEAD in the backup", () => {
+  it("points at the upstream default branch in bare mode", async () => {
+    await sync();
+
+    // Without this, a clone off the read-only remote lands on an unborn
+    // branch and checks out nothing, whatever the backup actually holds.
+    expect((await backupGit(["symbolic-ref", "HEAD"])).trim()).toBe("refs/heads/main");
+    expect((await backupGit(["rev-parse", "--verify", "HEAD"])).trim()).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("follows the upstream when its default branch is not called main", async () => {
+    await origin.git(["branch", "-m", "main", "trunk"]);
+    await sync();
+
+    expect((await backupGit(["symbolic-ref", "HEAD"])).trim()).toBe("refs/heads/trunk");
+  });
+
+  it("follows a default branch that is renamed after the first sync", async () => {
+    await sync();
+    expect((await backupGit(["symbolic-ref", "HEAD"])).trim()).toBe("refs/heads/main");
+
+    await origin.git(["branch", "-m", "main", "release"]);
+    await sync();
+
+    expect((await backupGit(["symbolic-ref", "HEAD"])).trim()).toBe("refs/heads/release");
+  });
+
+  it("does the same in mirror mode", async () => {
+    await sync({ clone_mode: "mirror" });
+    expect((await backupGit(["symbolic-ref", "HEAD"])).trim()).toBe("refs/heads/main");
+  });
+});

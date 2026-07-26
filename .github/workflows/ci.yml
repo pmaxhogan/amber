@@ -116,3 +116,47 @@ jobs:
 
       - name: Check the web bundle was emitted
         run: test -f web/dist/index.html
+
+  e2e:
+    name: End to end smoke
+    runs-on: ubuntu-latest
+    # Only worth running once the pieces it drives are known to compile.
+    needs: build
+    # A first clone of a real repository over the network is the slow step.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION_PRIMARY }}
+          cache: npm
+
+      - run: npm ci
+
+      # The suite drives the built server and the built frontend, not a dev
+      # server, so this has to be a real production build.
+      - name: Build all workspaces
+        run: npm run build
+
+      # Chromium only: the smoke suite is about whether amber works, not about
+      # cross-browser rendering.
+      - name: Install the Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      # git-lfs is not on the runner by default and the sync engine looks for it.
+      - name: Install git-lfs
+        run: sudo apt-get update && sudo apt-get install -y git-lfs
+
+      - name: Run the smoke suite
+        run: npm run test:e2e -w e2e
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7

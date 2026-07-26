@@ -9,6 +9,7 @@ import { gitRemotePlugin } from "./gitremote/routes.ts";
 import { apiRoutes } from "./routes/index.ts";
 import { cfAccessPlugin, type CfAccessKeyGetter } from "./security/cfAccess.ts";
 import { APP_VERSION } from "./version.ts";
+import { webPlugin } from "./web.ts";
 
 /**
  * The slice of the sync scheduler the API needs. Declared structurally rather
@@ -97,6 +98,8 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
 
   await app.register(apiRoutes, { prefix: "/api" });
   await app.register(gitRemotePlugin, { ctx });
+  // Last, so its catch-all fallback cannot shadow a real route.
+  await app.register(webPlugin, { config: ctx.config });
 
   return app;
 }

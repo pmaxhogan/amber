@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 /**
@@ -44,6 +45,12 @@ export const envSchema = z.object({
   // Used to build the clone URLs shown in the UI. Deployments must set this;
   // the default only makes sense for local development.
   PUBLIC_ORIGIN: z.string().url().default("http://localhost:8080"),
+  /**
+   * Where the built single page app lives. Defaults to web/dist resolved
+   * against this module, which is correct both in the image (/app/server/dist
+   * next to /app/web/dist) and when running from the repo.
+   */
+  WEB_DIST_DIR: z.string().min(1).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -61,6 +68,8 @@ export interface Config {
   secretKey: Buffer | null;
   logLevel: Env["LOG_LEVEL"];
   publicOrigin: string;
+  /** Absolute path to the built SPA. The app serves it when it exists. */
+  webDistDir: string;
   insecureMode: boolean;
   cfAccess: {
     teamDomain: string;
@@ -123,6 +132,9 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     secretKey: env.AMBER_SECRET_KEY === undefined ? null : Buffer.from(env.AMBER_SECRET_KEY, "hex"),
     logLevel: env.LOG_LEVEL,
     publicOrigin: env.PUBLIC_ORIGIN.replace(/\/+$/, ""),
+    webDistDir: resolve(
+      env.WEB_DIST_DIR ?? fileURLToPath(new URL("../../web/dist", import.meta.url)),
+    ),
     insecureMode,
     cfAccess:
       insecureMode || !hasCfAccess

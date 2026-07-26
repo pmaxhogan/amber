@@ -373,6 +373,13 @@ async function performSync(
     await fetchLfs(settings.paranoid, defaultBranch, authed, log);
   }
 
+  // Point HEAD at the upstream default branch for EVERY mode, not just the
+  // one that checks out a working tree. A bare backup whose HEAD still names
+  // git's init default serves an unborn branch: `git clone` off the read-only
+  // remote then succeeds and leaves an empty working tree, because the symref
+  // it was advertised does not resolve to anything.
+  await pointHeadAtDefaultBranch(defaultBranch, after, base, log);
+
   if (mode === "full" && layout === "worktree") {
     await updateWorkingTree(defaultBranch, after, settings.lfs_enabled, base, log);
   }
@@ -697,6 +704,37 @@ async function fetchLfs(
       { stderr: scrubCredentials(result.stderr).slice(0, 1000) },
       "git lfs fetch reported errors; some LFS objects may be missing upstream",
     );
+  }
+}
+
+/**
+ * Make the backup's HEAD name the branch the upstream calls default, so a
+ * clone lands on real history instead of an unborn branch. Best effort: a repo
+ * whose default branch was not advertised, or has not been fetched yet, keeps
+ * whatever HEAD it has rather than failing the sync over it.
+ */
+async function pointHeadAtDefaultBranch(
+  defaultBranch: string | null,
+  after: Map<string, string>,
+  base: GitRunOptions,
+  log: Logger,
+): Promise<void> {
+  const ref = defaultBranch === null ? null : `refs/heads/${defaultBranch}`;
+  if (ref === null || !after.has(ref)) {
+    return;
+  }
+  try {
+    const current = await runGit(["symbolic-ref", "--quiet", "HEAD"], base);
+    if (current.stdout.trim() === ref) {
+      return;
+    }
+  } catch {
+    // A detached or unreadable HEAD is exactly what the next line fixes.
+  }
+  try {
+    await runGit(["symbolic-ref", "HEAD", ref], base);
+  } catch (cause) {
+    log.warn({ defaultBranch, err: cause }, "could not point HEAD at the default branch");
   }
 }
 
