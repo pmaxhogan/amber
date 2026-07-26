@@ -59,6 +59,18 @@ export async function createTempApp(
     INSECURE_ALLOW_PUBLIC_ACCESS: "1",
     DATA_DIR: dir,
     AMBER_SECRET_KEY: TEST_SECRET_KEY,
+    /**
+     * Point the frontend at a directory that does not exist, so these tests
+     * always describe an API-only app.
+     *
+     * Without this the default resolves to the repo's own web/dist, which is
+     * present on a machine that has run a build and absent in CI, where only
+     * the shared workspace is built. The route tests would then exercise two
+     * different apps depending on where they ran: one with the SPA fallback
+     * installed and one without. web.test.ts is the only place that opts into
+     * a real dist, and it passes WEB_DIST_DIR explicitly.
+     */
+    WEB_DIST_DIR: join(dir, "no-frontend-here"),
     ...env,
   });
   const log = createConsoleLogger("silent");

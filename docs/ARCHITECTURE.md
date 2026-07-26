@@ -67,6 +67,7 @@ server/src/
   providers/github.ts     # + gitlab.ts, bitbucket.ts, gitea.ts
   providers/discovery.ts  # account-sync run: enumerate -> upsert repos
   gitremote/routes.ts     # smart HTTP read-only remote (/git/*)
+  web.ts                  # serves the built SPA + client-route fallback
   export/archive.ts       # zip/tar.gz/7z streaming of source, git-archive, file listing
   routes/*.ts             # REST routes per resource (thin; call domain/*)
   events.ts               # SSE broadcaster for live UI updates
@@ -74,7 +75,7 @@ web/src/
   main.ts, App.vue, router/, stores/, pages/, components/, theme/
   theme/amber-preset.ts   # PrimeVue theme preset, dark-first amber palette
   assets/logo.svg         # inclusion-in-amber mark
-e2e/                      # playwright smoke (runs against built docker image)
+e2e/                      # playwright smoke (built server + a docker image check)
 Dockerfile
 docker-compose.local.yml  # local full-stack test (docker desktop)
 deploy/docker-compose.nas.yml
@@ -170,7 +171,22 @@ Resolution order (narrowest wins): repo -> effective account (the override, or t
 forge default account; skipped when force_anonymous or no account) -> forge ->
 global -> registry default. `domain/settings.ts` exposes
 `resolveSettings(repoId)` returning the fully-merged typed object plus, for the UI,
-`explainSettings(repoId)` that reports which scope supplied each value.
+`explainSettings(repoId)` that reports which scope supplied each value, and
+`resolveSettingsForRepos(ids)` which answers for a whole page of repos in a fixed
+handful of queries (one per scope) rather than repeating the per-repo path.
+
+Read and write semantics, which the UI depends on:
+
+- `GET /api/settings/:scopeType/:scopeId?` returns the overrides STORED AT that
+  scope, sparse - never the resolved set. The distinction is load-bearing: the
+  settings editor has to tell "set here, to a value that happens to equal the
+  default" apart from "inherited", and resolved values make those identical.
+- `PUT` takes the same shape, where a **null value CLEARS** the override at that
+  scope and lets resolution fall through to the next layer. Clearing a key that
+  was never set is a no-op, not an error.
+- Both answer with `{ scopeType, scopeId, values }`. Unknown keys, and keys not
+  storable at the scope, are rejected as a whole rather than silently dropped, so
+  a typo cannot look like it saved.
 
 ## Import parsing (shared/src/importUrl.ts, used by server + web preview)
 
@@ -237,7 +253,28 @@ directory names never collide regardless of sanitization overlaps.
   - LFS in paranoid: `git lfs fetch --all` (all objects for all reachable refs incl.
     archives); LFS objects are never pruned.
   - Never run `git gc`/`prune`/`repack -d` on paranoid repos except `gc --no-prune`.
+  - ACCEPTED DEVIATION - there is no upstream-deletion DETECTION step. Amber
+    never asks the forge "was this branch deleted on purpose". What preserves
+    history is that the local refs are simply never pruned: `--prune` is off,
+    the archive refs pin every tip that stopped being reachable, and the
+    reflog and gc settings keep the objects alive. A ref that vanishes upstream
+    is therefore retained by construction rather than by a decision, which is
+    the safer failure mode - a forge outage looks exactly like a deletion, and
+    both outcomes are "keep everything".
   - The torture test suite is the acceptance gate (see Testing).
+- HEAD in the backup is pointed at the upstream default branch after every
+  fetch, in EVERY mode - not just `full`. A bare backup whose HEAD still names
+  git's init default advertises a symref that resolves to nothing, so a clone
+  off the read-only remote succeeds and checks out an empty tree. HEAD follows
+  the upstream across a rename, and a repo whose default branch was not
+  advertised keeps whatever HEAD it has rather than failing the sync.
+- No fetch refspec is written into the repo's git config. Every fetch passes its
+  refspecs explicitly on the command line, which is what keeps a mode change
+  (bare to mirror, say) from being silently overridden by config left behind by
+  the previous mode.
+- LFS fetch failures are non-fatal: they are logged at warn and the sync still
+  records success. An LFS server that is down, rate limiting, or refusing a
+  token must not cost the run its git objects, which are the part that matters.
 - Every sync records a `sync_runs` row + updates repo denormalized fields +
   `disk_usage_bytes` (recursive du, after the fetch) and emits an SSE event.
 
@@ -324,7 +361,12 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
     `POST /api/import` (commit; returns created/updated/failed per line)
   - `GET /api/repos` - server-side pagination
     (`page`, `perPage<=200`, `sort`, `dir`, `q`, `forgeId`, `state`, `outcome`),
-    returns rows + total. `GET /api/repos/:id`, `PATCH /api/repos/:id`
+    returns rows + total. Each row is DENORMALIZED with four read-only extras
+    the listing renders and `repos` does not store: `cloneMode` and
+    `syncEnabled` (layered settings, batch-resolved for the whole page in one
+    pass per scope) plus `lastOutcome` and `lastErrorKind` (from the newest
+    `sync_runs` row). They are optional on the shared schema because only this
+    endpoint populates them; the single-repo reads return the row as stored. `GET /api/repos/:id`, `PATCH /api/repos/:id`
     (pause/resume, override account, force_anonymous), `DELETE /api/repos/:id`
     (`?files=true` also removes the backup dir),
     `POST /api/repos/:id/sync` (sync now), `GET /api/repos/:id/runs` (paged).
@@ -334,16 +376,56 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   - `GET/POST /api/account-syncs`, `PATCH/DELETE /api/account-syncs/:id`,
     `POST /api/account-syncs/:id/run`.
   - `GET /api/git-remote` (enabled, username, cloneUrlTemplate, rotatedAt),
+    `PATCH /api/git-remote` `{ username }` (renames the basic-auth user;
+    works whether the remote is enabled or disabled, never touches the
+    password, and answers with the same shape GET does),
     `POST /api/git-remote/enable|disable|rotate` (enable/rotate return the
     plaintext password exactly once).
   - `GET /api/status` - version, queue depth, active syncs, totals (repos, disk),
     breaker state, insecure-mode flag.
-  - `GET /api/events` - SSE stream (sync started/finished, repo added, etc.).
+  - `GET /api/events` - SSE stream. Frames are `{ type, at, payload }`, framed
+    with a named `event:` line so a client can dispatch without parsing first.
+    The payload contract is pinned in `shared/src/apiTypes.ts`
+    (`eventPayloadSchemas`) and tested on BOTH sides. Every repo-scoped event
+    names its subject `repoId`, never `id`, so one client-side parse covers
+    all of them:
+
+    | type                    | guaranteed payload                          |
+    | ----------------------- | ------------------------------------------- |
+    | `sync.started`          | `{ repoId }`                                |
+    | `sync.finished`         | `{ repoId, outcome }`                       |
+    | `repo.created`          | `{ repoId }`                                |
+    | `repo.updated`          | `{ repoId }`                                |
+    | `repo.deleted`          | `{ repoId }`                                |
+    | `account_sync.finished` | `{ accountSyncId }`                         |
+    | `status.changed`        | `{ activeSyncs, queueDepth, breakerOpen }`  |
+
+    The envelope stays an open record, so a publisher may attach extra
+    diagnostic fields (`runId`, `slug`, `durationMs`) without breaking a
+    client. `status.changed` is published by the scheduler after every state
+    change and deduped against the last published triple, so an idle instance
+    re-arming its timer does not emit a stream of identical events.
+
+  Collection shapes are deliberately not uniform and are pinned in shared:
+  `/api/forges` and `/api/accounts` answer with BARE ARRAYS, `/api/account-syncs`
+  answers with a `{ rows }` envelope, and the paged endpoints answer with
+  `{ rows, total, page, perPage }`.
 
 ## Security model
 
 - CF Access JWT middleware (`security/cfAccess.ts`) on every route EXCEPT
-  `/healthz` and `/git/*`. Verification with `jose`: JWKS from
+  `/healthz` and `/git`. Note the exemption covers the BARE `/git` as well as
+  `/git/*`: the Cloudflare Access bypass application is scoped by destination
+  path, and a bypass on `/git` applies to `/git` itself too. The middleware has
+  to agree with that scoping exactly - when it exempted less than the edge
+  bypassed, bare `/git` answered 401 demanding authentication that could never
+  arrive, because Cloudflare had already waved the request through.
+  The boundary is a PATH SEPARATOR, never a character count, so `/git` does not
+  cover `/gitfoo` and, importantly, does not cover `/git-remote`, which is a
+  page in the SPA and stays authenticated. `isPublicPath` implements that rule
+  and is shared with the SPA fallback so the two cannot disagree.
+  Everything the SPA is served from sits BEHIND this middleware: the static
+  assets and the client-route fallback are as authenticated as the API. Verification with `jose`: JWKS from
   `https://<CF_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` via
   `createRemoteJWKSet` (built-in caching/kid-refresh), `jwtVerify` enforcing
   `iss = https://<team domain>`, `aud = CF_ACCESS_AUD`, exp/nbf with small skew;
@@ -389,8 +471,13 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
 `AMBER_SECRET_KEY`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`,
 `CF_ACCESS_ALLOWED_EMAILS`, `INSECURE_ALLOW_PUBLIC_ACCESS`, `LOG_LEVEL` (info),
 `PUBLIC_ORIGIN` (used for clone URLs; defaults to http://localhost:8080, so any
-real deployment must set it).
-`.env.example` documents every var; config.ts reads ONLY through zod validation.
+real deployment must set it),
+`WEB_DIST_DIR` (where the built SPA lives; defaults to `web/dist` resolved
+against the server module, which is correct both inside the image and when
+running from the repo - a deployment never needs to set it, which is why it is
+absent from `.env.example`).
+`.env.example` documents every deployment-fundamental var; config.ts reads ONLY
+through zod validation.
 Everything not deployment-fundamental is a DB setting managed in the UI, not env.
 
 ## Frontend
@@ -416,6 +503,15 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   shows which scope wins), Git Remote (enable, username, rotate, one-time password
   reveal, copyable clone URLs), About/Status.
 - SSE store keeps the table live (row-level updates, no refetch storms).
+- The built SPA is served by the server itself (`server/src/web.ts`), so the
+  image is a single process: fingerprinted assets get a one-year immutable
+  cache, and any other unmatched GET falls back to `index.html` with
+  `no-store` so client-side deep links work and a deploy is picked up
+  immediately. The fallback deliberately excludes `/healthz`, `/api` and
+  `/git` on the path-separator boundary above - an API typo has to stay a JSON
+  404 rather than becoming an unreadable HTML parse error. In development Vite
+  serves the app instead and proxies `/api` across, so a missing `web/dist` is
+  normal and logged rather than fatal.
 - Empty/error/loading states for every async view; toasts for mutations;
   confirmation dialogs for destructive actions (delete repo w/ files, rotate).
 - No em dashes in any UI copy. Tagline appears on About + README only.
@@ -437,20 +533,36 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   acceptance gate and runs in CI on every push/PR.
 - Coverage: v8 provider, lines+branches+functions+statements collected across
   server+shared+web. `scripts/coverage-ratchet.mjs` compares against
-  `coverage-baseline.json`: fail if any metric drops > 0.5 percentage points;
-  when coverage improves, CI (main only) auto-commits a raised baseline
-  (`[skip ci]` in the bump commit).
-- Playwright smoke (`e2e/`): compose up the built image with
-  INSECURE_ALLOW_PUBLIC_ACCESS=1 (localhost), then: import a small local repo via
-  a file-served git http fixture or a public GitHub repo, wait for sync success,
-  check listing renders, export a zip, enable git remote, `git clone` from the
-  container, assert push is rejected. Runs in CI on main + PRs touching src.
+  `coverage-baseline.json`: fail if any metric drops > 0.5 percentage points.
+  Raising the baseline is MANUAL: run `npm run coverage:ratchet:write` and
+  commit the result as its own chore commit. CI only checks the ratchet; it
+  does not commit anything back.
+- Playwright smoke (`e2e/`), run by the `e2e` job in ci.yml on push and PR:
+  - `tests/smoke.spec.ts` drives the BUILT server under node with
+    INSECURE_ALLOW_PUBLIC_ACCESS=1, against the BUILT frontend in a real
+    browser: insecure banner on every page, import a real public repository
+    through the UI, wait for the first sync to succeed, check the listing
+    renders it with its denormalized mode and outcome, download a source zip
+    and verify it carries both a local file header and an end-of-central-
+    directory record, enable the git remote and read the one-time password,
+    then a real `git clone` with the real binary, a rejected wrong password,
+    and a rejected push.
+  - `tests/dockerImage.spec.ts` smoke tests the built image from INSIDE the
+    container (`docker exec`): git, git-lfs and 7z present, healthz ok, and the
+    root serving the SPA. Skipped unless `AMBER_E2E_IMAGE` names an image.
+  - Why the split: INSECURE_ALLOW_PUBLIC_ACCESS binds 127.0.0.1, and a
+    published container port DNATs to the container's own interface, so a
+    host-side browser can never reach it. Running the server directly for the
+    UI flows and probing the image from within sidesteps that without
+    weakening the loopback rule.
 
 ## CI/CD
 
 - `ci.yml`: push + PR. Jobs: lint+typecheck, test+coverage+ratchet (Node 26),
-  compat test job (Node 24), web build. All jobs honor GitHub's native
-  `[skip ci]`. Concurrency group cancels superseded runs.
+  compat test job (Node 24), build, and the Playwright e2e smoke (needs build;
+  installs chromium and git-lfs; uploads its report on failure). All jobs honor
+  GitHub's native `[skip ci]`, which skips the whole workflow run rather than
+  needing a per-job guard. Concurrency group cancels superseded runs.
 - `build-image.yml`: push to main, path-filtered (server/, web/, shared/,
   Dockerfile, package*.json, workflow file) + workflow_dispatch. Builds
   multi-stage image, smoke-tests it (healthz + `git --version` + `git lfs version`

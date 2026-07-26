@@ -28,7 +28,20 @@ npm run build            # shared -> server -> web
   parser. Pure logic, no IO, used by both the server and the web app.
 - `server/` - Fastify 5 API, node:sqlite data layer, sync engine, git remote.
 - `web/` - Vue 3 + Vite + PrimeVue SPA.
-- `e2e/` - Playwright smoke suite against the built Docker image.
+- `e2e/` - Playwright smoke suite: UI flows against the built server, plus a
+  separate check of the built Docker image from inside the container.
+
+## Commit messages
+
+**Conventional Commits, always**: `type(scope): summary`.
+
+- Types in use: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `build`,
+  `ci`, `perf`. Scope is the area touched (`sync`, `web`, `api`, `gitremote`,
+  `e2e`, `coverage`, ...) and is optional when a change is genuinely global.
+- Summary is lower case, imperative, and no trailing period.
+- The body explains WHY, not what the diff already shows. Wrap at 72 columns.
+- A change that deviates from `docs/ARCHITECTURE.md` says so in the body and
+  updates the doc in the same commit.
 
 ## Style rules
 
