@@ -1,14 +1,22 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
+import { createPinia } from "pinia";
 import { createMemoryHistory, createRouter } from "vue-router";
 import App from "../src/App.vue";
 import { NAV_LINKS, routes } from "../src/router/index.ts";
+import { apiKey } from "../src/api/provide.ts";
+import { stubApi } from "./helpers/stubApi.ts";
 
 async function mountApp() {
   const router = createRouter({ history: createMemoryHistory(), routes });
   await router.push("/");
   await router.isReady();
-  const wrapper = mount(App, { global: { plugins: [router] } });
+  const wrapper = mount(App, {
+    global: {
+      plugins: [router, createPinia()],
+      provide: { [apiKey as symbol]: stubApi() },
+    },
+  });
   return { wrapper, router };
 }
 

@@ -31,17 +31,19 @@ export const routes: RouteRecordRaw[] = [
 export interface NavLink {
   to: string;
   label: string;
+  /** AppIcon name. */
+  icon: string;
 }
 
-/** Header navigation, in display order. */
+/** Sidebar navigation, in display order. */
 export const NAV_LINKS: NavLink[] = [
-  { to: "/", label: "Repos" },
-  { to: "/import", label: "Import" },
-  { to: "/accounts", label: "Accounts" },
-  { to: "/account-sync", label: "Account Sync" },
-  { to: "/settings", label: "Settings" },
-  { to: "/git-remote", label: "Git Remote" },
-  { to: "/about", label: "About" },
+  { to: "/", label: "Repos", icon: "repos" },
+  { to: "/import", label: "Import", icon: "import" },
+  { to: "/accounts", label: "Accounts", icon: "accounts" },
+  { to: "/account-sync", label: "Account Sync", icon: "sync" },
+  { to: "/settings", label: "Settings", icon: "settings" },
+  { to: "/git-remote", label: "Git Remote", icon: "remote" },
+  { to: "/about", label: "About", icon: "about" },
 ];
 
 export const router = createRouter({
