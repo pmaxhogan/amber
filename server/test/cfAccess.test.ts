@@ -36,21 +36,40 @@ interface RegisteredRoute {
 }
 
 /**
- * Turns `printRoutes({ commonPrefix: false })` output, which is one
- * "prefix /url (METHOD, METHOD)" line per route, into injectable requests.
+ * Turns `printRoutes({ commonPrefix: false })` output into injectable requests.
+ *
+ * The output is a TREE, not a flat list: a nested line carries only its own
+ * segment, so "/:id" under "/api/repos" is the route /api/repos/:id. Reading
+ * each line as a whole path would produce URLs that exist nowhere and get
+ * their 401 from the catch-all rather than from the route being guarded, which
+ * is a test that proves nothing. Indentation is four columns per level, so the
+ * segments are reassembled through a stack keyed by depth.
+ *
  * Path parameters and wildcards get concrete stand-ins; the guard runs before
  * any handler, so the values only need to route.
  */
 function parseRegisteredRoutes(printed: string): RegisteredRoute[] {
   const routes: RegisteredRoute[] = [];
+  const segments: string[] = [];
+
   for (const line of printed.split("\n")) {
-    const match = /(\/\S*)\s+\(([^)]+)\)\s*$/.exec(line);
-    const rawUrl = match?.[1];
-    const rawMethods = match?.[2];
-    if (rawUrl === undefined || rawMethods === undefined) {
+    const match = /^(.*?)(?:[├└]── )(\S+)\s+\(([^)]+)\)\s*$/.exec(line);
+    const prefix = match?.[1];
+    const segment = match?.[2];
+    const rawMethods = match?.[3];
+    if (prefix === undefined || segment === undefined || rawMethods === undefined) {
       continue;
     }
-    const url = rawUrl.replace(/:[^/]+/g, "1").replace(/\*/g, "x");
+
+    const depth = Math.floor(prefix.length / 4);
+    segments.length = depth;
+    segments.push(segment);
+
+    const url = segments
+      .join("")
+      .replace(/:[^/]+/g, "1")
+      .replace(/^\*$/, "/x")
+      .replace(/\*/g, "x");
     const methods = rawMethods.split(",").map((method) => method.trim());
     // HEAD is Fastify's automatic companion to GET, so testing GET covers it.
     const method = methods.find((candidate) => candidate !== "HEAD") ?? methods[0];
@@ -513,13 +532,23 @@ describe("the real app guards every /api route", () => {
    */
   it("rejects every registered route except /healthz and /git", async () => {
     const routes = parseRegisteredRoutes(app.printRoutes({ commonPrefix: false }));
-    expect(routes.length).toBeGreaterThan(20);
+    const urls = routes.map((route) => route.url);
+
+    // Nested routes must come back as full paths. If the tree were read one
+    // line at a time these would be bare "/1" and "/enable" and would 401 only
+    // by way of the catch-all, which would prove nothing about the guard.
+    expect(urls).toContain("/api/repos/1/export/1");
+    expect(urls).toContain("/api/account-syncs/1/run");
+    expect(urls).toContain("/api/git-remote/rotate");
+    expect(urls).toContain("/api/accounts/1/default");
+    expect(urls).toContain("/healthz");
+    expect(urls.some((url) => url.startsWith("/git/"))).toBe(true);
 
     const guarded = routes.filter(
       (route) => !route.url.startsWith("/git/") && route.url !== "/healthz",
     );
-    // Every /api route plus nothing else unauthenticated: if this ever drops to
-    // zero the parser broke and the assertions below would vacuously pass.
+    // If the parser ever silently stops matching, this floor fails rather than
+    // letting an empty loop below report success.
     expect(guarded.length).toBeGreaterThan(20);
 
     for (const route of guarded) {
