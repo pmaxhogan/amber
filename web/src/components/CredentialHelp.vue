@@ -29,10 +29,11 @@ const HELP: Record<ForgeKind, (origin: string) => Help> = {
     steps: [
       'Set the expiration to "No expiration" so backups do not stop silently.',
       "Under Repository access, pick as much as you want backed up: all repositories, or a selected list.",
-      'Under Permissions, grant ONLY "Contents: Read-only". Nothing else.',
+      'Under Repository permissions, grant "Contents: Read-only".',
+      'If you will use starred-repo account sync, also grant the Account permission "Starring: Read-only". Nothing else.',
       "Paste the generated token into the secret field. Your GitHub username goes in the username field.",
     ],
-    note: 'GitHub adds "Metadata: Read-only" automatically. That is expected and is the only other permission the token needs.',
+    note: 'GitHub adds "Metadata: Read-only" automatically. That is expected and needs no action.',
   }),
   gitlab: () => ({
     title: "GitLab personal access token",

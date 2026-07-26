@@ -145,7 +145,8 @@ and do not put services that trust requests by source address next to it.
   only by the deploying user. Losing the key makes every stored account secret
   unrecoverable; leaking it exposes them all.
 - **Scope forge tokens as narrowly as the forge allows.** Amber only ever reads.
-  On GitHub that is a fine-grained token with `Contents: Read-only`; GitLab
+  On GitHub that is a fine-grained token with `Contents: Read-only` (plus the
+  account permission `Starring: Read-only` if starred-repo sync is used); GitLab
   `read_repository`; Bitbucket and Gitea repository read.
 - **Keep the image updated.** Amber is pre-1.0 and moves fast. The example
   compose file includes an optional label-scoped Watchtower sidecar that picks up

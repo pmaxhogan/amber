@@ -149,7 +149,8 @@ describe("Accounts page write-only secret", () => {
     const { wrapper } = await openEdit();
 
     expect(wrapper.text()).toContain("GitHub fine-grained personal access token");
-    expect(wrapper.text()).toContain('grant ONLY "Contents: Read-only"');
+    expect(wrapper.text()).toContain('grant "Contents: Read-only"');
+    expect(wrapper.text()).toContain('"Starring: Read-only"');
     expect(wrapper.html()).toContain("https://github.com/settings/personal-access-tokens/new");
   });
 });
