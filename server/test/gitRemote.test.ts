@@ -271,12 +271,35 @@ describe("pushing", () => {
   });
 
   it("answers 403 to any other path under /git", async () => {
-    for (const path of ["/git/", `/git/${slug}.git/objects/info/packs`, "/git/whatever/HEAD"]) {
+    for (const path of [
+      "/git",
+      "/git/",
+      `/git/${slug}.git/objects/info/packs`,
+      "/git/whatever/HEAD",
+    ]) {
       const response = await fetch(`${server.baseUrl}${path}`, {
         headers: { authorization: basic(credentials.username, credentials.password) },
       });
       expect([403, 404]).toContain(response.status);
     }
+  });
+
+  /**
+   * The Cloudflare bypass is scoped to the destination path "/git", which
+   * covers the bare path as well as everything under it. Anything that treats
+   * the two differently shows up at the edge as an inconsistency, so they are
+   * pinned to the same status and the same body.
+   */
+  it("answers bare /git exactly as it answers /git/", async () => {
+    const headers = { authorization: basic(credentials.username, credentials.password) };
+    const bare = await fetch(`${server.baseUrl}/git`, { headers });
+    const slashed = await fetch(`${server.baseUrl}/git/`, { headers });
+
+    expect(bare.status).toBe(slashed.status);
+    expect(await bare.text()).toBe(await slashed.text());
+    // Plain text from the git namespace, never Fastify's default JSON 404.
+    expect(bare.headers.get("content-type")).toBe(slashed.headers.get("content-type"));
+    expect(bare.headers.get("content-type")).toMatch(/text\/plain/);
   });
 });
 
@@ -517,12 +540,21 @@ describe("the disabled remote", () => {
         `/git/${otherSlug}.git/git-upload-pack`,
         `/git/${otherSlug}.git/${WRITE_SERVICE}`,
         "/git/anything",
+        // Bare /git is in the namespace too, and a disabled remote must not
+        // answer it any differently from the rest.
+        "/git",
+        "/git/",
       ]) {
         const response = await fetch(`${fresh.baseUrl}${path}`, {
           headers: { authorization: basic(secret.username, secret.password) },
         });
         expect(response.status, path).toBe(404);
       }
+
+      const bareDisabled = await fetch(`${fresh.baseUrl}/git`);
+      const slashedDisabled = await fetch(`${fresh.baseUrl}/git/`);
+      expect(bareDisabled.status).toBe(slashedDisabled.status);
+      expect(await bareDisabled.text()).toBe(await slashedDisabled.text());
 
       const target = join(scratch("clone-disabled"), "repo");
       const result = await clone(

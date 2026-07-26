@@ -18,7 +18,11 @@ export interface CfAccessOptions {
   getKey?: CfAccessKeyGetter;
 }
 
-export const DEFAULT_PUBLIC_PREFIXES = ["/healthz", "/git/"] as const;
+/**
+ * "/git" rather than "/git/": the Cloudflare Access bypass application is
+ * scoped to the destination path "/git", which covers the bare path too.
+ */
+export const DEFAULT_PUBLIC_PREFIXES = ["/healthz", "/git"] as const;
 
 /** Cloudflare signs with RS256; pinning it prevents algorithm confusion. */
 const ALLOWED_ALGORITHMS = ["RS256"] as const;
@@ -53,24 +57,24 @@ export function requestPathname(url: string): string {
 }
 
 /**
- * A path is public when it equals a prefix exactly, or when the prefix ends in
- * "/" and the path starts with it. "/healthz" therefore matches "/healthz" but
- * not "/healthzz"; "/git/" matches "/git/repo.git" but not bare "/git".
- * Matching is case sensitive, so "/GIT/x" stays authenticated.
+ * A prefix covers the exact path and everything below it, which is how
+ * Cloudflare Access scopes an application by destination path: a bypass policy
+ * on "/git" applies to "/git" itself as well as "/git/*". This middleware has
+ * to agree with that scoping exactly. When it exempted less than the edge
+ * bypassed, bare "/git" answered 401 and demanded authentication that could
+ * never arrive, because Cloudflare had already waved the request through.
+ *
+ * The boundary is a path separator, never a character count, so "/git" does
+ * not cover "/gitfoo" or "/gitx/anything". Matching is case sensitive, so
+ * "/GIT/x" stays authenticated.
  */
 export function isPublicPath(pathname: string, prefixes: readonly string[]): boolean {
   for (const prefix of prefixes) {
     if (pathname === prefix) {
       return true;
     }
-    if (prefix.endsWith("/")) {
-      if (pathname.startsWith(prefix)) {
-        return true;
-      }
-      continue;
-    }
-    // A prefix without a trailing slash also matches its own directory form.
-    if (pathname === `${prefix}/`) {
+    const withSlash = prefix.endsWith("/") ? prefix : `${prefix}/`;
+    if (pathname === withSlash || pathname.startsWith(withSlash)) {
       return true;
     }
   }

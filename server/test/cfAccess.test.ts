@@ -22,6 +22,7 @@ import {
   cfAccessPlugin,
   CF_ACCESS_COOKIE,
   CF_ACCESS_HEADER,
+  DEFAULT_PUBLIC_PREFIXES,
   extractToken,
   isPublicPath,
   requestPathname,
@@ -152,6 +153,8 @@ async function buildGuarded(overrides: { config?: Config; getKey?: CfAccessKeyGe
   app.get("/healthzz", () => ({ ok: true }));
   app.get("/git", () => ({ ok: true }));
   app.get("/git/some-repo.git/info/refs", () => ({ ok: true }));
+  app.get("/gitfoo", () => ({ ok: true }));
+  app.get("/gitx/anything", () => ({ ok: true }));
   app.get("/GIT/some-repo", () => ({ ok: true }));
   await app.ready();
   return app;
@@ -167,7 +170,8 @@ describe("requestPathname", () => {
 });
 
 describe("isPublicPath", () => {
-  const prefixes = ["/healthz", "/git/"];
+  // The production list, so these assertions describe what actually ships.
+  const prefixes = DEFAULT_PUBLIC_PREFIXES;
 
   it("matches the exact public paths", () => {
     expect(isPublicPath("/healthz", prefixes)).toBe(true);
@@ -176,25 +180,36 @@ describe("isPublicPath", () => {
     expect(isPublicPath("/git/x/info/refs", prefixes)).toBe(true);
   });
 
+  it("exempts bare /git, which is inside the Cloudflare bypass scope", () => {
+    // Cloudflare's bypass on destination path "/git" waves through "/git"
+    // itself, so demanding a JWT there asks for something that cannot arrive.
+    expect(isPublicPath("/git", prefixes)).toBe(true);
+    expect(isPublicPath("/git/", prefixes)).toBe(true);
+  });
+
   it("does not let a longer path borrow a public prefix", () => {
     expect(isPublicPath("/healthzz", prefixes)).toBe(false);
     expect(isPublicPath("/healthz-admin", prefixes)).toBe(false);
     expect(isPublicPath("/healthzfoo", prefixes)).toBe(false);
   });
 
-  it("keeps bare /git authenticated, since the doc only exempts /git/*", () => {
-    expect(isPublicPath("/git", prefixes)).toBe(false);
+  it("stops at a path separator, so no prefix bleeds into a sibling", () => {
     expect(isPublicPath("/gitfoo", prefixes)).toBe(false);
+    expect(isPublicPath("/gitx/anything", prefixes)).toBe(false);
+    expect(isPublicPath("/git-admin", prefixes)).toBe(false);
+    expect(isPublicPath("/gitea/repo", prefixes)).toBe(false);
   });
 
   it("is case sensitive", () => {
     expect(isPublicPath("/GIT/x", prefixes)).toBe(false);
+    expect(isPublicPath("/GIT", prefixes)).toBe(false);
     expect(isPublicPath("/Healthz", prefixes)).toBe(false);
   });
 
   it("does not treat an api path as public just because it mentions one", () => {
     expect(isPublicPath("/api/healthz", prefixes)).toBe(false);
     expect(isPublicPath("/api/repos", prefixes)).toBe(false);
+    expect(isPublicPath("/api/git", prefixes)).toBe(false);
   });
 });
 
@@ -396,9 +411,12 @@ describe("cfAccessPlugin request guarding", () => {
 });
 
 describe("public prefixes", () => {
-  it("lets /healthz and /git/* through with no token", async () => {
+  it("lets /healthz, bare /git and /git/* through with no token", async () => {
     const app = await buildGuarded();
     expect((await app.inject({ method: "GET", url: "/healthz" })).statusCode).toBe(200);
+    // Bare /git is inside the Cloudflare bypass scope, so it must not be met
+    // with a demand for authentication that the bypass guarantees never comes.
+    expect((await app.inject({ method: "GET", url: "/git" })).statusCode).toBe(200);
     expect(
       (await app.inject({ method: "GET", url: "/git/some-repo.git/info/refs" })).statusCode,
     ).toBe(200);
@@ -408,7 +426,8 @@ describe("public prefixes", () => {
   it("still guards paths that merely start like a public one", async () => {
     const app = await buildGuarded();
     expect((await app.inject({ method: "GET", url: "/healthzz" })).statusCode).toBe(401);
-    expect((await app.inject({ method: "GET", url: "/git" })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/gitfoo" })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: "/gitx/anything" })).statusCode).toBe(401);
     expect((await app.inject({ method: "GET", url: "/GIT/some-repo" })).statusCode).toBe(401);
     await app.close();
   });
@@ -542,11 +561,15 @@ describe("the real app guards every /api route", () => {
     expect(urls).toContain("/api/git-remote/rotate");
     expect(urls).toContain("/api/accounts/1/default");
     expect(urls).toContain("/healthz");
+    expect(urls).toContain("/git");
     expect(urls.some((url) => url.startsWith("/git/"))).toBe(true);
 
-    const guarded = routes.filter(
-      (route) => !route.url.startsWith("/git/") && route.url !== "/healthz",
-    );
+    // The exempt set, spelled out independently of the implementation: the
+    // health check, and the git namespace the Cloudflare bypass covers, which
+    // is the bare path as well as everything under it.
+    const exempt = (url: string): boolean =>
+      url === "/healthz" || url === "/git" || url.startsWith("/git/");
+    const guarded = routes.filter((route) => !exempt(route.url));
     // If the parser ever silently stops matching, this floor fails rather than
     // letting an empty loop below report success.
     expect(guarded.length).toBeGreaterThan(20);

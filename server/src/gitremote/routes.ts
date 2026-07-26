@@ -319,11 +319,14 @@ export const gitRemotePlugin: FastifyPluginAsync<{ ctx: AppContext }> = async (a
   });
 
   /**
-   * Catch all for every other path and method under /git/. It deliberately
-   * never looks at what was requested: there is no write service to name, only
-   * an explanation that this remote does not accept one.
+   * Catch all for every other path and method in the /git namespace. It
+   * deliberately never looks at what was requested: there is no write service
+   * to name, only an explanation that this remote does not accept one.
    */
-  app.all("/git/*", async (request, reply) => {
+  const namespaceFallback = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+  ): Promise<FastifyReply> => {
     const state = readGitRemoteState(ctx.db);
     if (!state.enabled || state.passwordHash === null) {
       return reply.code(404).type("text/plain; charset=utf-8").send("Not found.\n");
@@ -333,5 +336,11 @@ export const gitRemotePlugin: FastifyPluginAsync<{ ctx: AppContext }> = async (a
       request.body.resume();
     }
     return reply.code(403).type("text/plain; charset=utf-8").send(READ_ONLY_MESSAGE);
-  });
+  };
+
+  // "/git/*" does not match the bare path, and the Cloudflare bypass covers
+  // both, so registering only the wildcard left "/git" to Fastify's default
+  // JSON 404 while every other path in the namespace answered in plain text.
+  app.all("/git", namespaceFallback);
+  app.all("/git/*", namespaceFallback);
 };
