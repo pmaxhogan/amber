@@ -30,11 +30,13 @@ export interface TreeEntry {
 
 export class ExportError extends Error {
   override readonly name = "ExportError";
-  constructor(
-    message: string,
-    readonly statusCode: number,
-  ) {
+  readonly statusCode: number;
+
+  // Not a constructor parameter property: node's strip-only TypeScript mode
+  // rejects those, and `npm run dev` runs this file directly.
+  constructor(message: string, statusCode: number) {
     super(message);
+    this.statusCode = statusCode;
   }
 }
 

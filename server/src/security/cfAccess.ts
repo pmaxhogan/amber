@@ -116,8 +116,13 @@ function emailClaim(payload: JWTPayload): string | null {
 }
 
 class CfAccessDenied extends Error {
-  constructor(readonly reason: string) {
+  readonly reason: string;
+
+  // Not a constructor parameter property: node's strip-only TypeScript mode
+  // rejects those, and `npm run dev` runs this file directly.
+  constructor(reason: string) {
     super(reason);
+    this.reason = reason;
     this.name = "CfAccessDenied";
   }
 }

@@ -79,12 +79,16 @@ export function killLiveGitProcesses(): void {
 
 export class GitSpawnError extends Error {
   override readonly name = "GitSpawnError";
-  constructor(
-    message: string,
-    readonly code: number | null,
-    readonly stderr: string,
-  ) {
+  readonly code: number | null;
+  readonly stderr: string;
+
+  // Fields are assigned explicitly rather than declared as constructor
+  // parameter properties: node runs TypeScript in strip-only mode, which
+  // rejects that syntax, and `npm run dev` runs this file directly.
+  constructor(message: string, code: number | null, stderr: string) {
     super(message);
+    this.code = code;
+    this.stderr = stderr;
   }
 }
 
