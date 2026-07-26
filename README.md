@@ -32,13 +32,30 @@ out as a read-only git remote.
 
 ## Self-hosting
 
-> Quickstart is a work in progress while the first release comes together.
+Prebuilt images are published to GHCR on every push to main:
+`ghcr.io/pmaxhogan/amber:latest`. No need to clone or build anything -
+[`deploy/docker-compose.example.yml`](deploy/docker-compose.example.yml) pulls
+the image, mounts a data directory, and includes an optional label-scoped
+Watchtower sidecar that keeps the container current automatically.
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/pmaxhogan/amber/main/deploy/docker-compose.example.yml
+curl -fsSL https://raw.githubusercontent.com/pmaxhogan/amber/main/.env.example -o .env
+# Edit docker-compose.example.yml: point the volume and env_file at your data
+# directory and set user: to its owner. Fill in AMBER_SECRET_KEY and the
+# Cloudflare Access settings in .env, then:
+docker compose -f docker-compose.example.yml up -d
+```
+
+A fresh install comes seeded with `github.com` and `gitlab.com` forges, so the
+first import is just pasting URLs. Both can be removed if you do not want them.
+
+To build from source instead:
 
 ```bash
 git clone https://github.com/pmaxhogan/amber.git
 cd amber
 cp .env.example .env
-# Fill in AMBER_SECRET_KEY and the Cloudflare Access settings, then:
 docker compose -f docker-compose.local.yml up --build
 ```
 
