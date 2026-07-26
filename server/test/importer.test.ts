@@ -5,6 +5,7 @@ import { listForges } from "../src/domain/forges.ts";
 import {
   commitImport,
   previewImport,
+  redactLine,
   staggerStepFor,
   MAX_STAGGER_WINDOW_MS,
 } from "../src/domain/importer.ts";
@@ -182,6 +183,51 @@ describe("account matching on import", () => {
     expect(result.results[0]?.message).toMatch(/Passwords in URLs are not supported/);
     expect(result.results[0]?.message).not.toContain("hunter2");
     expect(all().total).toBe(0);
+  });
+});
+
+describe("password redaction in echoed lines", () => {
+  it("masks a password rather than echoing it back", () => {
+    expect(redactLine("https://user:hunter2@github.com/a/b")).toBe(
+      "https://user:***@github.com/a/b",
+    );
+    expect(redactLine("user:hunter2@github.com/a/b")).toBe("user:***@github.com/a/b");
+    expect(redactLine("http://u:p@host:8080/a/b")).toBe("http://u:***@host:8080/a/b");
+    expect(redactLine("https://user:@github.com/a/b")).toBe("https://user:***@github.com/a/b");
+  });
+
+  it("leaves lines with no password alone", () => {
+    for (const line of [
+      "https://github.com/nodejs/node",
+      "github.com/nodejs/node",
+      "pmaxhogan@github.com/a/b",
+      "https://host:8443/a/b",
+      "git@github.com:torvalds/linux.git",
+      "",
+    ]) {
+      expect(redactLine(line)).toBe(line);
+    }
+  });
+
+  it("redacts the echoed line in both preview and commit", () => {
+    const line = "https://user:hunter2@github.com/a/b";
+
+    const preview = previewImport(db, line);
+    expect(JSON.stringify(preview)).not.toContain("hunter2");
+    expect(preview.results[0]?.line).toBe("https://user:***@github.com/a/b");
+
+    const committed = commitImport(db, line, { now: NOW });
+    expect(JSON.stringify(committed)).not.toContain("hunter2");
+    expect(committed.results[0]?.line).toBe("https://user:***@github.com/a/b");
+  });
+
+  it("redacts only the offending line in a mixed block", () => {
+    const preview = previewImport(
+      db,
+      ["https://github.com/ok/one", "https://user:hunter2@github.com/a/b"].join("\n"),
+    );
+    expect(preview.results[0]?.line).toBe("https://github.com/ok/one");
+    expect(preview.results[1]?.line).not.toContain("hunter2");
   });
 });
 

@@ -49,8 +49,15 @@ describe("buildApp", () => {
   });
 
   it("returns 404 for an unregistered route", async () => {
-    const response = await app.inject({ method: "GET", url: "/api/repos" });
+    const response = await app.inject({ method: "GET", url: "/api/not-a-resource" });
     expect(response.statusCode).toBe(404);
+    expect(response.json()).toMatchObject({ error: "not_found" });
+  });
+
+  it("serves the registered API routes", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/repos" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ rows: [], total: 0 });
   });
 });
 

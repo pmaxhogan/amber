@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import Fastify from "fastify";
 import {
   createLocalJWKSet,
@@ -8,8 +11,11 @@ import {
   type JSONWebKeySet,
   type JWK,
 } from "jose";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { buildApp, type AmberApp } from "../src/app.ts";
 import { loadConfig, type Config } from "../src/config.ts";
+import { openDb, type Db } from "../src/db/db.ts";
+import { migrate } from "../src/db/migrate.ts";
 import { createConsoleLogger } from "../src/logging.ts";
 import {
   cfAccessPlugin,
@@ -410,5 +416,77 @@ describe("fail closed configuration", () => {
     const app = await buildGuarded({ config });
     expect((await app.inject({ method: "GET", url: "/api/repos" })).statusCode).toBe(200);
     await app.close();
+  });
+});
+
+/**
+ * The plugin is wrapped in fastify-plugin so its hook escapes the encapsulated
+ * scope it is registered in. Registered plainly, the hook would never see the
+ * sibling apiRoutes and every /api route would be wide open, so this exercises
+ * the real buildApp rather than a hand rolled instance.
+ */
+describe("the real app guards every /api route", () => {
+  let dir: string;
+  let db: Db;
+  let app: AmberApp;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), "amber-guarded-"));
+    const config = loadConfig({
+      DATA_DIR: dir,
+      AMBER_SECRET_KEY: "a".repeat(64),
+      CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
+      CF_ACCESS_AUD: AUD,
+      CF_ACCESS_ALLOWED_EMAILS: ALLOWED,
+    });
+    const log = createConsoleLogger("silent");
+    db = openDb(config.dbPath);
+    migrate(db, log);
+    app = await buildApp({ config, log, db, version: "9.9.9-test", cfAccessGetKey: getKey });
+  });
+
+  afterEach(async () => {
+    await app.close();
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rejects every API route without a token", async () => {
+    for (const url of [
+      "/api/status",
+      "/api/repos",
+      "/api/forges",
+      "/api/accounts",
+      "/api/settings/global",
+      "/api/events",
+    ]) {
+      const response = await app.inject({ method: "GET", url });
+      expect(response.statusCode, url).toBe(401);
+    }
+    expect((await app.inject({ method: "POST", url: "/api/import", payload: {} })).statusCode).toBe(
+      401,
+    );
+  });
+
+  it("serves the same routes with a valid token", async () => {
+    const headers = { [CF_ACCESS_HEADER]: await makeToken() };
+    expect((await app.inject({ method: "GET", url: "/api/status", headers })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/api/forges", headers })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/api/repos", headers })).statusCode).toBe(200);
+  });
+
+  it("reports insecureMode false to an authenticated caller", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/status",
+      headers: { [CF_ACCESS_HEADER]: await makeToken() },
+    });
+    expect(response.json()).toMatchObject({ insecureMode: false });
+  });
+
+  it("leaves /healthz open for the docker healthcheck", async () => {
+    const response = await app.inject({ method: "GET", url: "/healthz" });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ ok: true });
   });
 });

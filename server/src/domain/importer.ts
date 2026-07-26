@@ -37,6 +37,30 @@ const NO_ACCOUNT_MESSAGE = (username: string, host: string): string =>
   `an account override. Add the account first if it needs credentials.`;
 
 /**
+ * Matches a `user:password@` in the authority, with or without a scheme, and
+ * captures the password so it can be masked.
+ */
+const USERINFO_PASSWORD_RE = /^((?:[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)?[^/?#@\s]*:)[^/?#@\s]*(@)/;
+
+/**
+ * Every import result echoes its input line so the preview table can show what
+ * was parsed. A line like `https://user:hunter2@host/x` is rejected, but the
+ * echo would still carry the password into an API response and from there into
+ * browser memory and any request log. Mask it before the line goes anywhere.
+ */
+export function redactLine(line: string): string {
+  return line.replace(
+    USERINFO_PASSWORD_RE,
+    (_match, head: string, at: string) => `${head}***${at}`,
+  );
+}
+
+function redactResult<T extends ImportLineResult>(result: T): T {
+  const line = redactLine(result.line);
+  return line === result.line ? result : { ...result, line };
+}
+
+/**
  * Warn when a user@ prefix names an account we do not have. Applied to both
  * preview and commit so the preview table shows exactly what will happen.
  */
@@ -54,7 +78,9 @@ function checkAccountPrefix(db: Db, result: ImportLineResult): ImportLineResult 
 
 /** Pure parse plus account matching, no writes. Backed by shared/src/importUrl.ts. */
 export function previewImport(db: Db, text: string): ImportPreviewResponse {
-  const results = parseImportText(text).map((result) => checkAccountPrefix(db, result));
+  const results = parseImportText(text).map((result) =>
+    redactResult(checkAccountPrefix(db, result)),
+  );
   return { results, summary: summarizeImport(results) };
 }
 
@@ -80,7 +106,8 @@ export function commitImport(
   options: ImportOptions = {},
 ): ImportCommitResponse {
   const now = options.now ?? Date.now();
-  const parsedLines = parseImportText(text);
+  // Redact first, so nothing downstream can echo a pasted password.
+  const parsedLines = parseImportText(text).map(redactResult);
   const importable = parsedLines.filter((line) => line.status !== "error").length;
   const step = staggerStepFor(importable, options.staggerStepMs ?? STAGGER_STEP_MS);
 
