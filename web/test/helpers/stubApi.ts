@@ -101,6 +101,7 @@ export function makeRepo(overrides: Partial<RepoRow> = {}): RepoRow {
     accountOverrideId: null,
     forceAnonymous: false,
     managedByAccountSyncId: null,
+    origin: "manual",
     state: "active",
     nextSyncAt: 1_700_000_600_000,
     consecutiveFailures: 0,
