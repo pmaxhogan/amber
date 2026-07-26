@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb, type Db } from "../src/db/db.ts";
 import { migrate } from "../src/db/migrate.ts";
@@ -20,7 +20,8 @@ import {
 } from "../src/gitremote/routes.ts";
 import { AuthThrottle } from "../src/gitremote/throttle.ts";
 import { buildGitEnv, GitSpawnError, liveGitProcessCount, runGitCapture } from "../src/gitSpawn.ts";
-import { findRepoById, findRepoBySlug, repoDirFor } from "../src/repoLocator.ts";
+import { getRepo, getRepoBySlug } from "../src/domain/repos.ts";
+import { repoDirFor } from "../src/repoDir.ts";
 import { createConsoleLogger } from "../src/logging.ts";
 import { insertRepoRow } from "./helpers/gitFixture.ts";
 
@@ -227,31 +228,49 @@ describe("git remote kv state", () => {
   });
 });
 
-describe("repoLocator", () => {
+describe("repo lookup for the serving paths", () => {
   it("finds a repo by id and by slug, with or without the .git suffix", () => {
     const id = insertRepoRow(db, { slug: "my-repo-abcd1234", displayName: "my-repo" });
-    expect(findRepoById(db, id)?.slug).toBe("my-repo-abcd1234");
-    expect(findRepoBySlug(db, "my-repo-abcd1234")?.id).toBe(id);
-    expect(findRepoBySlug(db, "my-repo-abcd1234.git")?.id).toBe(id);
+    expect(getRepo(db, id)?.slug).toBe("my-repo-abcd1234");
+    expect(getRepoBySlug(db, "my-repo-abcd1234")?.id).toBe(id);
+    expect(getRepoBySlug(db, "my-repo-abcd1234.git")?.id).toBe(id);
   });
 
   it("returns undefined rather than guessing", () => {
-    expect(findRepoById(db, 12345)).toBeUndefined();
-    expect(findRepoBySlug(db, "nope")).toBeUndefined();
-    expect(findRepoBySlug(db, "")).toBeUndefined();
-    expect(findRepoBySlug(db, ".git")).toBeUndefined();
+    expect(getRepo(db, 12345)).toBeUndefined();
+    expect(getRepoBySlug(db, "nope")).toBeUndefined();
+    expect(getRepoBySlug(db, "")).toBeUndefined();
+    expect(getRepoBySlug(db, ".git")).toBeUndefined();
   });
 
   it("builds the directory from the stored slug, so a traversing slug cannot escape", () => {
     // Even if a row somehow held a traversing slug, the lookup is by exact
     // match on a column, so a request cannot introduce one.
-    expect(findRepoBySlug(db, "../../etc")).toBeUndefined();
+    expect(getRepoBySlug(db, "../../etc")).toBeUndefined();
     const id = insertRepoRow(db, { slug: "safe-slug-00001111" });
-    const repo = findRepoById(db, id);
+    const repo = getRepo(db, id);
     expect(repo).toBeDefined();
-    expect(repoDirFor({ backupsDir: join("/data", "backups") }, repo!)).toBe(
-      join("/data", "backups", "safe-slug-00001111"),
-    );
+    const backupsDir = resolve(join("/data", "backups"));
+    expect(repoDirFor({ backupsDir }, repo!)).toBe(join(backupsDir, "safe-slug-00001111"));
+  });
+
+  it("rejects a slug that the generator could never have produced", () => {
+    // repoDirFor is the only way any code names a backup directory, so the
+    // guard here covers the git remote, the exports, and the file remover.
+    expect(() =>
+      repoDirFor({ backupsDir: resolve("/data/backups") }, { slug: "../escape" }),
+    ).toThrow();
+  });
+
+  it("names the same directory that the backup file remover deletes", () => {
+    // The serving paths and the delete path must never disagree about which
+    // directory belongs to a repo. They agree because both call repoDirFor.
+    const backupsDir = resolve(join("/data", "backups"));
+    const repo = { slug: "shared-path-22223333" };
+    const removerRoot = resolve(backupsDir);
+    const dir = repoDirFor({ backupsDir }, repo);
+    expect(dir.startsWith(removerRoot + sep)).toBe(true);
+    expect(dir).toBe(join(removerRoot, repo.slug));
   });
 });
 

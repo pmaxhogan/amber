@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
-import { exportFormatSchema, MAX_PER_PAGE, type ExportFormat } from "@amber/shared";
+import { exportFormatSchema, MAX_PER_PAGE, type ExportFormat, type Repo } from "@amber/shared";
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import { z } from "zod";
 import {
@@ -15,7 +15,8 @@ import {
   type ArchiveHandle,
   type TreeEntry,
 } from "../export/archive.ts";
-import { findRepoById, repoDirFor, type LocatedRepo } from "../repoLocator.ts";
+import { getRepo } from "../domain/repos.ts";
+import { repoDirFor } from "../repoDir.ts";
 
 /** /api/repos/:id/export source and gitdir archives, tree, and blob. */
 
@@ -74,13 +75,13 @@ export const exportRoutes: FastifyPluginAsync = async (app) => {
   const log = ctx.log.child({ mod: "export" });
 
   /** Resolve the row, then the directory from the row, never from the URL. */
-  function locate(rawId: unknown, reply: FastifyReply): { repo: LocatedRepo; dir: string } | null {
+  function locate(rawId: unknown, reply: FastifyReply): { repo: Repo; dir: string } | null {
     const parsed = paramsSchema.safeParse({ id: rawId });
     if (!parsed.success) {
       reply.code(400).send({ error: "bad_request", message: "Invalid repository id" });
       return null;
     }
-    const repo = findRepoById(ctx.db, parsed.data.id);
+    const repo = getRepo(ctx.db, parsed.data.id);
     if (repo === undefined) {
       reply.code(404).send({ error: "not_found", message: "Repository not found" });
       return null;

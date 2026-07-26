@@ -1,10 +1,12 @@
 import { existsSync } from "node:fs";
 import { PassThrough, Readable } from "node:stream";
 import { createGunzip } from "node:zlib";
+import type { Repo } from "@amber/shared";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { AppContext } from "../app.ts";
 import { DEFAULT_UPLOAD_PACK_TIMEOUT_MS, spawnGit } from "../gitSpawn.ts";
-import { findRepoBySlug, repoDirFor, type LocatedRepo } from "../repoLocator.ts";
+import { getRepoBySlug } from "../domain/repos.ts";
+import { repoDirFor } from "../repoDir.ts";
 import { safeEqualString, verifyGitPassword } from "../security/gitPassword.ts";
 import { readGitRemoteState } from "./config.ts";
 import { AuthThrottle } from "./throttle.ts";
@@ -159,8 +161,8 @@ export const gitRemotePlugin: FastifyPluginAsync<{ ctx: AppContext }> = async (a
   }
 
   /** Resolve the slug to a row, then to a directory built from the row. */
-  function locate(slug: string, reply: FastifyReply): LocatedRepo | null {
-    const repo = findRepoBySlug(ctx.db, slug);
+  function locate(slug: string, reply: FastifyReply): Repo | null {
+    const repo = getRepoBySlug(ctx.db, slug);
     if (repo === undefined) {
       reply.code(404).type("text/plain; charset=utf-8").send("Repository not found.\n");
       return null;

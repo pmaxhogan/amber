@@ -16,7 +16,6 @@ import type { FastifyPluginAsync } from "fastify";
 import type { Config } from "../config.ts";
 import { invalid } from "../domain/errors.ts";
 import {
-  assertSafeSlug,
   bulkRepoAction,
   deleteRepo,
   listRepos,
@@ -26,6 +25,7 @@ import {
   updateRepo,
   type RepoFileRemover,
 } from "../domain/repos.ts";
+import { repoDirFor } from "../repoDir.ts";
 import { parseBody, parseParams, parseQuery } from "./validate.ts";
 
 /**
@@ -38,7 +38,7 @@ import { parseBody, parseParams, parseQuery } from "./validate.ts";
 export function createBackupFileRemover(config: Config): RepoFileRemover {
   const root = resolve(config.backupsDir);
   return async (repo: Repo): Promise<void> => {
-    const dir = resolve(root, assertSafeSlug(repo.slug));
+    const dir = repoDirFor(config, repo);
     if (dir !== root && !dir.startsWith(root + sep)) {
       throw invalid("Refusing to delete a path outside the backups directory.");
     }
