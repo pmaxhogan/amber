@@ -278,7 +278,7 @@ onMounted(() => void load());
 <template>
   <section>
     <PageHeader
-      title="Accounts"
+      title="Forges &amp; Accounts"
       description="Forges amber knows about, and the credentials it uses against each one. Secrets are write-only: amber stores them encrypted and never gives them back."
     >
       <template #actions>

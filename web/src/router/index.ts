@@ -19,7 +19,7 @@ export const routes: RouteRecordRaw[] = [
     path: "/accounts",
     name: "accounts",
     component: () => import("../pages/AccountsPage.vue"),
-    meta: { title: "Accounts" },
+    meta: { title: "Forges & Accounts" },
   },
   {
     path: "/account-sync",
@@ -59,7 +59,7 @@ export interface NavLink {
 export const NAV_LINKS: NavLink[] = [
   { to: "/", label: "Repos", icon: "repos" },
   { to: "/import", label: "Import", icon: "import" },
-  { to: "/accounts", label: "Accounts", icon: "accounts" },
+  { to: "/accounts", label: "Forges & Accounts", icon: "accounts" },
   { to: "/account-sync", label: "Account Sync", icon: "sync" },
   { to: "/settings", label: "Settings", icon: "settings" },
   { to: "/git-remote", label: "Git Remote", icon: "remote" },

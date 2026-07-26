@@ -223,7 +223,7 @@ onMounted(() => void load());
       v-else-if="accounts.length === 0 && error === null"
       icon="accounts"
       title="No accounts to sync from"
-      description="Account discovery needs a credential that can list repositories. Add an account on the Accounts page first."
+      description="Account discovery needs a credential that can list repositories. Add an account on the Forges &amp; Accounts page first."
     />
 
     <EmptyState
