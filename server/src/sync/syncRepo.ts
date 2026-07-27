@@ -13,6 +13,7 @@ import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
 import { getCredential, markAccountUsed } from "../domain/accounts.ts";
 import { resolveSettings } from "../domain/settings.ts";
+import { isPlausibleRef } from "../gitRef.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { backoffDelayMs, jitteredIntervalMs, RATE_LIMIT_BACKOFF_FACTOR } from "./backoff.ts";
 import { directorySizeBytes } from "./diskUsage.ts";
@@ -576,7 +577,17 @@ async function readDefaultBranch(authed: GitRunOptions, log: Logger): Promise<st
     return null;
   }
   const match = /^ref:\s+refs\/heads\/(\S+)\s+HEAD$/m.exec(result.stdout);
-  return match?.[1] ?? null;
+  const branch = match?.[1] ?? null;
+  // The forge controls this advertisement, and the value is persisted to
+  // repos.default_branch and later handed to git as a positional argument. A
+  // name like "-p" would otherwise read as a flag (e.g. `git lfs fetch origin
+  // -p`). Reject anything that is not a plausible ref at the source so every
+  // consumer inherits the guard.
+  if (branch !== null && !isPlausibleRef(branch)) {
+    log.warn({ branch }, "ignoring an implausible default branch advertised by the origin");
+    return null;
+  }
+  return branch;
 }
 
 /**
@@ -692,7 +703,7 @@ async function fetchLfs(
   const args =
     paranoid || defaultBranch === null
       ? ["lfs", "fetch", "--all", "origin"]
-      : ["lfs", "fetch", "origin", defaultBranch];
+      : ["lfs", "fetch", "origin", "--", defaultBranch];
   const result = await runGit(args, { ...authed, allowFailure: true });
   if (result.code !== 0) {
     // Deliberately not fatal. In paranoid mode --all covers the archived refs

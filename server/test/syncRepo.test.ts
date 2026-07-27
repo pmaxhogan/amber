@@ -179,6 +179,25 @@ describe("bare mode", () => {
     expect(repo?.last_error).toBeNull();
   });
 
+  it("does not store an implausible default branch a hostile origin advertises", async () => {
+    // A malicious forge points HEAD at a branch literally named "-p". Left
+    // unvalidated, that name flows into `git lfs fetch origin -p` (prune) and
+    // is persisted as the default branch. readDefaultBranch must reject it.
+    const mainTip = await origin.revParse("main");
+    await origin.git(["update-ref", "refs/heads/-p", mainTip]);
+    await origin.git(["symbolic-ref", "HEAD", "refs/heads/-p"]);
+
+    const run = await sync();
+    expect(run.outcome).toBe("success");
+
+    const repo = db.get<{ default_branch: string | null }>(
+      "SELECT default_branch FROM repos WHERE id = ?",
+      repoId,
+    );
+    // Not poisoned with "-p"; the implausible name is dropped to null.
+    expect(repo?.default_branch).toBeNull();
+  });
+
   it("resolves the repo against its own forge row", () => {
     const forgeId = db.get<{ forge_id: number }>(
       "SELECT forge_id FROM repos WHERE id = ?",
