@@ -7,6 +7,7 @@ import { PassThrough, Readable } from "node:stream";
 import { createGzip } from "node:zlib";
 import type { ExportFormat, TreeEntry as SharedTreeEntry } from "@amber/shared";
 import { TarArchive, ZipArchive } from "archiver";
+import { isPlausibleRef } from "../gitRef.ts";
 import { runGitOk, spawnGit } from "../gitSpawn.ts";
 
 /**
@@ -54,17 +55,6 @@ export const ARCHIVE_CONTENT_TYPES: Record<ExportFormat, string> = {
   "tar.gz": "application/gzip",
   "7z": "application/x-7z-compressed",
 };
-
-/**
- * Ref names Amber will look up. Deliberately narrower than git's own rules: no
- * leading dash (which would be read as a flag), no "..", no whitespace, no
- * shell or pathspec metacharacters.
- */
-const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$/;
-
-export function isPlausibleRef(ref: string): boolean {
-  return REF_PATTERN.test(ref) && !ref.includes("..") && !ref.endsWith("/");
-}
 
 export interface ResolvedRef {
   /** Commit object id. Everything downstream uses this, not the input. */
