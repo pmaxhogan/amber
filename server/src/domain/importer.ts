@@ -1,6 +1,8 @@
 import {
+  NAMESPACE_RE,
   parseImportText,
   summarizeImport,
+  supportsNamespaceSyncKind,
   withWarning,
   type ImportCommitResponse,
   type ImportLineResult,
@@ -10,7 +12,8 @@ import {
 import type { Db } from "../db/db.ts";
 import { findAccountByUsername } from "./accounts.ts";
 import { DomainError } from "./errors.ts";
-import { findForge, upsertForge } from "./forges.ts";
+import { findNamespaceSync, insertAccountSync } from "../providers/discovery.ts";
+import { detectForgeKind, findForge, upsertForge } from "./forges.ts";
 import { createRepo, findRepoByPath, normalizeRepoPath } from "./repos.ts";
 
 /**
@@ -19,6 +22,13 @@ import { createRepo, findRepoByPath, normalizeRepoPath } from "./repos.ts";
  * otherwise the line imports with a warning and no override. Implicitly
  * creating a credential-less account would be a confusing half-state, and
  * silently attaching a credential the user did not intend would be worse.
+ *
+ * A line that names a whole user or organization rather than a repository -
+ * `https://github.com/nodejs`, one path segment on a forge whose provider can
+ * enumerate namespaces - imports as a namespace sync instead: every repository
+ * that namespace owns is discovered now and on every later run, so ones
+ * created after the import arrive on their own. A `user@` prefix pins the sync
+ * to that account; without one it follows the forge default account.
  */
 
 /** Spacing between the first syncs of newly imported repos. */
@@ -35,6 +45,13 @@ export interface ImportOptions {
 const NO_ACCOUNT_MESSAGE = (username: string, host: string): string =>
   `No account named "${username}" exists on ${host}, so this repository was imported without ` +
   `an account override. Add the account first if it needs credentials.`;
+
+const NO_ACCOUNT_NAMESPACE_MESSAGE = (username: string, host: string): string =>
+  `No account named "${username}" exists on ${host}, so this namespace syncs with the ` +
+  `forge default account. Add the account first if it needs other credentials.`;
+
+/** Matches the account-sync API default. */
+const DEFAULT_NAMESPACE_INTERVAL_MINUTES = 360;
 
 /**
  * Matches a `user:password@` in the authority, with or without a scheme, and
@@ -73,13 +90,54 @@ function checkAccountPrefix(db: Db, result: ImportLineResult): ImportLineResult 
   if (forge !== undefined && findAccountByUsername(db, forge.id, parsed.username) !== undefined) {
     return result;
   }
-  return withWarning(result, NO_ACCOUNT_MESSAGE(parsed.username, parsed.host));
+  // classifyTarget has already run, so a namespace line gets the warning its
+  // commit will actually produce.
+  const message =
+    result.target === "namespace"
+      ? NO_ACCOUNT_NAMESPACE_MESSAGE(parsed.username, parsed.host)
+      : NO_ACCOUNT_MESSAGE(parsed.username, parsed.host);
+  return withWarning(result, message);
+}
+
+const NAMESPACE_MESSAGE = (namespace: string, host: string): string =>
+  `Syncs every repository ${namespace} owns on ${host}, including ones created later.`;
+
+/**
+ * Whether a parsed line names a namespace. Only the server can answer: it
+ * hinges on the forge kind, which comes from the stored forge when there is
+ * one and from host detection for a forge this import would create. On any
+ * other kind a one-segment path stays a repository, since plenty of plain git
+ * hosts serve `host/repo`.
+ */
+function isNamespaceLine(db: Db, parsed: ParsedRepoUrl): boolean {
+  if (parsed.path.includes("/") || !NAMESPACE_RE.test(parsed.path)) {
+    return false;
+  }
+  const forge = findForge(db, parsed.protocol, parsed.host, parsed.port);
+  return supportsNamespaceSyncKind(forge?.kind ?? detectForgeKind(parsed.host));
+}
+
+/** Tag every importable line with what it will become. */
+function classifyTarget(db: Db, result: ImportLineResult): ImportLineResult {
+  const parsed = result.parsed;
+  if (result.status === "error" || parsed === undefined) {
+    return result;
+  }
+  if (!isNamespaceLine(db, parsed)) {
+    return { ...result, target: "repo" };
+  }
+  return {
+    ...result,
+    target: "namespace",
+    // A warning already explains the line; otherwise say what will happen.
+    message: result.message ?? NAMESPACE_MESSAGE(parsed.path, parsed.host),
+  };
 }
 
 /** Pure parse plus account matching, no writes. Backed by shared/src/importUrl.ts. */
 export function previewImport(db: Db, text: string): ImportPreviewResponse {
   const results = parseImportText(text).map((result) =>
-    redactResult(checkAccountPrefix(db, result)),
+    redactResult(checkAccountPrefix(db, classifyTarget(db, result))),
   );
   return { results, summary: summarizeImport(results) };
 }
@@ -107,8 +165,10 @@ export function commitImport(
 ): ImportCommitResponse {
   const now = options.now ?? Date.now();
   // Redact first, so nothing downstream can echo a pasted password.
-  const parsedLines = parseImportText(text).map(redactResult);
-  const importable = parsedLines.filter((line) => line.status !== "error").length;
+  const parsedLines = parseImportText(text).map((line) => redactResult(classifyTarget(db, line)));
+  const importable = parsedLines.filter(
+    (line) => line.status !== "error" && line.target === "repo",
+  ).length;
   const step = staggerStepFor(importable, options.staggerStepMs ?? STAGGER_STEP_MS);
 
   const results: CommitResult[] = [];
@@ -125,6 +185,23 @@ export function commitImport(
     }
 
     try {
+      if (line.target === "namespace") {
+        const outcome = commitNamespaceLine(db, line.parsed, now);
+        if (outcome.action === "created") {
+          created += 1;
+        } else {
+          updated += 1;
+        }
+        results.push({
+          ...line,
+          status: outcome.warning === undefined ? "ok" : "warning",
+          message: outcome.warning ?? line.message,
+          action: outcome.action,
+          accountSyncId: outcome.accountSyncId,
+        });
+        continue;
+      }
+
       const outcome = commitLine(db, line.parsed, now + newIndex * step);
       if (outcome.action === "created") {
         created += 1;
@@ -149,6 +226,66 @@ export function commitImport(
   }
 
   return { results, created, updated, failed };
+}
+
+interface NamespaceOutcome {
+  action: "created" | "updated";
+  accountSyncId: number;
+  warning: string | undefined;
+}
+
+/**
+ * Idempotent like a repo line: importing a namespace that is already synced
+ * updates its account when a user@ prefix names a different one, and never
+ * clears an account just because this line carried no prefix.
+ */
+function commitNamespaceLine(db: Db, parsed: ParsedRepoUrl, now: number): NamespaceOutcome {
+  return db.tx(() => {
+    const forge = upsertForge(db, {
+      protocol: parsed.protocol,
+      host: parsed.host,
+      port: parsed.port,
+    });
+
+    let accountId: number | null = null;
+    let warning: string | undefined;
+    if (parsed.username !== null) {
+      const account = findAccountByUsername(db, forge.id, parsed.username);
+      if (account === undefined) {
+        warning = NO_ACCOUNT_NAMESPACE_MESSAGE(parsed.username, parsed.host);
+      } else {
+        accountId = account.id;
+      }
+    }
+
+    const existing = findNamespaceSync(db, forge.id, parsed.path);
+    if (existing !== undefined) {
+      if (accountId !== null && accountId !== existing.account_id) {
+        db.run(
+          "UPDATE account_syncs SET account_id = ?, updated_at = ? WHERE id = ?",
+          accountId,
+          now,
+          existing.id,
+        );
+      }
+      return { action: "updated", accountSyncId: existing.id, warning };
+    }
+
+    const sync = insertAccountSync(
+      db,
+      {
+        forgeId: forge.id,
+        accountId,
+        source: "namespace",
+        namespace: parsed.path,
+        visibility: "all",
+        enabled: true,
+        intervalMinutes: DEFAULT_NAMESPACE_INTERVAL_MINUTES,
+      },
+      now,
+    );
+    return { action: "created", accountSyncId: sync.id, warning };
+  });
 }
 
 interface LineOutcome {

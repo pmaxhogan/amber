@@ -182,3 +182,50 @@ describe("Import commit", () => {
     expect(findButton(wrapper, "Try again")).toBeDefined();
   });
 });
+
+describe("namespace lines", () => {
+  const NAMESPACE_LINE = {
+    line: "https://github.com/nodejs",
+    lineNumber: 1,
+    status: "ok" as const,
+    target: "namespace" as const,
+    message: "Syncs every repository nodejs owns on github.com, including ones created later.",
+    parsed: {
+      protocol: "https" as const,
+      host: "github.com",
+      port: null,
+      path: "nodejs",
+      username: null,
+      displayName: "nodejs",
+      canonicalUrl: "https://github.com/nodejs",
+    },
+  };
+
+  it("labels a whole user or organization in the preview and the results", async () => {
+    const api = stubApi({
+      previewImport: vi.fn().mockResolvedValue({
+        results: [NAMESPACE_LINE],
+        summary: { total: 1, ok: 1, warning: 0, error: 0 },
+      }),
+      commitImport: vi.fn().mockResolvedValue({
+        results: [{ ...NAMESPACE_LINE, action: "created", accountSyncId: 3 }],
+        created: 1,
+        updated: 0,
+        failed: 0,
+      }),
+    });
+    const { wrapper } = await mountPage(api);
+    await wrapper.find("#import-text").setValue("https://github.com/nodejs");
+    await clickButton(wrapper, "Preview");
+    await flush();
+
+    const preview = wrapper.find('[data-testid="import-preview"]');
+    expect(preview.text()).toContain("all repos");
+    expect(preview.text()).toContain("including ones created later");
+
+    await clickButton(wrapper, "Import 1");
+    await flush();
+
+    expect(wrapper.find('[data-testid="import-results"]').text()).toContain("all repos");
+  });
+});

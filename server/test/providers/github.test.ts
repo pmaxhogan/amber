@@ -369,3 +369,105 @@ describe("githubProvider.checkRepoAccess", () => {
     );
   });
 });
+
+describe("githubProvider.listNamespaceRepos", () => {
+  function namespaceOf(ctx: ReturnType<typeof ghContext>, namespace: string) {
+    const list = githubProvider.listNamespaceRepos;
+    if (list === undefined) {
+      throw new Error("the GitHub provider must implement listNamespaceRepos");
+    }
+    return collect(list(ctx, namespace));
+  }
+
+  function interceptOwner(login: string, type: "User" | "Organization"): void {
+    http
+      .pool(API)
+      .intercept({ path: `/users/${login.toLowerCase()}`, method: "GET" })
+      .reply(200, { login, type }, { headers: JSON_HEADERS });
+  }
+
+  it("lists an organization through /orgs/{org}/repos with type=all", async () => {
+    interceptOwner("NodeJS", "Organization");
+    let seen = "";
+    http
+      .pool(API)
+      .intercept({
+        path: (path) => {
+          seen = path;
+          return path.startsWith("/orgs/NodeJS/repos");
+        },
+        method: "GET",
+      })
+      .reply(200, [repo("nodejs/node"), repo("nodejs/secret", { private: true })], {
+        headers: JSON_HEADERS,
+      });
+
+    const repos = await namespaceOf(ghContext({ token: "t" }), "nodejs");
+
+    expect(repos.map((item) => item.path)).toEqual(["nodejs/node", "nodejs/secret"]);
+    const query = new URL(`${API}${seen}`).searchParams;
+    expect(query.get("type")).toBe("all");
+    expect(query.get("per_page")).toBe("100");
+  });
+
+  it("filters an organization listing by visibility", async () => {
+    interceptOwner("acme", "Organization");
+    http
+      .pool(API)
+      .intercept({ path: (path) => path.startsWith("/orgs/acme/repos"), method: "GET" })
+      .reply(200, [repo("acme/open"), repo("acme/closed", { private: true })], {
+        headers: JSON_HEADERS,
+      });
+
+    const repos = await namespaceOf(ghContext({ token: "t", visibility: "public" }), "acme");
+
+    expect(repos.map((item) => item.path)).toEqual(["acme/open"]);
+  });
+
+  it("refuses private-only for an organization without a credential", async () => {
+    interceptOwner("acme", "Organization");
+
+    await expect(namespaceOf(ghContext({ visibility: "private" }), "acme")).rejects.toMatchObject({
+      kind: "auth",
+    });
+  });
+
+  it("lists another user's public repositories through /users/{user}/repos", async () => {
+    interceptOwner("torvalds", "User");
+    interceptUser("octocat");
+    http
+      .pool(API)
+      .intercept({ path: (path) => path.startsWith("/users/torvalds/repos"), method: "GET" })
+      .reply(200, [repo("torvalds/linux")], { headers: JSON_HEADERS });
+
+    const repos = await namespaceOf(ghContext({ token: "t" }), "torvalds");
+
+    expect(repos.map((item) => item.path)).toEqual(["torvalds/linux"]);
+  });
+
+  it("uses /user/repos when the token belongs to the named user", async () => {
+    interceptOwner("octocat", "User");
+    interceptUser("octocat");
+    http
+      .pool(API)
+      .intercept({ path: (path) => path.startsWith("/user/repos"), method: "GET" })
+      .reply(200, [repo("octocat/private", { private: true })], { headers: JSON_HEADERS });
+
+    const repos = await namespaceOf(ghContext({ token: "t", username: "someone-else" }), "octocat");
+
+    expect(repos.map((item) => item.path)).toEqual(["octocat/private"]);
+  });
+
+  it("names the namespace when GitHub has no such user or organization", async () => {
+    http
+      .pool(API)
+      .intercept({ path: "/users/nobody-here", method: "GET" })
+      .reply(404, { message: "Not Found" }, { headers: JSON_HEADERS });
+
+    const failure = await namespaceOf(ghContext(), "nobody-here").catch((cause: unknown) => cause);
+
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect(failure).toMatchObject({ kind: "not_found" });
+    expect((failure as Error).message).toContain("user or organization named nobody-here");
+  });
+});

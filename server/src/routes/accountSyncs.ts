@@ -9,9 +9,12 @@ import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db/db.ts";
 import {
+  findNamespaceSync,
   getAccountSyncRow,
+  insertAccountSync,
   mapAccountSync,
   runAccountSyncDetailed,
+  supportsNamespaceSync,
   supportsStarredSync,
   type DiscoveryDeps,
 } from "../providers/discovery.ts";
@@ -26,8 +29,10 @@ const listQuerySchema = z.object({
 
 interface AccountSyncRowShape {
   id: number;
-  account_id: number;
-  source: "owned" | "starred";
+  forge_id: number;
+  account_id: number | null;
+  source: "owned" | "starred" | "namespace";
+  namespace: string | null;
   visibility: "all" | "public" | "private";
   enabled: number;
   interval_minutes: number;
@@ -80,24 +85,40 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     }
     const input = body.data;
 
-    const account = db.get<{ id: number; forge_id: number }>(
-      "SELECT id, forge_id FROM accounts WHERE id = ?",
-      input.accountId,
-    );
-    if (account === undefined) {
-      return fail(
-        reply,
-        404,
-        "account_not_found",
-        `Account ${String(input.accountId)} does not exist`,
+    let accountForgeId: number | undefined;
+    if (input.accountId !== undefined) {
+      const account = db.get<{ forge_id: number }>(
+        "SELECT forge_id FROM accounts WHERE id = ?",
+        input.accountId,
       );
+      if (account === undefined) {
+        return fail(
+          reply,
+          404,
+          "account_not_found",
+          `Account ${String(input.accountId)} does not exist`,
+        );
+      }
+      accountForgeId = account.forge_id;
     }
-    const forge = db.get<{ kind: ForgeKind }>(
-      "SELECT kind FROM forges WHERE id = ?",
-      account.forge_id,
+    if (
+      input.forgeId !== undefined &&
+      accountForgeId !== undefined &&
+      input.forgeId !== accountForgeId
+    ) {
+      return fail(reply, 400, "invalid_body", "That account belongs to a different forge");
+    }
+    // The schema guarantees one of the two is present.
+    const forgeId = input.forgeId ?? accountForgeId ?? 0;
+
+    const forge = db.get<{ kind: ForgeKind; host: string }>(
+      "SELECT kind, host FROM forges WHERE id = ?",
+      forgeId,
     );
     if (forge === undefined) {
-      return fail(reply, 404, "forge_not_found", "The account's forge no longer exists");
+      return input.forgeId === undefined
+        ? fail(reply, 404, "forge_not_found", "The account's forge no longer exists")
+        : fail(reply, 404, "forge_not_found", `Forge ${String(forgeId)} does not exist`);
     }
     if (forge.kind === "generic") {
       return fail(
@@ -123,40 +144,46 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
         );
       }
     }
+    if (input.source === "namespace" && !supportsNamespaceSync(forge.kind)) {
+      return fail(
+        reply,
+        400,
+        "unsupported_source",
+        "Syncing a whole user or organization is GitHub-only for now",
+      );
+    }
 
-    const duplicate = db.get<{ id: number }>(
-      "SELECT id FROM account_syncs WHERE account_id = ? AND source = ?",
-      input.accountId,
-      input.source,
-    );
+    const namespace = input.source === "namespace" ? (input.namespace ?? null) : null;
+    const duplicate =
+      namespace === null
+        ? db.get<{ id: number; namespace: string | null }>(
+            "SELECT id, namespace FROM account_syncs WHERE account_id = ? AND source = ?",
+            input.accountId ?? null,
+            input.source,
+          )
+        : findNamespaceSync(db, forgeId, namespace);
     if (duplicate !== undefined) {
       return fail(
         reply,
         409,
         "account_sync_exists",
-        `That account already has a ${input.source} sync (id ${String(duplicate.id)})`,
+        namespace === null
+          ? `That account already has a ${input.source} sync (id ${String(duplicate.id)})`
+          : // The stored spelling, not the caller's, so the conflict is recognisable.
+            `${duplicate.namespace ?? namespace} on ${forge.host} is already synced (id ${String(duplicate.id)})`,
       );
     }
 
-    const now = Date.now();
-    const inserted = db.run(
-      `INSERT INTO account_syncs (
-         account_id, source, visibility, enabled, interval_minutes, next_run_at,
-         created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      input.accountId,
-      input.source,
-      input.source === "starred" ? "all" : input.visibility,
-      input.enabled ? 1 : 0,
-      input.intervalMinutes,
-      // Never run: the scheduler picks it up on its next wake.
-      input.enabled ? now : null,
-      now,
-      now,
-    );
-
-    const row = getAccountSyncRow(db, inserted.lastInsertRowid);
-    return reply.code(201).send(row === undefined ? null : mapAccountSync(row));
+    const created = insertAccountSync(db, {
+      forgeId,
+      accountId: input.accountId ?? null,
+      source: input.source,
+      namespace,
+      visibility: input.source === "starred" ? "all" : input.visibility,
+      enabled: input.enabled,
+      intervalMinutes: input.intervalMinutes,
+    });
+    return reply.code(201).send(created);
   });
 
   app.patch("/account-syncs/:id", (request, reply) => {

@@ -220,8 +220,88 @@ SELECT 'https', 'gitlab.com', NULL, 'gitlab',
 WHERE NOT EXISTS (SELECT 1 FROM forges WHERE host = 'gitlab.com');
 `;
 
+/**
+ * Namespace syncs: back up every repository a named user or organization owns,
+ * including ones created later. Such a sync belongs to a forge and only
+ * optionally to an account (null = the forge default at run time, or
+ * anonymous), so account_syncs gains `forge_id` and `namespace`, `account_id`
+ * becomes nullable, and the identity rules move into partial unique indexes:
+ * one owned and one starred sync per account, one namespace sync per forge and
+ * case-insensitive name. All of that needs a table rebuild again.
+ *
+ * The rebuild must not lose which repos each sync manages. With foreign keys
+ * on, DROP TABLE runs an implicit DELETE that fires repos'
+ * ON DELETE SET NULL, and defer_foreign_keys does not stop actions, only
+ * checks. So the linkage is snapshotted first and written back after the
+ * rename. (002 had no such step, so any links that existed when it ran were
+ * cleared then; that is not recoverable from data and the next owned-sync run
+ * relinks every repo it lists anyway.)
+ */
+const namespaceSync = `
+CREATE TEMP TABLE account_sync_links_004 AS
+  SELECT id, managed_by_account_sync_id AS sync_id
+    FROM repos
+   WHERE managed_by_account_sync_id IS NOT NULL;
+
+CREATE TABLE account_syncs_004 (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  forge_id         INTEGER NOT NULL REFERENCES forges (id) ON DELETE CASCADE,
+  -- NULL only for a namespace sync that runs with the forge default account.
+  account_id       INTEGER NULL REFERENCES accounts (id) ON DELETE CASCADE,
+  source           TEXT    NOT NULL DEFAULT 'owned'
+                     CHECK (source IN ('owned', 'starred', 'namespace')),
+  -- The user or organization a namespace sync enumerates.
+  namespace        TEXT    NULL,
+  -- Applies to 'owned' and 'namespace'; a starred sync always takes the full list.
+  visibility       TEXT    NOT NULL DEFAULT 'all' CHECK (visibility IN ('all', 'public', 'private')),
+  enabled          INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 1),
+  next_run_at      INTEGER NULL,
+  last_run_at      INTEGER NULL,
+  last_error       TEXT    NULL,
+  repos_discovered INTEGER NULL,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  CHECK ((source = 'namespace') = (namespace IS NOT NULL)),
+  CHECK (source = 'namespace' OR account_id IS NOT NULL)
+);
+
+INSERT INTO account_syncs_004 (
+  id, forge_id, account_id, source, namespace, visibility, enabled, interval_minutes,
+  next_run_at, last_run_at, last_error, repos_discovered, created_at, updated_at
+)
+SELECT
+  s.id, a.forge_id, s.account_id, s.source, NULL, s.visibility, s.enabled, s.interval_minutes,
+  s.next_run_at, s.last_run_at, s.last_error, s.repos_discovered, s.created_at, s.updated_at
+FROM account_syncs s
+JOIN accounts a ON a.id = s.account_id;
+
+DROP TABLE account_syncs;
+
+ALTER TABLE account_syncs_004 RENAME TO account_syncs;
+
+UPDATE repos
+   SET managed_by_account_sync_id = (
+         SELECT sync_id FROM account_sync_links_004 l WHERE l.id = repos.id
+       )
+ WHERE id IN (SELECT id FROM account_sync_links_004)
+   AND (SELECT sync_id FROM account_sync_links_004 l WHERE l.id = repos.id)
+       IN (SELECT id FROM account_syncs);
+
+DROP TABLE account_sync_links_004;
+
+CREATE UNIQUE INDEX idx_account_syncs_account_source
+  ON account_syncs (account_id, source) WHERE source IN ('owned', 'starred');
+CREATE UNIQUE INDEX idx_account_syncs_namespace
+  ON account_syncs (forge_id, namespace COLLATE NOCASE) WHERE source = 'namespace';
+CREATE INDEX idx_account_syncs_due ON account_syncs (next_run_at) WHERE enabled = 1;
+CREATE INDEX idx_account_syncs_account ON account_syncs (account_id);
+CREATE INDEX idx_account_syncs_forge ON account_syncs (forge_id);
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
   { name: "003_default_forges", sql: defaultForges },
+  { name: "004_namespace_sync", sql: namespaceSync },
 ];

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { supportsNamespaceSyncKind } from "@amber/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb, type Db } from "../../src/db/db.ts";
 import { migrate } from "../../src/db/migrate.ts";
@@ -11,6 +12,7 @@ import {
   runAccountSync,
   runAccountSyncDetailed,
   runDueAccountSyncs,
+  supportsNamespaceSync,
   supportsStarredSync,
   type DiscoveryDeps,
 } from "../../src/providers/discovery.ts";
@@ -161,8 +163,9 @@ function createSync(
   overrides: { visibility?: string; enabled?: number; intervalMinutes?: number } = {},
 ): number {
   return db.run(
-    `INSERT INTO account_syncs (account_id, source, visibility, enabled, interval_minutes, next_run_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO account_syncs (forge_id, account_id, source, visibility, enabled, interval_minutes, next_run_at, created_at, updated_at)
+     VALUES ((SELECT forge_id FROM accounts WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?)`,
+    accountId,
     accountId,
     source,
     overrides.visibility ?? "all",
@@ -713,5 +716,176 @@ describe("scheduling helpers", () => {
     expect(results[0]?.created).toBe(1);
     expect(listDueAccountSyncs(db, 3_000)).toEqual([]);
     expect(results[0]?.accountSync.id).toBe(syncId);
+  });
+});
+
+describe("runAccountSync, namespace", () => {
+  function namespaceProvider(
+    pages: DiscoveredRepo[][],
+    seen: { context?: DiscoveryContext; namespace?: string } = {},
+  ): AccountSyncProvider {
+    let call = 0;
+    const provider = fakeProvider({ repos: [[repo("should/not-be-used")]] });
+    provider.listNamespaceRepos = (context, namespace) => {
+      seen.context = context;
+      seen.namespace = namespace;
+      const page = pages[Math.min(call, pages.length - 1)] ?? [];
+      call += 1;
+      return toAsync(page);
+    };
+    return provider;
+  }
+
+  function createNamespaceSync(
+    forgeId: number,
+    namespace: string,
+    accountId: number | null = null,
+  ) {
+    return db.run(
+      `INSERT INTO account_syncs (forge_id, account_id, source, namespace, visibility, enabled,
+         interval_minutes, created_at, updated_at)
+       VALUES (?, ?, 'namespace', ?, 'all', 1, 360, 1, 1)`,
+      forgeId,
+      accountId,
+      namespace,
+    ).lastInsertRowid;
+  }
+
+  function insertAccount(forgeId: number, username: string, isDefault = 0): number {
+    return db.run(
+      "INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+      forgeId,
+      username,
+      new Uint8Array([9]),
+      isDefault,
+    ).lastInsertRowid;
+  }
+
+  it("lists the namespace, not the account, and creates every repo it finds", async () => {
+    const { forgeId } = seed();
+    const syncId = createNamespaceSync(forgeId, "nodejs");
+    const seen: { namespace?: string } = {};
+    const provider = namespaceProvider([[repo("nodejs/node"), repo("nodejs/undici")]], seen);
+
+    const result = await runAccountSyncDetailed(db, syncId, baseDeps(provider));
+
+    expect(result.error).toBeNull();
+    expect(seen.namespace).toBe("nodejs");
+    expect(result.created).toBe(2);
+    expect(repoRows().map((row) => [row.path, row.origin, row.managed_by_account_sync_id])).toEqual(
+      [
+        ["nodejs/node", "account_sync", syncId],
+        ["nodejs/undici", "account_sync", syncId],
+      ],
+    );
+  });
+
+  it("picks up repositories created after the first run", async () => {
+    const { forgeId } = seed();
+    const syncId = createNamespaceSync(forgeId, "nodejs");
+    const provider = namespaceProvider([
+      [repo("nodejs/node")],
+      [repo("nodejs/node"), repo("nodejs/brand-new")],
+    ]);
+
+    await runAccountSync(db, syncId, baseDeps(provider));
+    const second = await runAccountSyncDetailed(db, syncId, baseDeps(provider));
+
+    expect(second.created).toBe(1);
+    expect(repoRows().map((row) => row.path)).toEqual(["nodejs/brand-new", "nodejs/node"]);
+  });
+
+  it("never removes a repo that left the namespace", async () => {
+    const { forgeId } = seed();
+    const syncId = createNamespaceSync(forgeId, "nodejs");
+    const provider = namespaceProvider([
+      [repo("nodejs/node"), repo("nodejs/moved")],
+      [repo("nodejs/node")],
+    ]);
+
+    await runAccountSync(db, syncId, baseDeps(provider));
+    const second = await runAccountSyncDetailed(db, syncId, baseDeps(provider));
+
+    expect(second.vanished).toBe(1);
+    expect(second.removed).toBe(0);
+    expect(deletions).toEqual([]);
+    expect(repoRows()).toHaveLength(2);
+  });
+
+  it("runs with the forge default account when none is pinned, and sets no override", async () => {
+    const { forgeId } = seed({ secret: new Uint8Array([1]) });
+    const syncId = createNamespaceSync(forgeId, "nodejs");
+    const seen: { context?: DiscoveryContext } = {};
+    const provider = namespaceProvider([[repo("nodejs/node")]], seen);
+
+    await runAccountSync(
+      db,
+      syncId,
+      baseDeps(provider, { secretKey: Buffer.alloc(32), decryptSecret: () => "default-token" }),
+    );
+
+    expect(seen.context?.token).toBe("default-token");
+    expect(seen.context?.username).toBe("octocat");
+    expect(
+      db.get<{ account_override_id: number | null }>("SELECT account_override_id FROM repos"),
+    ).toEqual({ account_override_id: null });
+  });
+
+  it("runs anonymously when the forge has no account at all", async () => {
+    const forgeId = db.run(
+      "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES ('https', 'bare.example.com', NULL, 'github', 1, 1)",
+    ).lastInsertRowid;
+    const syncId = createNamespaceSync(forgeId, "nodejs");
+    const seen: { context?: DiscoveryContext } = {};
+    const provider = namespaceProvider([[repo("nodejs/node")]], seen);
+
+    const result = await runAccountSyncDetailed(db, syncId, baseDeps(provider));
+
+    expect(result.error).toBeNull();
+    expect(seen.context?.token).toBeNull();
+    expect(seen.context?.baseUrl).toBe("https://bare.example.com");
+  });
+
+  it("uses a pinned account and makes it the override of the repos it creates", async () => {
+    const { forgeId } = seed();
+    const pinned = insertAccount(forgeId, "org-bot");
+    const syncId = createNamespaceSync(forgeId, "acme", pinned);
+    const seen: { context?: DiscoveryContext } = {};
+    const provider = namespaceProvider([[repo("acme/private", { isPrivate: true })]], seen);
+
+    await runAccountSync(
+      db,
+      syncId,
+      baseDeps(provider, { secretKey: Buffer.alloc(32), decryptSecret: () => "bot-token" }),
+    );
+
+    expect(seen.context?.username).toBe("org-bot");
+    expect(seen.context?.token).toBe("bot-token");
+    expect(
+      db.get<{ account_override_id: number | null }>("SELECT account_override_id FROM repos"),
+    ).toEqual({ account_override_id: pinned });
+  });
+
+  it("records a clear error on a forge whose provider cannot enumerate namespaces", async () => {
+    const { forgeId } = seed({ kind: "gitlab" });
+    const syncId = createNamespaceSync(forgeId, "gitlab-org");
+    const provider = fakeProvider({ kind: "gitlab", repos: [[repo("x/y")]] });
+
+    const result = await runAccountSyncDetailed(db, syncId, baseDeps(provider));
+
+    expect(result.error).toMatch(/GitHub-only/);
+    expect(repoRows()).toEqual([]);
+  });
+
+  it("reports namespace support for GitHub only", () => {
+    expect(supportsNamespaceSync("github")).toBe(true);
+    expect(supportsNamespaceSync("gitlab")).toBe(false);
+    expect(supportsNamespaceSync("generic")).toBe(false);
+  });
+
+  it("keeps the shared kind list in step with the providers", () => {
+    for (const kind of ["github", "gitlab", "bitbucket", "gitea", "generic"]) {
+      expect(supportsNamespaceSyncKind(kind)).toBe(supportsNamespaceSync(kind));
+    }
   });
 });

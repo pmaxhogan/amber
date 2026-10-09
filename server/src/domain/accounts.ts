@@ -257,6 +257,14 @@ export function setDefaultAccount(db: Db, id: number): Account {
 export function deleteAccount(db: Db, id: number): void {
   db.tx(() => {
     const account = requireAccount(db, id);
+    // Owned and starred syncs are the account's and cascade away with it. A
+    // namespace sync only borrowed the account, so it falls back to the forge
+    // default instead of silently ending a whole organization's backups.
+    db.run(
+      "UPDATE account_syncs SET account_id = NULL, updated_at = ? WHERE account_id = ? AND source = 'namespace'",
+      Date.now(),
+      id,
+    );
     db.run("DELETE FROM accounts WHERE id = ?", id);
     promoteOldest(db, account.forgeId, Date.now());
   });

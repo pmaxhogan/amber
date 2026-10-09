@@ -62,9 +62,10 @@ function seed(): { forgeId: number; accountId: number; syncId: number } {
 function createSync(accountId: number, source: "owned" | "starred"): number {
   return Number(
     db.run(
-      `INSERT INTO account_syncs (account_id, source, visibility, enabled, interval_minutes,
-         next_run_at, created_at, updated_at)
-       VALUES (?, ?, 'all', 1, 360, NULL, 1, 1)`,
+      `INSERT INTO account_syncs (forge_id, account_id, source, visibility, enabled,
+         interval_minutes, next_run_at, created_at, updated_at)
+       VALUES ((SELECT forge_id FROM accounts WHERE id = ?), ?, ?, 'all', 1, 360, NULL, 1, 1)`,
+      accountId,
       accountId,
       source,
     ).lastInsertRowid,

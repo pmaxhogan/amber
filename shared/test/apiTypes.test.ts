@@ -7,9 +7,11 @@ import {
   forgeSchema,
   healthSchema,
   pageSchema,
+  parseNamespaceInput,
   paginationQuerySchema,
   repoListQuerySchema,
   settingsScopeParamsSchema,
+  supportsNamespaceSyncKind,
   upsertAccountSyncSchema,
 } from "../src/apiTypes.ts";
 
@@ -137,5 +139,63 @@ describe("health", () => {
       version: "1.0.0",
     });
     expect(healthSchema.safeParse({ ok: false, version: "1.0.0" }).success).toBe(false);
+  });
+});
+
+describe("namespace syncs", () => {
+  it("reduces pasted names and profile URLs to the one login", () => {
+    expect(parseNamespaceInput("nodejs")).toBe("nodejs");
+    expect(parseNamespaceInput("  @nodejs ")).toBe("nodejs");
+    expect(parseNamespaceInput("https://github.com/nodejs")).toBe("nodejs");
+    expect(parseNamespaceInput("github.com/nodejs/")).toBe("nodejs");
+    expect(parseNamespaceInput("https://github.com/nodejs?tab=repositories")).toBe("nodejs");
+    expect(parseNamespaceInput("my-org_2")).toBe("my-org_2");
+  });
+
+  it("refuses anything that is not exactly one valid name", () => {
+    for (const raw of [
+      "",
+      "nodejs/node",
+      "github.com/nodejs/node",
+      "..",
+      "-lead",
+      "a b",
+      "x/../y",
+    ]) {
+      expect(parseNamespaceInput(raw), raw).toBeNull();
+    }
+  });
+
+  it("requires a namespace and a forge or account on a namespace sync", () => {
+    expect(
+      upsertAccountSyncSchema.safeParse({ source: "namespace", forgeId: 1, namespace: "x" })
+        .success,
+    ).toBe(true);
+    expect(
+      upsertAccountSyncSchema.safeParse({ source: "namespace", accountId: 1, namespace: "x" })
+        .success,
+    ).toBe(true);
+    expect(upsertAccountSyncSchema.safeParse({ source: "namespace", forgeId: 1 }).success).toBe(
+      false,
+    );
+    expect(upsertAccountSyncSchema.safeParse({ source: "namespace", namespace: "x" }).success).toBe(
+      false,
+    );
+    expect(
+      upsertAccountSyncSchema.safeParse({ source: "namespace", forgeId: 1, namespace: "a/b" })
+        .success,
+    ).toBe(false);
+  });
+
+  it("keeps namespace and forgeId off owned and starred syncs", () => {
+    expect(upsertAccountSyncSchema.safeParse({ accountId: 1 }).success).toBe(true);
+    expect(upsertAccountSyncSchema.safeParse({ accountId: 1, namespace: "x" }).success).toBe(false);
+    expect(upsertAccountSyncSchema.safeParse({ accountId: 1, forgeId: 1 }).success).toBe(false);
+    expect(upsertAccountSyncSchema.safeParse({ source: "starred" }).success).toBe(false);
+  });
+
+  it("lists GitHub as the only namespace-capable kind for now", () => {
+    expect(supportsNamespaceSyncKind("github")).toBe(true);
+    expect(supportsNamespaceSyncKind("gitlab")).toBe(false);
   });
 });

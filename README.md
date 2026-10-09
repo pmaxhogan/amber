@@ -16,6 +16,9 @@ out as a read-only git remote.
   server. Bulk import by pasting a list of URLs.
 - **Account sync.** Link an account and Amber discovers and tracks its
   repositories automatically.
+- **Whole users and organizations.** Paste `https://github.com/nodejs` into
+  the import box and Amber backs up every repository that user or organization
+  owns, picking up new ones as they are created.
 - **Paranoid mode.** Never lose history. Pruning and garbage collection are
   disabled and every ref tip that upstream rewrites or deletes is archived under
   `refs/amber/archive/<timestamp>/` before the update lands.

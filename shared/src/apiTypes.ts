@@ -320,6 +320,12 @@ export const importLineResultSchema = z.object({
   status: importLineStatusSchema,
   parsed: parsedRepoUrlSchema.optional(),
   message: z.string().optional(),
+  /**
+   * Set by the server. 'namespace' means the line names a user or organization
+   * (`https://github.com/nodejs`) and imports as a namespace sync that pulls in
+   * every repository it owns, now and later. Absent on a client-side parse.
+   */
+  target: z.enum(["repo", "namespace"]).optional(),
 });
 
 export const importPreviewResponseSchema = z.object({
@@ -336,6 +342,8 @@ export type ImportPreviewResponse = z.infer<typeof importPreviewResponseSchema>;
 export const importCommitResultSchema = importLineResultSchema.extend({
   action: z.enum(["created", "updated", "failed"]),
   repoId: idSchema.optional(),
+  /** Set instead of repoId when the line imported as a namespace sync. */
+  accountSyncId: idSchema.optional(),
 });
 
 export const importCommitResponseSchema = z.object({
@@ -421,16 +429,69 @@ export type AccountSyncVisibility = z.infer<typeof accountSyncVisibilitySchema>;
 /**
  * 'owned' backs up the repositories the account itself owns; 'starred' backs up
  * whatever that account currently stars (GitHub only for now). An account may
- * have one of each, hence UNIQUE(account_id, source).
+ * have one of each.
+ *
+ * 'namespace' backs up every repository a named user or organization owns on
+ * the forge (GitHub only for now), whoever that is. It belongs to the forge
+ * rather than to an account: the account is optional, and when absent the run
+ * uses the forge's default account, or goes anonymous when there is none. One
+ * namespace sync per (forge, namespace), compared case-insensitively.
  */
-export const accountSyncSourceSchema = z.enum(["owned", "starred"]);
+export const accountSyncSourceSchema = z.enum(["owned", "starred", "namespace"]);
 export type AccountSyncSource = z.infer<typeof accountSyncSourceSchema>;
+
+/** Forge kinds whose provider can enumerate an arbitrary user or organization. */
+export const NAMESPACE_SYNC_FORGE_KINDS = ["github"] as const;
+
+export function supportsNamespaceSyncKind(kind: string): boolean {
+  return (NAMESPACE_SYNC_FORGE_KINDS as readonly string[]).includes(kind);
+}
+
+/**
+ * A user or organization login. Deliberately looser than GitHub's own rule
+ * (alphanumerics and single hyphens, 39 chars) so other forges fit later, but
+ * tight enough that it can never smuggle a slash, a dot-dot or whitespace into
+ * an API path.
+ */
+export const NAMESPACE_RE = /^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9_-])?$/;
+
+export const namespaceSchema = z
+  .string()
+  .trim()
+  .regex(NAMESPACE_RE, "Use a user or organization name, like nodejs");
+
+/**
+ * Accept what people actually paste into a namespace field: a bare name, or a
+ * profile URL with or without a scheme, `@`, or trailing slash. Returns null
+ * when the input does not reduce to exactly one valid name.
+ */
+export function parseNamespaceInput(raw: string): string | null {
+  let value = raw.trim().replace(/^@/, "");
+  value = value.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "");
+  value = value.replace(/[?#].*$/, "").replace(/\/+$/, "");
+  const segments = value.split("/").filter((segment) => segment !== "");
+  // "host/name" keeps the name; a bare "name" is the name itself.
+  const candidate =
+    segments.length === 2 && segments[0]?.includes(".") === true
+      ? segments[1]
+      : segments.length === 1
+        ? segments[0]
+        : undefined;
+  return candidate !== undefined && NAMESPACE_RE.test(candidate) ? candidate : null;
+}
 
 export const accountSyncSchema = z.object({
   id: idSchema,
-  accountId: idSchema,
+  forgeId: idSchema,
+  /**
+   * Always set for 'owned' and 'starred'. For 'namespace', null means "the
+   * forge's default account at run time, or anonymous".
+   */
+  accountId: idSchema.nullable(),
   source: accountSyncSourceSchema,
-  /** Meaningful for source 'owned' only; starred syncs always take the full list. */
+  /** The user or organization a 'namespace' sync enumerates; null otherwise. */
+  namespace: z.string().nullable(),
+  /** Meaningful for 'owned' and 'namespace'; starred syncs always take the full list. */
   visibility: accountSyncVisibilitySchema,
   enabled: z.boolean(),
   intervalMinutes: z.number().int().min(1),
@@ -455,16 +516,60 @@ export type AccountSyncListResponse = z.infer<typeof accountSyncListResponseSche
 
 /**
  * Create payload. Named "upsert" for historical reasons: creating a second sync
- * with the same (accountId, source) is a conflict, not an update.
+ * with the same identity is a conflict, not an update.
+ *
+ * 'owned' and 'starred' need `accountId`. 'namespace' needs `namespace` plus
+ * either `accountId` (whose forge it then runs on) or `forgeId` (run with the
+ * forge default account); naming both is allowed when they agree, which the
+ * route checks because only it can see the account's forge.
  */
-export const upsertAccountSyncSchema = z.object({
-  accountId: idSchema,
-  source: accountSyncSourceSchema.default("owned"),
-  /** Ignored by starred syncs, which the routes reject rather than silently drop. */
-  visibility: accountSyncVisibilitySchema.default("all"),
-  enabled: z.boolean().default(true),
-  intervalMinutes: z.number().int().min(1).default(360),
-});
+export const upsertAccountSyncSchema = z
+  .object({
+    accountId: idSchema.optional(),
+    forgeId: idSchema.optional(),
+    source: accountSyncSourceSchema.default("owned"),
+    namespace: namespaceSchema.optional(),
+    /** Rejected on starred syncs by the routes rather than silently dropped. */
+    visibility: accountSyncVisibilitySchema.default("all"),
+    enabled: z.boolean().default(true),
+    intervalMinutes: z.number().int().min(1).default(360),
+  })
+  .superRefine((value, ctx) => {
+    if (value.source === "namespace") {
+      if (value.namespace === undefined) {
+        ctx.addIssue({ code: "custom", path: ["namespace"], message: "namespace is required" });
+      }
+      if (value.accountId === undefined && value.forgeId === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["forgeId"],
+          message: "a namespace sync needs a forgeId or an accountId",
+        });
+      }
+      return;
+    }
+    if (value.namespace !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["namespace"],
+        message: "namespace applies to namespace syncs only",
+      });
+    }
+    if (value.accountId === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["accountId"],
+        message: `a ${value.source} sync needs an accountId`,
+      });
+    }
+    if (value.forgeId !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["forgeId"],
+        message: `a ${value.source} sync runs on its account's forge; omit forgeId`,
+      });
+    }
+  });
 export type UpsertAccountSync = z.infer<typeof upsertAccountSyncSchema>;
 /**
  * What a CALLER passes. Every defaulted field is optional here, unlike the
@@ -472,7 +577,10 @@ export type UpsertAccountSync = z.infer<typeof upsertAccountSyncSchema>;
  */
 export type UpsertAccountSyncInput = z.input<typeof upsertAccountSyncSchema>;
 
-/** accountId and source are immutable: change either by deleting and recreating. */
+/**
+ * accountId, forgeId, source and namespace are immutable: change any of them
+ * by deleting and recreating.
+ */
 export const updateAccountSyncSchema = z.object({
   visibility: accountSyncVisibilitySchema.optional(),
   enabled: z.boolean().optional(),

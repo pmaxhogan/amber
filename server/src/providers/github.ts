@@ -87,9 +87,13 @@ async function tokenLogin(context: DiscoveryContext): Promise<string | null> {
   return pending;
 }
 
-async function isSelf(context: DiscoveryContext): Promise<boolean> {
-  const login = await tokenLogin(context);
-  return login !== null && login.toLowerCase() === context.username.toLowerCase();
+/** Whether the token belongs to `login` (the account's own username by default). */
+async function isSelf(
+  context: DiscoveryContext,
+  login: string = context.username,
+): Promise<boolean> {
+  const tokenOwner = await tokenLogin(context);
+  return tokenOwner !== null && tokenOwner.toLowerCase() === login.toLowerCase();
 }
 
 function toDiscovered(raw: GitHubRepo): DiscoveredRepo {
@@ -137,35 +141,64 @@ async function* walk(
   }
 }
 
+/**
+ * What a user owns. Only that user's own token reaches /user/repos and with it
+ * the private repositories; anyone else gets the public listing.
+ */
+async function* userRepos(context: DiscoveryContext, login: string): AsyncIterable<DiscoveredRepo> {
+  const base = apiBase(context.baseUrl);
+  const self = await isSelf(context, login);
+
+  if (!self && context.visibility === "private") {
+    throw new ProviderError(
+      `Listing private repositories for ${login} needs a stored credential belonging to that account`,
+      { kind: "auth" },
+    );
+  }
+
+  const url = self
+    ? // affiliation=owner keeps the backup to what the account actually owns.
+      listUrl(base, "/user/repos", {
+        per_page: PER_PAGE,
+        affiliation: "owner",
+        visibility: context.visibility,
+        sort: "full_name",
+      })
+    : listUrl(base, `/users/${encodeURIComponent(login)}/repos`, {
+        per_page: PER_PAGE,
+        type: "owner",
+        sort: "full_name",
+      });
+
+  yield* walk(context, url, `user ${login}`);
+}
+
+/**
+ * What an organization owns. /orgs/{org}/repos with type=all returns the
+ * private repositories too, whenever the token can see them (a fine-grained
+ * PAT whose resource owner is the organization, or a classic token of a
+ * member); without one it is the public list, so asking for private only is
+ * refused up front rather than answered with a silent empty list.
+ */
+async function* orgRepos(context: DiscoveryContext, org: string): AsyncIterable<DiscoveredRepo> {
+  if (context.token === null && context.visibility === "private") {
+    throw new ProviderError(`Listing private repositories of ${org} needs a stored credential`, {
+      kind: "auth",
+    });
+  }
+  const url = listUrl(apiBase(context.baseUrl), `/orgs/${encodeURIComponent(org)}/repos`, {
+    per_page: PER_PAGE,
+    type: "all",
+    sort: "full_name",
+  });
+  yield* walk(context, url, `organization ${org}`);
+}
+
 export const githubProvider: AccountSyncProvider = {
   kind: "github",
 
-  async *listRepos(context: DiscoveryContext): AsyncIterable<DiscoveredRepo> {
-    const base = apiBase(context.baseUrl);
-    const self = await isSelf(context);
-
-    if (!self && context.visibility === "private") {
-      throw new ProviderError(
-        `Listing private repositories for ${context.username} needs a stored credential belonging to that account`,
-        { kind: "auth" },
-      );
-    }
-
-    const url = self
-      ? // affiliation=owner keeps the backup to what the account actually owns.
-        listUrl(base, "/user/repos", {
-          per_page: PER_PAGE,
-          affiliation: "owner",
-          visibility: context.visibility,
-          sort: "full_name",
-        })
-      : listUrl(base, `/users/${encodeURIComponent(context.username)}/repos`, {
-          per_page: PER_PAGE,
-          type: "owner",
-          sort: "full_name",
-        });
-
-    yield* walk(context, url, `user ${context.username}`);
+  listRepos(context: DiscoveryContext): AsyncIterable<DiscoveredRepo> {
+    return userRepos(context, context.username);
   },
 
   async *listStarred(context: DiscoveryContext): AsyncIterable<DiscoveredRepo> {
@@ -180,6 +213,26 @@ export const githubProvider: AccountSyncProvider = {
         });
 
     yield* walk(context, url, `the stars of ${context.username}`);
+  },
+
+  async *listNamespaceRepos(
+    context: DiscoveryContext,
+    namespace: string,
+  ): AsyncIterable<DiscoveredRepo> {
+    // Users and organizations share one login namespace on GitHub, and
+    // GET /users/{name} answers for both, saying which in `type`.
+    const owner = await getJson<{ login?: unknown; type?: unknown }>(
+      context,
+      `${apiBase(context.baseUrl)}/users/${encodeURIComponent(namespace)}`,
+      { headers: headers(context), notFoundHint: `user or organization named ${namespace}` },
+    );
+    // Prefer GitHub's own spelling so URLs and messages match the real login.
+    const login = typeof owner.data.login === "string" ? owner.data.login : namespace;
+    if (owner.data.type === "Organization") {
+      yield* orgRepos(context, login);
+    } else {
+      yield* userRepos(context, login);
+    }
   },
 
   async checkRepoAccess(context: DiscoveryContext, path: string): Promise<RepoAccess> {

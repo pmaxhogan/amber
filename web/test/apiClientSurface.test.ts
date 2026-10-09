@@ -281,8 +281,10 @@ describe("settings", () => {
 describe("account syncs", () => {
   const sync = {
     id: 1,
+    forgeId: 1,
     accountId: 2,
     source: "owned",
+    namespace: null,
     visibility: "all",
     enabled: true,
     intervalMinutes: 360,

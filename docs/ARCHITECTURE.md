@@ -69,7 +69,8 @@ server/src/
   sync/syncRepo.ts        # single-repo sync: modes, paranoid archival, LFS
   sync/scheduler.ts       # queue, worker pool, stagger, backoff, breaker, startup catch-up
   sync/diskUsage.ts       # du of repo dirs (cached in DB per sync)
-  providers/types.ts      # AccountSyncProvider interface
+  providers/types.ts      # AccountSyncProvider interface (listRepos, listStarred?,
+                          #   listNamespaceRepos?, checkRepoAccess?)
   providers/github.ts     # + gitlab.ts, bitbucket.ts, gitea.ts
   providers/discovery.ts  # account-sync run: enumerate -> upsert repos
   gitremote/routes.ts     # smart HTTP read-only remote (/git/*)
@@ -134,12 +135,37 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
 - `settings`: `scope_type` ('global'|'forge'|'account'|'repo'), `scope_id` INTEGER
   NULL (NULL for global), `key` TEXT, `value` TEXT (JSON). UNIQUE(scope_type,
   scope_id, key).
-- `account_syncs`: `id` PK, `account_id` FK CASCADE, `source`
-  ('owned'|'starred', default 'owned'), `visibility` ('all'|'public'|'private',
-  applies to source=owned only), `enabled` 0/1, `interval_minutes` (default 360),
+- `account_syncs`: `id` PK, `forge_id` FK CASCADE, `account_id` FK CASCADE
+  NULL, `source` ('owned'|'starred'|'namespace', default 'owned'), `namespace`
+  TEXT NULL, `visibility` ('all'|'public'|'private', applies to owned and
+  namespace syncs), `enabled` 0/1, `interval_minutes` (default 360),
   `next_run_at`, `last_run_at`, `last_error` TEXT NULL, `repos_discovered` INTEGER.
-  UNIQUE(account_id, source) - one owned sync and one starred sync may coexist per
-  account.
+  CHECKs: `namespace` is set exactly when source='namespace', and only a
+  namespace sync may have a NULL `account_id`. Partial unique indexes: one owned
+  and one starred sync per account (`(account_id, source) WHERE source IN
+  ('owned','starred')`), and one namespace sync per forge and name
+  (`(forge_id, namespace COLLATE NOCASE) WHERE source = 'namespace'`).
+  Namespace sync semantics (GitHub kind only for now; error clearly elsewhere):
+  - Backs up every repository a NAMED user or organization owns, whoever that
+    is - not the account's own repos. GitHub: `GET /users/{name}` decides user
+    vs organization; organizations list via `/orgs/{org}/repos?type=all`, users
+    via `/user/repos` when the token is theirs and `/users/{name}/repos`
+    otherwise.
+  - Every run re-enumerates, so repositories created after the sync was set up
+    are imported on the next run. Like owned syncs it NEVER auto-removes: a
+    repository deleted or transferred upstream keeps its backup.
+  - It belongs to a forge, and the account is optional. NULL `account_id`
+    means "the forge's default account at run time, anonymous if there is
+    none". A pinned account also becomes the account override of the repos the
+    sync creates, so private repos it found are fetched with the same token.
+  - Deleting a pinned account sets the sync's `account_id` to NULL (done in
+    domain/accounts.ts before the delete) rather than cascading, so a whole
+    organization's backups never stop silently.
+  - Migration 004 rebuilds the table and has to snapshot and restore
+    `repos.managed_by_account_sync_id`: with foreign keys on, `DROP TABLE` runs
+    an implicit DELETE that fires that column's ON DELETE SET NULL. Migration
+    002 did a rebuild without that step, so links that existed then were
+    cleared; the next owned-sync run relinks every repo it lists.
   Starred sync semantics (GitHub kind only for now; error clearly on other kinds):
   - Every run re-enumerates the CURRENT starred list (it changes over time);
     new starred repos are created like any discovery (origin recorded).
@@ -206,6 +232,17 @@ Accepted line formats (one per line, blank lines and `#` comments ignored):
   override; otherwise import succeeds with a warning and no override (do not create
   accounts implicitly).
 - Trailing `.git` optional and stripped for identity; `path` is the normalized key.
+- Whole namespaces: a single path segment on a forge whose kind supports
+  namespace sync (`https://github.com/nodejs`, `me@github.com/acme`) imports as
+  a namespace sync instead of a repo. The kind comes from the stored forge, or
+  from host detection when the import would create the forge; on every other
+  kind a single segment stays a repository (`host/repo` is common on plain git
+  servers). The parser stays pure and cannot know the kind, so the server tags
+  each result `target: 'repo' | 'namespace'` on preview and commit. Re-import is
+  idempotent per (forge, namespace, case-insensitive); a `user@` prefix pins
+  that account (never creates one) and a prefix-less line never unpins it.
+  Namespace lines do not count toward the first-sync stagger, and a committed
+  one answers with `accountSyncId` instead of `repoId`.
 
 Rejected: `ssh://`, `git@host:path` (scp syntax), `git://` - error clearly per line
 ("SSH remotes are not supported yet"). Parser returns per-line results
@@ -380,7 +417,11 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   - `GET /api/settings/:scopeType/:scopeId?` + `PUT` same path (validated against
     registry allowed-scopes), `GET /api/repos/:id/effective-settings` (explain).
   - `GET/POST /api/account-syncs`, `PATCH/DELETE /api/account-syncs/:id`,
-    `POST /api/account-syncs/:id/run`.
+    `POST /api/account-syncs/:id/run`. POST takes `accountId` for owned and
+    starred syncs (`forgeId` rejected), and `namespace` plus `forgeId` and/or
+    `accountId` for namespace syncs (both must agree on the forge). A duplicate
+    is a 409. PATCH edits only `visibility`, `enabled` and `intervalMinutes`;
+    the identity fields are stripped.
   - `GET /api/git-remote` (enabled, username, cloneUrlTemplate, rotatedAt),
     `PATCH /api/git-remote` `{ username }` (renames the basic-auth user;
     works whether the remote is enabled or disabled, never touches the
@@ -504,10 +545,12 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   want backed up, and under Permissions grant "Contents: Read-only" plus, when
   starred-repo account sync will be used, the Account permission
   "Starring: Read-only" - nothing else (Metadata read-only is added
-  automatically); analogous short notes for GitLab
+  automatically); to back up an organization's private repos, the token's
+  resource owner must be that organization, which may have to approve it; analogous short notes for GitLab
   (personal access token, read_repository scope), Bitbucket (app password /
   API token with repository read), and Gitea (access token, repository read)), Account Sync (per-account
-  enable/visibility/interval), Settings (global editor + scope pickers, each field
+  enable/visibility/interval, plus whole-user-or-organization syncs with an
+  optional pinned account; usable with no accounts at all on GitHub), Settings (global editor + scope pickers, each field
   shows which scope wins), Git Remote (enable, username, rotate, one-time password
   reveal, copyable clone URLs), About/Status.
 - SSE store keeps the table live (row-level updates, no refetch storms).

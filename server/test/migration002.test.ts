@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb, type Db } from "../src/db/db.ts";
 import { migrate } from "../src/db/migrate.ts";
+import { migrations } from "../src/db/migrations.ts";
 import { createConsoleLogger } from "../src/logging.ts";
 
 const log = createConsoleLogger("silent");
@@ -14,7 +15,12 @@ let db: Db;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "amber-mig2-"));
   db = openDb(join(dir, "state", "amber.db"));
-  migrate(db, log);
+  // Pinned to the schema 002 shipped into; 004 rebuilds account_syncs again.
+  migrate(
+    db,
+    log,
+    migrations.filter((migration) => migration.name < "004"),
+  );
 });
 
 afterEach(() => {

@@ -33,9 +33,10 @@ import type {
  * upsert repo rows for them.
  *
  * Removal policy, which is the whole point of a backup tool:
- * - source 'owned' NEVER removes anything. A repository that disappeared from
- *   the listing may have been deleted upstream, which is exactly the case the
- *   backup exists for. It is logged and counted as vanished.
+ * - sources 'owned' and 'namespace' NEVER remove anything. A repository
+ *   that disappeared from the listing may have been deleted or transferred
+ *   upstream, which is exactly the case the backup exists for. It is logged
+ *   and counted as vanished.
  * - source 'starred' removes a repository only when the forge confirms the
  *   repository is still there (HTTP 200) and it is simply no longer starred,
  *   and only when this sync created the row (origin 'account_sync'). Any
@@ -82,8 +83,10 @@ export interface DiscoveryDeps {
 
 interface AccountSyncRow {
   id: number;
-  account_id: number;
+  forge_id: number;
+  account_id: number | null;
   source: AccountSyncSource;
+  namespace: string | null;
   visibility: AccountSyncVisibility;
   enabled: number;
   interval_minutes: number;
@@ -132,11 +135,18 @@ export function supportsStarredSync(kind: string): boolean {
   return providerForKind(kind)?.listStarred !== undefined;
 }
 
+/** Namespace syncs need a provider that can enumerate any user or organization. */
+export function supportsNamespaceSync(kind: string): boolean {
+  return providerForKind(kind)?.listNamespaceRepos !== undefined;
+}
+
 export function mapAccountSync(row: AccountSyncRow): AccountSync {
   return {
     id: row.id,
+    forgeId: row.forge_id,
     accountId: row.account_id,
     source: row.source,
+    namespace: row.namespace,
     visibility: row.visibility,
     enabled: row.enabled === 1,
     intervalMinutes: row.interval_minutes,
@@ -151,6 +161,58 @@ export function mapAccountSync(row: AccountSyncRow): AccountSync {
 
 export function getAccountSyncRow(db: Db, id: number): AccountSyncRow | undefined {
   return db.get<AccountSyncRow>("SELECT * FROM account_syncs WHERE id = ?", id);
+}
+
+/** The namespace sync for this forge and name, compared case-insensitively. */
+export function findNamespaceSync(
+  db: Db,
+  forgeId: number,
+  namespace: string,
+): AccountSyncRow | undefined {
+  return db.get<AccountSyncRow>(
+    "SELECT * FROM account_syncs WHERE forge_id = ? AND source = 'namespace' AND namespace = ? COLLATE NOCASE",
+    forgeId,
+    namespace,
+  );
+}
+
+export interface NewAccountSync {
+  forgeId: number;
+  accountId: number | null;
+  source: AccountSyncSource;
+  namespace: string | null;
+  visibility: AccountSyncVisibility;
+  enabled: boolean;
+  intervalMinutes: number;
+}
+
+/** Insert one sync. An enabled one is due at once, so the next timer tick runs it. */
+export function insertAccountSync(
+  db: Db,
+  input: NewAccountSync,
+  now: number = Date.now(),
+): AccountSync {
+  const inserted = db.run(
+    `INSERT INTO account_syncs (
+       forge_id, account_id, source, namespace, visibility, enabled, interval_minutes,
+       next_run_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    input.forgeId,
+    input.accountId,
+    input.source,
+    input.namespace,
+    input.visibility,
+    input.enabled ? 1 : 0,
+    input.intervalMinutes,
+    input.enabled ? now : null,
+    now,
+    now,
+  );
+  const row = getAccountSyncRow(db, inserted.lastInsertRowid);
+  if (row === undefined) {
+    throw new Error("The account sync vanished right after it was created");
+  }
+  return mapAccountSync(row);
 }
 
 /** Every enabled sync whose next_run_at has come around (or was never set). */
@@ -234,19 +296,28 @@ export async function runAccountSyncDetailed(
 
   const startedAt = now();
   try {
-    const account = db.get<AccountRow>(
-      "SELECT id, forge_id, username, secret_enc FROM accounts WHERE id = ?",
-      row.account_id,
-    );
-    if (account === undefined) {
-      throw new Error(`Account ${String(row.account_id)} does not exist`);
-    }
     const forge = db.get<ForgeRow>(
       "SELECT id, protocol, host, port, kind FROM forges WHERE id = ?",
-      account.forge_id,
+      row.forge_id,
     );
     if (forge === undefined) {
-      throw new Error(`Forge ${String(account.forge_id)} does not exist`);
+      throw new Error(`Forge ${String(row.forge_id)} does not exist`);
+    }
+    // A namespace sync without an account follows the forge default, read
+    // fresh every run so changing the default takes effect; with no account at
+    // all it runs anonymously and sees public repositories only.
+    const account =
+      row.account_id === null
+        ? db.get<AccountRow>(
+            "SELECT id, forge_id, username, secret_enc FROM accounts WHERE forge_id = ? AND is_default = 1",
+            forge.id,
+          )
+        : db.get<AccountRow>(
+            "SELECT id, forge_id, username, secret_enc FROM accounts WHERE id = ?",
+            row.account_id,
+          );
+    if (account === undefined && row.account_id !== null) {
+      throw new Error(`Account ${String(row.account_id)} does not exist`);
     }
 
     const provider = providerFor(forge.kind);
@@ -258,22 +329,22 @@ export async function runAccountSyncDetailed(
     if (row.source === "starred" && provider.listStarred === undefined) {
       throw new Error("Starred sync is GitHub-only for now");
     }
+    if (row.source === "namespace" && provider.listNamespaceRepos === undefined) {
+      throw new Error("Syncing a whole user or organization is GitHub-only for now");
+    }
 
     const context: DiscoveryContext = {
       baseUrl: buildBaseUrl(forge),
-      username: account.username,
-      // An "anonymous" account sync is simply an accounts row with no stored
-      // secret, so account_id stays NOT NULL and nothing here is nullable.
-      token: resolveToken(account, deps.secretKey ?? null, decrypt),
+      username: account?.username ?? "",
+      // An "anonymous" owned or starred sync is simply an accounts row with no
+      // stored secret; a namespace sync may also have no account at all.
+      token: account === undefined ? null : resolveToken(account, deps.secretKey ?? null, decrypt),
       // Visibility is an owned-sync concept; a starred list is whatever it is.
       visibility: row.source === "starred" ? "all" : row.visibility,
       fetch: deps.fetch,
     };
 
-    const iterable =
-      row.source === "starred"
-        ? (provider.listStarred as (c: DiscoveryContext) => AsyncIterable<DiscoveredRepo>)(context)
-        : provider.listRepos(context);
+    const iterable = listingFor(provider, context, row);
 
     const byPath = new Map<string, DiscoveredRepo>();
     for await (const repo of iterable) {
@@ -287,6 +358,10 @@ export async function runAccountSyncDetailed(
       repos: [...byPath.values()],
       helpers,
       now: now(),
+      // A namespace sync pinned to a specific account fetches what it found
+      // with that account, which need not be the forge default. Owned and
+      // starred syncs keep their historical behaviour of no override.
+      accountOverrideId: row.source === "namespace" ? row.account_id : null,
     });
     created = upsert.created;
     linked = upsert.linked;
@@ -327,7 +402,7 @@ export async function runAccountSyncDetailed(
         // Deleted upstream is precisely what a backup is for: keep syncing it.
         log.info(
           { accountSyncId: row.id, path: repo.path, repoId: repo.id },
-          "repo is no longer listed on the account, keeping the backup",
+          "repo is no longer listed upstream, keeping the backup",
         );
       }
     }
@@ -379,6 +454,24 @@ export async function runAccountSyncDetailed(
   };
 }
 
+function listingFor(
+  provider: AccountSyncProvider,
+  context: DiscoveryContext,
+  row: AccountSyncRow,
+): AsyncIterable<DiscoveredRepo> {
+  if (row.source === "starred" && provider.listStarred !== undefined) {
+    return provider.listStarred(context);
+  }
+  if (
+    row.source === "namespace" &&
+    row.namespace !== null &&
+    provider.listNamespaceRepos !== undefined
+  ) {
+    return provider.listNamespaceRepos(context, row.namespace);
+  }
+  return provider.listRepos(context);
+}
+
 function buildBaseUrl(forge: ForgeRow): string {
   const port = forge.port === null ? "" : `:${String(forge.port)}`;
   return `${forge.protocol}://${forge.host}${port}`;
@@ -425,6 +518,8 @@ interface UpsertArgs {
   repos: readonly DiscoveredRepo[];
   helpers: DiscoveryRepoHelpers;
   now: number;
+  /** Set on newly created repos only; existing repos keep their own override. */
+  accountOverrideId?: number | null;
 }
 
 interface UpsertOutcome {
@@ -480,6 +575,7 @@ export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
         helpers: args.helpers,
         now: args.now,
         nextSyncAt: args.now + Math.round(step * index),
+        accountOverrideId: args.accountOverrideId ?? null,
       });
       created += 1;
       index += 1;
@@ -496,6 +592,7 @@ interface InsertArgs {
   helpers: DiscoveryRepoHelpers;
   now: number;
   nextSyncAt: number;
+  accountOverrideId: number | null;
 }
 
 function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
@@ -508,15 +605,16 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
       db.run(
         `INSERT INTO repos (
            forge_id, path, display_name, slug, short_id, managed_by_account_sync_id,
-           origin, state, next_sync_at, consecutive_failures, default_branch,
-           created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, 'account_sync', 'active', ?, 0, ?, ?, ?)`,
+           account_override_id, origin, state, next_sync_at, consecutive_failures,
+           default_branch, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'account_sync', 'active', ?, 0, ?, ?, ?)`,
         args.forgeId,
         args.repo.path,
         displayName,
         slug,
         shortId,
         args.accountSyncId,
+        args.accountOverrideId,
         args.nextSyncAt,
         args.repo.defaultBranch,
         args.now,

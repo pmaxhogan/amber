@@ -392,3 +392,116 @@ describe("POST /api/account-syncs/:id/run", () => {
     expect(response.statusCode).toBe(404);
   });
 });
+
+describe("POST /api/account-syncs, namespace", () => {
+  async function post(payload: Record<string, unknown>) {
+    return app.inject({ method: "POST", url: "/api/account-syncs", payload });
+  }
+
+  it("creates a namespace sync on a forge with no account", async () => {
+    const forgeId = seedForge("github", "github.com");
+
+    const response = await post({ source: "namespace", forgeId, namespace: "nodejs" });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json<AccountSync>()).toMatchObject({
+      forgeId,
+      accountId: null,
+      source: "namespace",
+      namespace: "nodejs",
+      visibility: "all",
+      enabled: true,
+    });
+  });
+
+  it("takes the forge from a pinned account", async () => {
+    const forgeId = seedForge("github", "github.com");
+    const accountId = seedAccount(forgeId, "org-bot");
+
+    const response = await post({ source: "namespace", accountId, namespace: "acme" });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json<AccountSync>()).toMatchObject({ forgeId, accountId, namespace: "acme" });
+  });
+
+  it("rejects an account from a different forge than the one named", async () => {
+    const github = seedForge("github", "github.com");
+    const other = seedForge("github", "ghe.example.com");
+    const accountId = seedAccount(other, "bot");
+
+    const response = await post({
+      source: "namespace",
+      forgeId: github,
+      accountId,
+      namespace: "x",
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json<{ message: string }>().message).toMatch(/different forge/);
+  });
+
+  it("rejects a second sync of the same namespace, whatever its case", async () => {
+    const forgeId = seedForge("github", "github.com");
+    expect((await post({ source: "namespace", forgeId, namespace: "nodejs" })).statusCode).toBe(
+      201,
+    );
+
+    const duplicate = await post({ source: "namespace", forgeId, namespace: "NodeJS" });
+
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json<{ message: string }>().message).toMatch(/nodejs on github.com/);
+  });
+
+  it("rejects a namespace sync anywhere but GitHub", async () => {
+    const forgeId = seedForge("gitlab", "gitlab.com");
+
+    const response = await post({ source: "namespace", forgeId, namespace: "gitlab-org" });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json<{ error: string }>().error).toBe("unsupported_source");
+  });
+
+  it("validates the namespace fields against the source", async () => {
+    const forgeId = seedForge("github", "github.com");
+    const accountId = seedAccount(forgeId, "octocat");
+
+    const cases: Record<string, unknown>[] = [
+      { source: "namespace", forgeId },
+      { source: "namespace", namespace: "nodejs" },
+      { source: "namespace", forgeId, namespace: "../etc" },
+      { source: "namespace", forgeId, namespace: "a/b" },
+      { source: "owned", accountId, namespace: "nodejs" },
+      { source: "owned", forgeId },
+      { source: "starred", accountId, forgeId },
+    ];
+    for (const payload of cases) {
+      const response = await post(payload);
+      expect(response.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+  });
+
+  it("404s for an unknown forge", async () => {
+    const response = await post({ source: "namespace", forgeId: 9999, namespace: "nodejs" });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("ignores namespace on PATCH, which stays immutable", async () => {
+    const forgeId = seedForge("github", "github.com");
+    const created = (
+      await post({ source: "namespace", forgeId, namespace: "nodejs" })
+    ).json<AccountSync>();
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/account-syncs/${String(created.id)}`,
+      payload: { namespace: "vuejs", visibility: "public" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json<AccountSync>()).toMatchObject({
+      namespace: "nodejs",
+      visibility: "public",
+    });
+  });
+});

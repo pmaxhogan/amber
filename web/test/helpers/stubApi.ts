@@ -137,8 +137,10 @@ export function makeRun(overrides: Partial<SyncRun> = {}): SyncRun {
 export function makeAccountSync(overrides: Partial<AccountSyncRow> = {}): AccountSyncRow {
   return {
     id: 1,
+    forgeId: 1,
     accountId: 1,
     source: "owned",
+    namespace: null,
     visibility: "all",
     enabled: true,
     intervalMinutes: 360,

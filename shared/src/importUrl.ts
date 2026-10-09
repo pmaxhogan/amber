@@ -44,6 +44,11 @@ export interface ImportLineResult {
   parsed?: ParsedRepoUrl;
   /** Human-facing explanation. Always present for "warning" and "error". */
   message?: string;
+  /**
+   * Set by the server, which alone knows the forge kind: 'namespace' when the
+   * line names a whole user or organization rather than one repository.
+   */
+  target?: "repo" | "namespace";
 }
 
 const SCHEME_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//;

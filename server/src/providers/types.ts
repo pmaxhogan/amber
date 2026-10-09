@@ -63,6 +63,13 @@ export interface AccountSyncProvider {
    */
   listStarred?(context: DiscoveryContext): AsyncIterable<DiscoveredRepo>;
   /**
+   * Every repository a named user or organization owns, honoring visibility,
+   * seen through this context's credentials (which may belong to someone else
+   * entirely, or be absent). Optional: only GitHub implements it, and
+   * namespace-sync creation rejects other kinds.
+   */
+  listNamespaceRepos?(context: DiscoveryContext, namespace: string): AsyncIterable<DiscoveredRepo>;
+  /**
    * Whether `path` is still reachable with this context's credentials. Used
    * before a starred sync removes a repository: only a definite "accessible"
    * proves the star was dropped deliberately rather than the repo vanishing.

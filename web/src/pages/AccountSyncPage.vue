@@ -3,10 +3,19 @@ import { computed, onMounted, ref } from "vue";
 import Button from "primevue/button";
 import Dialog from "primevue/dialog";
 import InputNumber from "primevue/inputnumber";
+import InputText from "primevue/inputtext";
 import Select from "primevue/select";
 import Tag from "primevue/tag";
 import ToggleSwitch from "primevue/toggleswitch";
-import type { Account, AccountSyncSource, AccountSyncVisibility, Forge } from "@amber/shared";
+import {
+  parseNamespaceInput,
+  supportsNamespaceSyncKind,
+  type Account,
+  type AccountSyncSource,
+  type AccountSyncVisibility,
+  type Forge,
+  type UpsertAccountSyncInput,
+} from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
 import { STARRED_SUPPORTED_FORGE_KINDS, type AccountSyncRow } from "../api/types.ts";
@@ -43,6 +52,32 @@ function accountLabel(accountId: number): string {
   return forge === undefined ? account.username : `${account.username} at ${forge.host}`;
 }
 
+/** What a sync card is titled: the account, or the namespace and its forge. */
+function syncTitle(sync: AccountSyncRow): string {
+  if (sync.source !== "namespace") {
+    return sync.accountId === null ? `sync ${sync.id}` : accountLabel(sync.accountId);
+  }
+  const forge = forgeById.value.get(sync.forgeId);
+  return forge === undefined ? (sync.namespace ?? "") : `${sync.namespace} on ${forge.host}`;
+}
+
+function viaLabel(sync: AccountSyncRow): string {
+  if (sync.accountId === null) return "via the forge default account";
+  const account = accountById.value.get(sync.accountId);
+  return `via ${account?.username ?? `account ${sync.accountId}`}`;
+}
+
+const SOURCE_TAG: Record<AccountSyncSource, { label: string; severity: string }> = {
+  owned: { label: "owned", severity: "secondary" },
+  starred: { label: "starred", severity: "warn" },
+  namespace: { label: "user or org", severity: "info" },
+};
+
+/** Forges whose provider can enumerate an arbitrary user or organization. */
+const namespaceForges = computed(() =>
+  forges.value.filter((forge) => supportsNamespaceSyncKind(forge.kind)),
+);
+
 /** Starred discovery needs the GitHub API, so it is offered only there. */
 function supportsStarred(accountId: number): boolean {
   const forge = forgeForAccount(accountId);
@@ -77,22 +112,67 @@ async function load(): Promise<void> {
 const dialog = ref(false);
 const busy = ref(false);
 const editing = ref<AccountSyncRow | null>(null);
-const form = ref<{
+interface SyncForm {
   accountId: number | null;
+  forgeId: number | null;
+  namespace: string;
   source: AccountSyncSource;
   visibility: AccountSyncVisibility;
   intervalMinutes: number;
   enabled: boolean;
-}>({ accountId: null, source: "owned", visibility: "all", intervalMinutes: 360, enabled: true });
+}
+
+function blankForm(): SyncForm {
+  return {
+    accountId: accounts.value[0]?.id ?? null,
+    forgeId: namespaceForges.value[0]?.id ?? null,
+    namespace: "",
+    source: accounts.value.length === 0 && namespaceForges.value.length > 0 ? "namespace" : "owned",
+    visibility: "all",
+    intervalMinutes: 360,
+    enabled: true,
+  };
+}
+
+const form = ref<SyncForm>({
+  accountId: null,
+  forgeId: null,
+  namespace: "",
+  source: "owned",
+  visibility: "all",
+  intervalMinutes: 360,
+  enabled: true,
+});
 
 const accountOptions = computed(() =>
   accounts.value.map((account) => ({ label: accountLabel(account.id), value: account.id })),
 );
 
+const forgeOptions = computed(() =>
+  namespaceForges.value.map((forge) => ({ label: forge.host, value: forge.id })),
+);
+
+/** A namespace sync may borrow any account on its forge, or none. */
+const namespaceAccountOptions = computed(() => [
+  { label: "Forge default account (anonymous if there is none)", value: null },
+  ...accounts.value
+    .filter((account) => account.forgeId === form.value.forgeId)
+    .map((account) => ({ label: account.username, value: account.id })),
+]);
+
+/** Whatever was typed or pasted, reduced to the one name the API takes. */
+const parsedNamespace = computed(() => parseNamespaceInput(form.value.namespace));
+
 const sourceOptions = computed(() => {
   const starredAllowed = form.value.accountId !== null && supportsStarred(form.value.accountId);
+  const namespaceAllowed = namespaceForges.value.length > 0;
   return [
-    { label: "Repositories the account owns", value: "owned", disabled: false },
+    {
+      label:
+        accounts.value.length === 0 ? "Owned (needs an account)" : "Repositories an account owns",
+      value: "owned",
+      disabled: accounts.value.length === 0,
+    },
     {
       label: starredAllowed
         ? "Repositories the account has starred"
@@ -100,8 +180,23 @@ const sourceOptions = computed(() => {
       value: "starred",
       disabled: !starredAllowed,
     },
+    {
+      label: namespaceAllowed
+        ? "Every repository of a user or organization"
+        : "A user or organization (GitHub only)",
+      value: "namespace",
+      disabled: !namespaceAllowed,
+    },
   ];
 });
+
+const canSave = computed(() =>
+  form.value.source === "namespace"
+    ? form.value.forgeId !== null && parsedNamespace.value !== null
+    : form.value.accountId !== null,
+);
+
+const canCreate = computed(() => accounts.value.length > 0 || namespaceForges.value.length > 0);
 
 const visibilityOptions = [
   { label: "All repositories", value: "all" },
@@ -111,13 +206,7 @@ const visibilityOptions = [
 
 function openCreate(): void {
   editing.value = null;
-  form.value = {
-    accountId: accounts.value[0]?.id ?? null,
-    source: "owned",
-    visibility: "all",
-    intervalMinutes: 360,
-    enabled: true,
-  };
+  form.value = blankForm();
   dialog.value = true;
 }
 
@@ -125,6 +214,8 @@ function openEdit(sync: AccountSyncRow): void {
   editing.value = sync;
   form.value = {
     accountId: sync.accountId,
+    forgeId: sync.forgeId,
+    namespace: sync.namespace ?? "",
     source: sync.source,
     visibility: sync.visibility,
     intervalMinutes: sync.intervalMinutes,
@@ -133,24 +224,51 @@ function openEdit(sync: AccountSyncRow): void {
   dialog.value = true;
 }
 
+/**
+ * The create payload for the current form. A starred sync always takes the
+ * full list and the server rejects a visibility field on one; a namespace sync
+ * names its forge and only optionally an account.
+ */
+function createBody(): UpsertAccountSyncInput | null {
+  const common = {
+    intervalMinutes: form.value.intervalMinutes,
+    enabled: form.value.enabled,
+  };
+  if (form.value.source === "namespace") {
+    if (form.value.forgeId === null || parsedNamespace.value === null) return null;
+    return {
+      source: "namespace",
+      forgeId: form.value.forgeId,
+      namespace: parsedNamespace.value,
+      ...(form.value.accountId === null ? {} : { accountId: form.value.accountId }),
+      visibility: form.value.visibility,
+      ...common,
+    };
+  }
+  if (form.value.accountId === null) return null;
+  return {
+    accountId: form.value.accountId,
+    source: form.value.source,
+    ...(form.value.source === "owned" ? { visibility: form.value.visibility } : {}),
+    ...common,
+  };
+}
+
 async function save(): Promise<void> {
-  if (form.value.accountId === null) return;
+  const body = editing.value === null ? createBody() : null;
+  if (editing.value === null && body === null) return;
   busy.value = true;
   try {
-    // A starred sync always takes the full list; the server rejects a
-    // visibility field on one, so only owned syncs send it.
-    const body = {
-      accountId: form.value.accountId,
-      source: form.value.source,
-      ...(form.value.source === "owned" ? { visibility: form.value.visibility } : {}),
-      intervalMinutes: form.value.intervalMinutes,
-      enabled: form.value.enabled,
-    };
     if (editing.value === null) {
-      await api.createAccountSync(body);
+      await api.createAccountSync(body ?? {});
       toast.success("Account sync created", "The first discovery run starts shortly.");
     } else {
-      await api.updateAccountSync(editing.value.id, body);
+      // Only these fields are editable; the rest identify the sync.
+      await api.updateAccountSync(editing.value.id, {
+        ...(editing.value.source === "starred" ? {} : { visibility: form.value.visibility }),
+        intervalMinutes: form.value.intervalMinutes,
+        enabled: form.value.enabled,
+      });
       toast.success("Account sync updated");
     }
     dialog.value = false;
@@ -198,6 +316,26 @@ async function confirmDelete(): Promise<void> {
   }
 }
 
+function onSourceChange(source: AccountSyncSource): void {
+  if (source === "namespace") {
+    const account =
+      form.value.accountId === null ? undefined : accountById.value.get(form.value.accountId);
+    if (account !== undefined && account.forgeId !== form.value.forgeId) {
+      form.value.accountId = null;
+    }
+  } else if (form.value.accountId === null) {
+    form.value.accountId = accounts.value[0]?.id ?? null;
+  }
+}
+
+function onForgeChange(): void {
+  const account =
+    form.value.accountId === null ? undefined : accountById.value.get(form.value.accountId);
+  if (account !== undefined && account.forgeId !== form.value.forgeId) {
+    form.value.accountId = null;
+  }
+}
+
 onMounted(() => void load());
 </script>
 
@@ -208,12 +346,7 @@ onMounted(() => void load());
       description="Discover repositories automatically from a linked account, instead of pasting URLs by hand."
     >
       <template #actions>
-        <Button
-          label="Add account sync"
-          size="small"
-          :disabled="accounts.length === 0"
-          @click="openCreate"
-        />
+        <Button label="Add account sync" size="small" :disabled="!canCreate" @click="openCreate" />
       </template>
     </PageHeader>
 
@@ -222,7 +355,7 @@ onMounted(() => void load());
     <ListSkeleton v-if="loading" :rows="3" label="Loading account syncs" />
 
     <EmptyState
-      v-else-if="accounts.length === 0 && error === null"
+      v-else-if="!canCreate && error === null"
       icon="accounts"
       title="No accounts to sync from"
       description="Account discovery needs a credential that can list repositories. Add an account on the Forges &amp; Accounts page first."
@@ -232,7 +365,7 @@ onMounted(() => void load());
       v-else-if="syncs.length === 0 && error === null"
       icon="sync"
       title="No account syncs yet"
-      description="An account sync enumerates the repositories an account owns or has starred, and imports whatever it finds on a schedule."
+      description="An account sync enumerates the repositories an account owns or has starred, or everything a GitHub user or organization owns, and imports whatever it finds on a schedule. Pasting https://github.com/nodejs on the Import page sets one up too."
     >
       <Button label="Add an account sync" @click="openCreate" />
     </EmptyState>
@@ -241,13 +374,14 @@ onMounted(() => void load());
       <article v-for="sync in syncs" :key="sync.id" class="amber-card sync-card">
         <header class="sync-card__header">
           <div>
-            <h2>{{ accountLabel(sync.accountId) }}</h2>
+            <h2>{{ syncTitle(sync) }}</h2>
             <p class="amber-note">
               <Tag
-                :value="sync.source === 'starred' ? 'starred' : 'owned'"
-                :severity="sync.source === 'starred' ? 'warn' : 'secondary'"
+                :value="SOURCE_TAG[sync.source].label"
+                :severity="SOURCE_TAG[sync.source].severity"
               />
-              <span v-if="sync.source === 'owned'">visibility: {{ sync.visibility }}</span>
+              <span v-if="sync.source === 'namespace'">{{ viaLabel(sync) }}</span>
+              <span v-if="sync.source !== 'starred'">visibility: {{ sync.visibility }}</span>
               <span>every {{ sync.intervalMinutes }} minutes</span>
             </p>
           </div>
@@ -292,6 +426,11 @@ onMounted(() => void load());
           made private, or is simply unreachable is kept and keeps syncing, because that is exactly
           what a backup is for.
         </p>
+        <p v-else-if="sync.source === 'namespace'" class="amber-note">
+          Every run re-lists {{ sync.namespace }}, so repositories created later are picked up on
+          their own. Nothing is ever removed: a repository that is deleted or moved away keeps its
+          backup and keeps syncing.
+        </p>
       </article>
     </div>
 
@@ -303,6 +442,76 @@ onMounted(() => void load());
     >
       <div class="amber-stack">
         <div class="amber-field">
+          <label for="sync-source">What to discover</label>
+          <Select
+            v-model="form.source"
+            input-id="sync-source"
+            :options="sourceOptions"
+            option-label="label"
+            option-value="value"
+            option-disabled="disabled"
+            :disabled="editing !== null"
+            @update:model-value="onSourceChange"
+          />
+          <p v-if="form.source === 'starred'" class="amber-note">
+            Always mirrors your current starred list. Unstarred repositories are removed only when
+            still accessible upstream; deleted or unreachable repositories are kept.
+          </p>
+        </div>
+
+        <template v-if="form.source === 'namespace'">
+          <div class="amber-field">
+            <label for="sync-forge">Forge</label>
+            <Select
+              v-model="form.forgeId"
+              input-id="sync-forge"
+              :options="forgeOptions"
+              option-label="label"
+              option-value="value"
+              :disabled="editing !== null"
+              @update:model-value="onForgeChange"
+            />
+          </div>
+
+          <div class="amber-field">
+            <label for="sync-namespace">User or organization</label>
+            <InputText
+              id="sync-namespace"
+              v-model="form.namespace"
+              placeholder="nodejs or https://github.com/nodejs"
+              autocomplete="off"
+              spellcheck="false"
+              :disabled="editing !== null"
+              :invalid="form.namespace.trim() !== '' && parsedNamespace === null"
+            />
+            <p
+              v-if="form.namespace.trim() !== '' && parsedNamespace === null"
+              class="amber-note sync-form__invalid"
+            >
+              Use a user or organization name, or its profile URL.
+            </p>
+          </div>
+
+          <div class="amber-field">
+            <label for="sync-namespace-account">Credentials</label>
+            <Select
+              v-model="form.accountId"
+              input-id="sync-namespace-account"
+              :options="namespaceAccountOptions"
+              option-label="label"
+              option-value="value"
+              :disabled="editing !== null"
+            />
+            <p class="amber-note">
+              Every run re-lists the namespace, so repositories created later are picked up on their
+              own, and nothing is ever removed. Private repositories appear only when the token can
+              see them: for a GitHub organization, use a fine-grained token whose resource owner is
+              that organization (the organization may have to approve it).
+            </p>
+          </div>
+        </template>
+
+        <div v-else class="amber-field">
           <label for="sync-account">Account</label>
           <Select
             v-model="form.accountId"
@@ -314,23 +523,7 @@ onMounted(() => void load());
           />
         </div>
 
-        <div class="amber-field">
-          <label for="sync-source">What to discover</label>
-          <Select
-            v-model="form.source"
-            input-id="sync-source"
-            :options="sourceOptions"
-            option-label="label"
-            option-value="value"
-            option-disabled="disabled"
-          />
-          <p v-if="form.source === 'starred'" class="amber-note">
-            Always mirrors your current starred list. Unstarred repositories are removed only when
-            still accessible upstream; deleted or unreachable repositories are kept.
-          </p>
-        </div>
-
-        <div v-if="form.source === 'owned'" class="amber-field">
+        <div v-if="form.source !== 'starred'" class="amber-field">
           <label for="sync-visibility">Visibility</label>
           <Select
             v-model="form.visibility"
@@ -366,7 +559,7 @@ onMounted(() => void load());
         <Button
           :label="editing === null ? 'Create' : 'Save'"
           :loading="busy"
-          :disabled="form.accountId === null"
+          :disabled="editing === null && !canSave"
           @click="save"
         />
       </template>
@@ -428,6 +621,10 @@ onMounted(() => void load());
 
 .sync-card__stats dd {
   margin: 0.1rem 0 0;
+}
+
+.sync-form__invalid {
+  color: var(--amber-error);
 }
 
 .sync-card__error {

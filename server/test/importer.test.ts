@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db/db.ts";
-import { createAccount } from "../src/domain/accounts.ts";
+import { createAccount, deleteAccount } from "../src/domain/accounts.ts";
 import { listForges } from "../src/domain/forges.ts";
 import {
   commitImport,
@@ -155,7 +155,9 @@ describe("commitImport creates forges and repos", () => {
   });
 
   it("gives every repo its own slug and short id", () => {
-    commitImport(db, ["github.com/a/b", "gitlab.com/a/b", "github.com/a-b"].join("\n"), {
+    // a/b and a-b sanitize alike on one forge. A generic host, because a single
+    // segment on github.com names a namespace rather than a repository.
+    commitImport(db, ["git.example.com/a/b", "gitlab.com/a/b", "git.example.com/a-b"].join("\n"), {
       now: NOW,
     });
     const repos = all().rows;
@@ -406,5 +408,131 @@ describe("commitImport error handling", () => {
       updated: 0,
       failed: 0,
     });
+  });
+});
+
+describe("namespace lines", () => {
+  const githubId = () => listForges(db).find((forge) => forge.host === "github.com")!.id;
+  const syncs = () =>
+    db.all<{ id: number; forge_id: number; account_id: number | null; namespace: string }>(
+      "SELECT id, forge_id, account_id, namespace FROM account_syncs WHERE source = 'namespace' ORDER BY id",
+    );
+
+  it("previews a bare GitHub owner as a namespace and a repo URL as a repo", () => {
+    const preview = previewImport(
+      db,
+      ["https://github.com/nodejs", "github.com/vuejs/", "https://github.com/nodejs/node"].join(
+        "\n",
+      ),
+    );
+
+    expect(preview.results.map((line) => line.target)).toEqual(["namespace", "namespace", "repo"]);
+    expect(preview.results[0]?.status).toBe("ok");
+    expect(preview.results[0]?.message).toMatch(/every repository nodejs owns on github.com/);
+    expect(syncs()).toEqual([]);
+  });
+
+  it("treats a host GitHub detection would claim as a namespace even before the forge exists", () => {
+    db.run("DELETE FROM forges WHERE host = 'github.com'");
+
+    const preview = previewImport(db, "https://github.com/nodejs");
+
+    expect(preview.results[0]?.target).toBe("namespace");
+  });
+
+  it("keeps a single segment on any other forge kind a repository", () => {
+    const preview = previewImport(
+      db,
+      ["https://git.example.com/solo", "gitlab.com/group"].join("\n"),
+    );
+
+    expect(preview.results.map((line) => line.target)).toEqual(["repo", "repo"]);
+  });
+
+  it("commits a namespace line as an enabled namespace sync, not a repo", () => {
+    const result = commitImport(db, "https://github.com/nodejs", { now: NOW });
+
+    expect(result.created).toBe(1);
+    expect(result.results[0]).toMatchObject({ action: "created", target: "namespace" });
+    expect(result.results[0]?.repoId).toBeUndefined();
+    expect(result.results[0]?.accountSyncId).toBe(syncs()[0]?.id);
+    expect(all().total).toBe(0);
+    expect(syncs()).toEqual([
+      { id: expect.any(Number), forge_id: githubId(), account_id: null, namespace: "nodejs" },
+    ]);
+    const due = db.get<{ enabled: number; next_run_at: number }>(
+      "SELECT enabled, next_run_at FROM account_syncs",
+    );
+    expect(due).toEqual({ enabled: 1, next_run_at: NOW });
+  });
+
+  it("does not let namespace lines stretch the stagger of the repos around them", () => {
+    const result = commitImport(
+      db,
+      ["github.com/nodejs", "github.com/a/one", "github.com/vuejs", "github.com/a/two"].join("\n"),
+      { now: NOW, staggerStepMs: 1000 },
+    );
+
+    const repos = all().rows;
+    expect(repos.map((repo) => repo.nextSyncAt)).toEqual([NOW, NOW + 1000]);
+    expect(result.created).toBe(4);
+  });
+
+  it("is idempotent, case-insensitively, and pins a named account on re-import", () => {
+    commitImport(db, "https://github.com/nodejs", { now: NOW });
+    const account = createAccount(db, KEY, {
+      forgeId: githubId(),
+      username: "org-bot",
+      secret: null,
+      isDefault: false,
+    });
+
+    const again = commitImport(db, "https://github.com/NodeJS", { now: NOW });
+    expect(again.results[0]?.action).toBe("updated");
+    expect(syncs()[0]?.account_id).toBeNull();
+
+    const pinned = commitImport(db, "org-bot@github.com/nodejs", { now: NOW });
+    expect(pinned.results[0]).toMatchObject({ action: "updated", status: "ok" });
+    expect(syncs()).toHaveLength(1);
+    expect(syncs()[0]?.account_id).toBe(account.id);
+
+    // A later prefix-less line never clears the pin.
+    commitImport(db, "github.com/nodejs", { now: NOW });
+    expect(syncs()[0]?.account_id).toBe(account.id);
+  });
+
+  it("warns and falls back to the forge default when a user@ prefix names no account", () => {
+    const preview = previewImport(db, "ghost@github.com/nodejs");
+    const result = commitImport(db, "ghost@github.com/nodejs", { now: NOW });
+
+    // The preview has to say exactly what the commit then does.
+    expect(preview.results[0]).toMatchObject({ status: "warning", target: "namespace" });
+    expect(preview.results[0]?.message).toBe(result.results[0]?.message);
+
+    expect(result.results[0]).toMatchObject({ action: "created", status: "warning" });
+    expect(result.results[0]?.message).toMatch(/forge default account/);
+    expect(syncs()[0]?.account_id).toBeNull();
+  });
+});
+
+describe("deleting an account a namespace sync is pinned to", () => {
+  it("keeps the sync and lets it fall back to the forge default", () => {
+    commitImport(db, "github.com/nodejs", { now: NOW });
+    const forgeId = listForges(db).find((forge) => forge.host === "github.com")!.id;
+    const account = createAccount(db, KEY, {
+      forgeId,
+      username: "org-bot",
+      secret: null,
+      isDefault: false,
+    });
+    commitImport(db, "org-bot@github.com/nodejs", { now: NOW });
+
+    deleteAccount(db, account.id);
+
+    expect(
+      db.all<{ account_id: number | null }>(
+        "SELECT account_id FROM account_syncs WHERE source = 'namespace'",
+      ),
+    ).toEqual([{ account_id: null }]);
   });
 });

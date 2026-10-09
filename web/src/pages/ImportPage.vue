@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import Button from "primevue/button";
 import Column from "primevue/column";
 import DataTable from "primevue/datatable";
+import Tag from "primevue/tag";
 import Textarea from "primevue/textarea";
 import type { ImportCommitResponse, ImportPreviewResponse } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
@@ -29,6 +30,7 @@ const PLACEHOLDER = [
   "https://github.com/nodejs/node",
   "github.com/vuejs/core",
   "pmaxhogan@github.com/pmaxhogan/mkvid",
+  "https://github.com/nodejs",
   "# lines starting with a hash are ignored",
 ].join("\n");
 
@@ -76,6 +78,16 @@ async function runImport(): Promise<void> {
     const result = await api.commitImport(text.value);
     committed.value = result;
     preview.value = null;
+    const done = result.results.filter((line) => line.action !== "failed");
+    const namespaces = done.filter((line) => line.target === "namespace").length;
+    const what = [
+      ...(done.length - namespaces > 0
+        ? [pluralize(done.length - namespaces, "repository", "repositories")]
+        : []),
+      ...(namespaces > 0
+        ? [pluralize(namespaces, "user or organization", "users or organizations")]
+        : []),
+    ].join(" and ");
     if (result.failed > 0) {
       toast.warn(
         `Imported ${result.created + result.updated}, ${result.failed} failed`,
@@ -83,8 +95,10 @@ async function runImport(): Promise<void> {
       );
     } else {
       toast.success(
-        `Imported ${pluralize(result.created + result.updated, "repository", "repositories")}`,
-        "Amber staggers the first syncs over the next few minutes.",
+        `Imported ${what === "" ? "nothing" : what}`,
+        namespaces > 0
+          ? "Amber lists each user or organization within a minute, then keeps checking for new repositories."
+          : "Amber staggers the first syncs over the next few minutes.",
       );
     }
   } catch (cause) {
@@ -134,7 +148,9 @@ function statusIcon(status: string): string {
         <p class="amber-note">
           {{ pluralize(lineCount, "line", "lines") }} to parse. Blank lines and lines starting with
           a hash are ignored. A "user@" prefix picks an existing account on that forge as the
-          override; it never creates an account. SSH remotes are not supported.
+          override; it never creates an account. A GitHub user or organization on its own, like
+          https://github.com/nodejs, imports every repository it owns and keeps adding new ones. SSH
+          remotes are not supported.
         </p>
       </div>
 
@@ -187,6 +203,12 @@ function statusIcon(status: string): string {
         <Column header="Target">
           <template #body="{ data }">
             <span class="mono">{{ parsedTarget(data) }}</span>
+            <Tag
+              v-if="data.target === 'namespace'"
+              value="all repos"
+              severity="info"
+              class="import-target-tag"
+            />
           </template>
         </Column>
         <Column header="Account override">
@@ -226,6 +248,12 @@ function statusIcon(status: string): string {
         <Column header="Target">
           <template #body="{ data }">
             <span class="mono">{{ parsedTarget(data) }}</span>
+            <Tag
+              v-if="data.target === 'namespace'"
+              value="all repos"
+              severity="info"
+              class="import-target-tag"
+            />
           </template>
         </Column>
         <Column header="Notes">
@@ -253,6 +281,10 @@ function statusIcon(status: string): string {
 .import-textarea {
   width: 100%;
   font-size: 0.85rem;
+}
+
+.import-target-tag {
+  margin-left: 0.5rem;
 }
 
 .import-actions {
