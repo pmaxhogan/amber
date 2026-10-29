@@ -665,6 +665,12 @@ onBeforeUnmount(() => {
         </template>
       </Column>
 
+      <Column header="Last seen" sort-field="last_seen_at" sortable>
+        <template #body="{ data }">
+          <span :title="absoluteTime(data.lastSeenAt)">{{ relativeTime(data.lastSeenAt) }}</span>
+        </template>
+      </Column>
+
       <Column header="Next sync" sort-field="next_sync_at" sortable>
         <template #body="{ data }">
           <span :title="absoluteTime(data.nextSyncAt)">{{ relativeTime(data.nextSyncAt) }}</span>

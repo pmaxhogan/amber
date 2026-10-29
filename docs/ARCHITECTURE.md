@@ -123,7 +123,12 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   `state` ('active'|'paused'), `next_sync_at` INTEGER NULL,
   `consecutive_failures` INTEGER, `last_sync_at`, `last_success_at`,
   `last_error` TEXT NULL, `disk_usage_bytes` INTEGER NULL,
-  `default_branch` TEXT NULL, `last_fetch_head` TEXT NULL.
+  `default_branch` TEXT NULL, `last_fetch_head` TEXT NULL,
+  `last_seen_at` INTEGER NULL (last time the repo was confirmed to exist
+  upstream: set by every successful fetch and by every account-sync listing
+  that contains it, whichever sync manages the row; never set by a failure.
+  The listing sorts by it so a repo that disappeared upstream stands out.
+  Migration 005 backfilled it from `last_success_at`).
   UNIQUE(forge_id, path). Re-importing an existing forge+path updates the account
   override instead of erroring (idempotent import).
 - `sync_runs`: `id` PK, `repo_id` FK CASCADE, `started_at`, `finished_at`,

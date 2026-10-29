@@ -179,6 +179,12 @@ export const repoSchema = z.object({
   consecutiveFailures: z.number().int().nonnegative(),
   lastSyncAt: epochMsSchema.nullable(),
   lastSuccessAt: epochMsSchema.nullable(),
+  /**
+   * The last time the repository was confirmed to exist upstream: a successful
+   * fetch or an appearance in an account-sync listing. Stops advancing when a
+   * repository disappears.
+   */
+  lastSeenAt: epochMsSchema.nullable(),
   lastError: z.string().nullable(),
   diskUsageBytes: z.number().int().nonnegative().nullable(),
   defaultBranch: z.string().nullable(),
@@ -217,6 +223,7 @@ export const REPO_SORT_FIELDS = [
   "path",
   "last_sync_at",
   "last_success_at",
+  "last_seen_at",
   "disk_usage_bytes",
   "next_sync_at",
   "created_at",

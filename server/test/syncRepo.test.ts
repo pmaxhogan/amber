@@ -163,6 +163,7 @@ describe("bare mode", () => {
 
     const repo = db.get<{
       last_success_at: number | null;
+      last_seen_at: number | null;
       next_sync_at: number;
       disk_usage_bytes: number;
       default_branch: string;
@@ -171,6 +172,7 @@ describe("bare mode", () => {
       last_error: string | null;
     }>("SELECT * FROM repos WHERE id = ?", repoId);
     expect(repo?.last_success_at).not.toBeNull();
+    expect(repo?.last_seen_at).toBe(repo?.last_success_at);
     expect(repo?.next_sync_at).toBeGreaterThan(Date.now());
     expect(repo?.disk_usage_bytes).toBeGreaterThan(0);
     expect(repo?.default_branch).toBe("main");
@@ -321,9 +323,11 @@ describe("failures", () => {
       next_sync_at: number;
       last_error: string;
       last_success_at: number | null;
+      last_seen_at: number | null;
     }>("SELECT * FROM repos WHERE id = ?", repoId);
     expect(repo?.consecutive_failures).toBe(1);
     expect(repo?.last_success_at).toBeNull();
+    expect(repo?.last_seen_at).toBeNull();
     expect(repo?.next_sync_at).toBeGreaterThan(Date.now());
     expect(repo?.last_error).toContain("git");
   });

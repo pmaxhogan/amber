@@ -557,13 +557,20 @@ export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
     for (const repo of args.repos) {
       const found = existing.get(repo.path);
       if (found !== undefined) {
+        // Listed means it exists upstream, whichever sync manages the row.
+        // Only an unmanaged row is linked to this sync.
+        db.run(
+          `UPDATE repos
+              SET last_seen_at = ?,
+                  managed_by_account_sync_id = COALESCE(managed_by_account_sync_id, ?),
+                  updated_at = ?
+            WHERE id = ?`,
+          args.now,
+          args.accountSyncId,
+          args.now,
+          found.id,
+        );
         if (found.managed === null) {
-          db.run(
-            "UPDATE repos SET managed_by_account_sync_id = ?, updated_at = ? WHERE id = ?",
-            args.accountSyncId,
-            args.now,
-            found.id,
-          );
           linked += 1;
         }
         continue;
@@ -606,8 +613,8 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
         `INSERT INTO repos (
            forge_id, path, display_name, slug, short_id, managed_by_account_sync_id,
            account_override_id, origin, state, next_sync_at, consecutive_failures,
-           default_branch, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'account_sync', 'active', ?, 0, ?, ?, ?)`,
+           default_branch, last_seen_at, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'account_sync', 'active', ?, 0, ?, ?, ?, ?)`,
         args.forgeId,
         args.repo.path,
         displayName,
@@ -617,6 +624,7 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
         args.accountOverrideId,
         args.nextSyncAt,
         args.repo.defaultBranch,
+        args.now,
         args.now,
         args.now,
       );

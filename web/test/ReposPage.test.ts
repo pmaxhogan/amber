@@ -75,6 +75,18 @@ describe("Repos page lazy loading", () => {
     expect(query).toMatchObject({ sort: "disk_usage_bytes", dir: "desc", page: 1 });
   });
 
+  it("offers a sortable Last seen column so vanished repos can be found", async () => {
+    const { wrapper, api } = await mountPage();
+
+    expect(wrapper.text()).toContain("Last seen");
+    await table(wrapper).vm.$emit("sort", { sortField: "last_seen_at", sortOrder: 1 });
+    await flush();
+
+    const [query] = (api.listRepos as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[1] as [Record<string, unknown>];
+    expect(query).toMatchObject({ sort: "last_seen_at", dir: "asc", page: 1 });
+  });
+
   it("passes the filters through to the query", async () => {
     const { wrapper, api } = await mountPage();
 

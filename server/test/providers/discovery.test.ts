@@ -41,6 +41,7 @@ interface RepoRow {
   next_sync_at: number | null;
   default_branch: string | null;
   state: string;
+  last_seen_at: number | null;
 }
 
 function repo(path: string, overrides: Partial<DiscoveredRepo> = {}): DiscoveredRepo {
@@ -340,6 +341,48 @@ describe("runAccountSync, owned", () => {
     expect(second.removed).toBe(0);
     expect(repoRows().map((row) => row.path)).toEqual(["octocat/one", "octocat/two"]);
     expect(deletions).toEqual([]);
+  });
+
+  it("records when each repo was last listed, so a vanished one stops advancing", async () => {
+    const { accountId } = seed();
+    const syncId = createSync(accountId);
+    const provider = fakeProvider({
+      repos: [[repo("octocat/one"), repo("octocat/two")], [repo("octocat/one")]],
+    });
+    let clock = 1_000;
+    const deps = baseDeps(provider, { now: () => clock });
+
+    await runAccountSyncDetailed(db, syncId, deps);
+    expect(repoRows().map((row) => row.last_seen_at)).toEqual([1_000, 1_000]);
+
+    clock = 9_000;
+    await runAccountSyncDetailed(db, syncId, deps);
+    expect(repoRows().map((row) => [row.path, row.last_seen_at])).toEqual([
+      ["octocat/one", 9_000],
+      ["octocat/two", 1_000],
+    ]);
+  });
+
+  it("marks a repo managed by another sync as seen without relinking it", async () => {
+    const { accountId } = seed();
+    const firstSync = createSync(accountId);
+    const secondSync = createSync(accountId, "starred");
+    await runAccountSyncDetailed(
+      db,
+      firstSync,
+      baseDeps(fakeProvider({ repos: [[repo("octocat/one")]] }), { now: () => 1_000 }),
+    );
+
+    const result = await runAccountSyncDetailed(
+      db,
+      secondSync,
+      baseDeps(fakeProvider({ starred: [[repo("octocat/one")]] }), { now: () => 5_000 }),
+    );
+
+    expect(result.linked).toBe(0);
+    const [row] = repoRows();
+    expect(row?.managed_by_account_sync_id).toBe(firstSync);
+    expect(row?.last_seen_at).toBe(5_000);
   });
 
   it("passes the forge origin, username and visibility to the provider", async () => {
