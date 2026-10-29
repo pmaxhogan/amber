@@ -40,6 +40,7 @@ interface RepoRow {
   consecutive_failures: number;
   last_sync_at: number | null;
   last_success_at: number | null;
+  last_seen_at: number | null;
   last_error: string | null;
   disk_usage_bytes: number | null;
   default_branch: string | null;
@@ -52,9 +53,9 @@ interface RepoRow {
 const REPO_COLUMNS = `repos.id, repos.forge_id, repos.path, repos.display_name, repos.slug,
   repos.short_id, repos.account_override_id, repos.force_anonymous,
   repos.managed_by_account_sync_id, repos.state, repos.next_sync_at, repos.consecutive_failures,
-  repos.last_sync_at, repos.last_success_at, repos.last_error, repos.disk_usage_bytes,
-  repos.default_branch, repos.last_fetch_head, repos.origin, repos.created_at,
-  repos.updated_at`;
+  repos.last_sync_at, repos.last_success_at, repos.last_seen_at, repos.last_error,
+  repos.disk_usage_bytes, repos.default_branch, repos.last_fetch_head, repos.origin,
+  repos.created_at, repos.updated_at`;
 
 function toRepo(row: RepoRow): Repo {
   return {
@@ -72,6 +73,7 @@ function toRepo(row: RepoRow): Repo {
     consecutiveFailures: row.consecutive_failures,
     lastSyncAt: row.last_sync_at,
     lastSuccessAt: row.last_success_at,
+    lastSeenAt: row.last_seen_at,
     lastError: row.last_error,
     diskUsageBytes: row.disk_usage_bytes,
     defaultBranch: row.default_branch,
@@ -211,6 +213,9 @@ const SORT_SQL: Readonly<Record<RepoSortField, string>> = {
   path: "repos.path COLLATE NOCASE",
   last_sync_at: "repos.last_sync_at",
   last_success_at: "repos.last_success_at",
+  // Never-seen rows sort last either way, so ascending leads with the repo
+  // that vanished longest ago rather than with imports still waiting to clone.
+  last_seen_at: "repos.last_seen_at IS NULL, repos.last_seen_at",
   disk_usage_bytes: "repos.disk_usage_bytes",
   next_sync_at: "repos.next_sync_at",
   created_at: "repos.created_at",

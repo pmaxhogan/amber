@@ -315,6 +315,22 @@ describe("listRepos", () => {
     expect(listRepos(db, query({ sort: "disk_usage_bytes" })).rows).toHaveLength(4);
   });
 
+  it("sorts by last seen, so the repo that disappeared longest ago comes first", () => {
+    const seen = [
+      ["facebook/react", 3_000],
+      ["nodejs/node", 1_000],
+    ] as const;
+    for (const [path, at] of seen) {
+      db.run("UPDATE repos SET last_seen_at = ? WHERE path = ?", at, path);
+    }
+
+    const desc = listRepos(db, query({ sort: "last_seen_at", dir: "desc" })).rows;
+    expect(desc.map((repo) => repo.lastSeenAt)).toEqual([3_000, 1_000, null, null]);
+    expect(desc[0]?.path).toBe("facebook/react");
+    const asc = listRepos(db, query({ sort: "last_seen_at", dir: "asc" })).rows;
+    expect(asc.map((repo) => repo.lastSeenAt)).toEqual([1_000, 3_000, null, null]);
+  });
+
   it("filters by a case insensitive substring of path or display name", () => {
     expect(listRepos(db, query({ q: "node" })).total).toBe(1);
     expect(listRepos(db, query({ q: "NODE" })).total).toBe(1);

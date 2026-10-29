@@ -288,10 +288,11 @@ export function applyRunToRepo(db: Db, repoId: number, patch: RepoRunPatch): voi
   if (patch.outcome === "success") {
     db.run(
       `UPDATE repos
-          SET last_sync_at = ?, last_success_at = ?, last_error = NULL, consecutive_failures = 0,
-              next_sync_at = ?, disk_usage_bytes = ?, default_branch = ?, last_fetch_head = ?,
+          SET last_sync_at = ?, last_success_at = ?, last_seen_at = ?, last_error = NULL,
+              consecutive_failures = 0, next_sync_at = ?, disk_usage_bytes = ?, default_branch = ?, last_fetch_head = ?,
               updated_at = ?
         WHERE id = ?`,
+      patch.now,
       patch.now,
       patch.now,
       patch.nextSyncAt,

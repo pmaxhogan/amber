@@ -299,9 +299,22 @@ CREATE INDEX idx_account_syncs_account ON account_syncs (account_id);
 CREATE INDEX idx_account_syncs_forge ON account_syncs (forge_id);
 `;
 
+/**
+ * 005: `repos.last_seen_at`, the last time a repository was confirmed to exist
+ * upstream - a successful fetch, or its appearance in an account-sync listing.
+ * Sorting by it surfaces repositories that disappeared upstream. Listing time
+ * was never recorded before, so the last successful fetch is the only honest
+ * backfill.
+ */
+const lastSeen = `
+ALTER TABLE repos ADD COLUMN last_seen_at INTEGER NULL;
+UPDATE repos SET last_seen_at = last_success_at;
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
   { name: "003_default_forges", sql: defaultForges },
   { name: "004_namespace_sync", sql: namespaceSync },
+  { name: "005_last_seen", sql: lastSeen },
 ];
