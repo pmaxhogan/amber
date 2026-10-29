@@ -213,7 +213,9 @@ const SORT_SQL: Readonly<Record<RepoSortField, string>> = {
   path: "repos.path COLLATE NOCASE",
   last_sync_at: "repos.last_sync_at",
   last_success_at: "repos.last_success_at",
-  last_seen_at: "repos.last_seen_at",
+  // Never-seen rows sort last either way, so ascending leads with the repo
+  // that vanished longest ago rather than with imports still waiting to clone.
+  last_seen_at: "repos.last_seen_at IS NULL, repos.last_seen_at",
   disk_usage_bytes: "repos.disk_usage_bytes",
   next_sync_at: "repos.next_sync_at",
   created_at: "repos.created_at",

@@ -325,12 +325,10 @@ describe("listRepos", () => {
     }
 
     const desc = listRepos(db, query({ sort: "last_seen_at", dir: "desc" })).rows;
-    expect(desc.slice(0, 2).map((repo) => [repo.path, repo.lastSeenAt])).toEqual([
-      ["facebook/react", 3_000],
-      ["nodejs/node", 1_000],
-    ]);
+    expect(desc.map((repo) => repo.lastSeenAt)).toEqual([3_000, 1_000, null, null]);
+    expect(desc[0]?.path).toBe("facebook/react");
     const asc = listRepos(db, query({ sort: "last_seen_at", dir: "asc" })).rows;
-    expect(asc.map((repo) => repo.lastSeenAt).filter((at) => at !== null)).toEqual([1_000, 3_000]);
+    expect(asc.map((repo) => repo.lastSeenAt)).toEqual([1_000, 3_000, null, null]);
   });
 
   it("filters by a case insensitive substring of path or display name", () => {
