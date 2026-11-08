@@ -149,8 +149,9 @@ and do not put services that trust requests by source address next to it.
   account permission `Starring: Read-only` if starred-repo sync is used); GitLab
   `read_repository`; Bitbucket and Gitea repository read.
 - **Keep the image updated.** Amber is pre-1.0 and moves fast. The example
-  compose file includes an optional label-scoped Watchtower sidecar that picks up
-  a new `:latest` within a couple of minutes of publish.
+  compose file labels the container for a host-wide, label-enable Watchtower
+  (run one per host; the file shows how) that picks up a new `:latest` within a
+  couple of minutes of publish.
 - **Leave the git remote disabled unless you use it,** and rotate its password if
   it has ever been shared or logged. If you do enable it, give its path its own
   proxy rule so git clients reach basic auth instead of an SSO redirect.

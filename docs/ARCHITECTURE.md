@@ -629,8 +629,10 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   semver-minor/semver-patch -> approve + `gh pr merge --auto --squash`; majors
   stay for manual review. Branch protection on main requires the ci checks, so
   auto-merge waits for green.
-- Watchtower on the NAS pulls `:latest` within ~2 min of publish (label-scoped,
-  same pattern as mkvid).
+- The NAS-wide Watchtower (its own TrueNAS Custom App, one instance for every
+  app on the host) pulls `:latest` within ~2 min of publish (label-enable). No
+  per-app sidecar: an unscoped Watchtower deletes every other Watchtower at
+  startup, so per-app sidecars kept deleting each other (removed 2026-11-08).
 
 ## Deployment
 
@@ -641,7 +643,8 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
 - `deploy/docker-compose.example.yml`: service `amber` (image
   ghcr.io/pmaxhogan/amber:latest, env_file and volume both pointing at the data
   directory, watchtower labels, json-file logging caps, pull_policy always,
-  restart unless-stopped) plus an optional label-scoped watchtower sidecar.
+  restart unless-stopped). No watchtower service: a comment shows the one
+  host-wide Watchtower to run instead.
 - Fronted by an authenticating proxy. The reference setup is a Cloudflare
   Tunnel with a CF Access application on the public hostname, plus a second
   Access application on that host's `/git` path with a Bypass Everyone policy

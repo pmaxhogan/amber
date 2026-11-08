@@ -38,8 +38,9 @@ out as a read-only git remote.
 Prebuilt images are published to GHCR on every push to main:
 `ghcr.io/pmaxhogan/amber:latest`. No need to clone or build anything -
 [`deploy/docker-compose.example.yml`](deploy/docker-compose.example.yml) pulls
-the image, mounts a data directory, and includes an optional label-scoped
-Watchtower sidecar that keeps the container current automatically.
+the image, mounts a data directory, and labels the container for a host-wide
+Watchtower (one command in the file's comments) that keeps it current
+automatically.
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/pmaxhogan/amber/main/deploy/docker-compose.example.yml

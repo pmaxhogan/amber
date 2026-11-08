@@ -35,23 +35,13 @@ services:
         max-size: "10m"
         max-file: "5"
 
-  # Optional. Pulls a new :latest within a couple of minutes of a publish.
-  watchtower:
-    image: containrrr/watchtower:latest
-    container_name: amber-watchtower
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    command:
-      # Label scoped: this sidecar only ever touches containers that opt in
-      # above, so it cannot restart anything else running on the host.
-      - --label-enable
-      - --cleanup
-      - --rolling-restart
-      - --interval
-      - "120"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
+# Auto-updates: the label on the amber service above opts it in to a host-wide
+# Watchtower. Run exactly ONE Watchtower per host, outside this file, e.g.
+#
+#   docker run -d --name watchtower --restart unless-stopped \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     containrrr/watchtower:latest --label-enable --cleanup --rolling-restart --interval 120
+#
+# Do not add a watchtower service here. An unscoped Watchtower stops and
+# deletes every other Watchtower on the host when it starts, so a per-app
+# sidecar breaks auto-updates for every other app on a shared host.
