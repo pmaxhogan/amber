@@ -18,6 +18,11 @@ export const CLONE_MODES = ["bare", "full", "shallow", "mirror"] as const;
 export type CloneMode = (typeof CLONE_MODES)[number];
 export const cloneModeSchema = z.enum(CLONE_MODES);
 
+/** Which refs a shallow backup holds. */
+export const SHALLOW_REFS = ["all", "default_branch"] as const;
+export type ShallowRefs = (typeof SHALLOW_REFS)[number];
+export const shallowRefsSchema = z.enum(SHALLOW_REFS);
+
 /** How the web UI should render a setting. */
 export type SettingControl = "toggle" | "number" | "select";
 
@@ -80,6 +85,22 @@ export const settingsRegistry = {
       control: "number",
       min: 1,
       unit: "commits",
+    },
+  }),
+  shallow_refs: defineSetting({
+    schema: shallowRefsSchema,
+    default: "all",
+    scopes: ALL_SCOPES,
+    ui: {
+      label: "Shallow keeps",
+      description:
+        "What a shallow backup holds. Default branch only skips every other branch and every tag, which is what keeps a repository with thousands of them small. A backup that already holds more keeps it until it is cloned again.",
+      group: "Backup",
+      control: "select",
+      options: [
+        { value: "all", label: "Every branch and tag" },
+        { value: "default_branch", label: "Default branch only" },
+      ],
     },
   }),
   sync_interval_minutes: defineSetting({

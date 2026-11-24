@@ -120,6 +120,7 @@ describe("pure helpers", () => {
     expect(refspecsFor("full")).toEqual(refspecsFor("bare"));
     expect(refspecsFor("shallow")).toEqual(refspecsFor("bare"));
     expect(refspecsFor("mirror")).toEqual(["+refs/*:refs/*"]);
+    expect(refspecsFor("shallow", "main")).toEqual(["+refs/heads/main:refs/heads/main"]);
   });
 
   it("stamps archives in compact utc", () => {
@@ -284,6 +285,70 @@ describe("shallow mode", () => {
     const count = (await backupGit(["rev-list", "--count", "refs/heads/main"])).trim();
     expect(count).toBe("1");
     expect(existsSync(join(backupPath(), "shallow"))).toBe(true);
+  });
+
+  it("takes every branch and tag by default", async () => {
+    await sync({ clone_mode: "shallow" });
+
+    const refs = (await backupGit(["for-each-ref", "--format=%(refname)"])).trim().split("\n");
+    expect(refs.sort()).toEqual(["refs/heads/feature/one", "refs/heads/main", "refs/tags/v1.0.0"]);
+  });
+
+  it("limited to the default branch, fetches that branch and no tags", async () => {
+    await origin.commitFile("a.txt", "a\n", "second");
+    await origin.git(["tag", "-a", "v2.0.0", "-m", "points at the fetched tip"]);
+
+    const run = await sync({ clone_mode: "shallow", shallow_refs: "default_branch" });
+
+    expect(run.outcome).toBe("success");
+    const refs = (await backupGit(["for-each-ref", "--format=%(refname)"])).trim().split("\n");
+    expect(refs).toEqual(["refs/heads/main"]);
+    expect((await backupGit(["rev-list", "--count", "refs/heads/main"])).trim()).toBe("1");
+    expect((await backupGit(["symbolic-ref", "HEAD"])).trim()).toBe("refs/heads/main");
+  });
+
+  it("only applies in shallow mode", async () => {
+    await sync({ clone_mode: "bare", shallow_refs: "default_branch" });
+
+    const refs = (await backupGit(["for-each-ref", "--format=%(refname)"])).trim().split("\n");
+    expect(refs).toContain("refs/heads/feature/one");
+    expect(refs).toContain("refs/tags/v1.0.0");
+  });
+
+  it("keeps following the default branch on later syncs", async () => {
+    await sync({ clone_mode: "shallow", shallow_refs: "default_branch" });
+    await origin.commitFile("b.txt", "b\n", "moved on");
+    await origin.git(["branch", "feature/two"]);
+
+    await sync({ clone_mode: "shallow", shallow_refs: "default_branch" });
+
+    const tip = await origin.revParse("refs/heads/main");
+    expect((await backupGit(["rev-parse", "refs/heads/main"])).trim()).toBe(tip);
+    const refs = (await backupGit(["for-each-ref", "--format=%(refname)"])).trim().split("\n");
+    expect(refs).toEqual(["refs/heads/main"]);
+  });
+
+  it("fails rather than fetching everything when the default branch is unknown", async () => {
+    // Detach the origin's HEAD: it still answers, but names no default branch.
+    await origin.git(["checkout", "--detach"]);
+
+    const run = await sync({ clone_mode: "shallow", shallow_refs: "default_branch" });
+
+    expect(run.outcome).toBe("error");
+    expect(run.error).toContain("default");
+    expect((await backupGit(["for-each-ref", "--format=%(refname)"])).trim()).toBe("");
+  });
+
+  it("falls back to the branch the last good sync recorded", async () => {
+    await sync({ clone_mode: "shallow", shallow_refs: "default_branch" });
+    await origin.commitFile("c.txt", "c\n", "after the detach");
+    const tip = await origin.revParse("refs/heads/main");
+    await origin.git(["checkout", "--detach"]);
+
+    const run = await sync({ clone_mode: "shallow", shallow_refs: "default_branch" });
+
+    expect(run.outcome).toBe("success");
+    expect((await backupGit(["rev-parse", "refs/heads/main"])).trim()).toBe(tip);
   });
 });
 

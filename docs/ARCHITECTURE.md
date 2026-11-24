@@ -233,6 +233,7 @@ default, allowed scopes, and UI metadata (label, description, group). Keys:
 | -------------------------- | ------- | --------- |
 | `clone_mode` ('bare' \| 'full' \| 'shallow' \| 'mirror') | `bare` | all |
 | `shallow_depth` (int >=1)  | 1       | all       |
+| `shallow_refs` ('all' \| 'default_branch') | `all` | all |
 | `sync_interval_minutes`    | 180     | all       |
 | `sync_enabled` (bool)      | true    | all       |
 | `lfs_enabled` (bool)       | true    | all       |
@@ -321,7 +322,15 @@ directory names never collide regardless of sanitization overlaps.
     `+refs/tags/*:refs/tags/*`; `--prune` ONLY when paranoid=false.
   - `mirror`: bare with `+refs/*:refs/*` (everything incl. notes, Pull/MR refs when
     the server advertises them), `--prune` only when paranoid=false.
-  - `shallow`: bare + `--depth <shallow_depth>`.
+  - `shallow`: bare + `--depth <shallow_depth>`. Depth bounds history, not
+    breadth: every branch and tag tip still costs one full tree. With
+    `shallow_refs=default_branch` the fetch names only
+    `+refs/heads/<default>:refs/heads/<default>` and passes `--no-tags`, which is
+    what keeps a repository with thousands of branches small. The default branch
+    is the one the origin advertises, else the one the last good sync recorded;
+    with neither the run fails instead of widening to every ref. Refs an existing
+    backup already holds outside that branch are left alone (nothing garbage
+    collects), so shrinking one means cloning it again.
   - `full`: working tree; fetch like bare, then hard-update the default branch
     checkout with hooks and smudge disabled, then explicit `git lfs checkout`.
 - Paranoid mode (per-scope setting):

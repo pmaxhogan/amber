@@ -29,7 +29,8 @@ out as a read-only git remote.
   disabled and every ref tip that upstream rewrites or deletes is archived under
   `refs/amber/archive/<timestamp>/` before the update lands.
 - **Clone modes.** Bare, mirror, shallow, or a full working tree, with Git LFS
-  objects fetched alongside.
+  objects fetched alongside. A shallow backup can be limited to the default
+  branch, so a repository with thousands of branches stays small.
 - **Layered settings.** Configure at the global, forge, account, or repository
   scope. The narrowest scope wins, and the UI shows you which one did.
 - **Read-only git remote.** `git clone` straight from your backup.

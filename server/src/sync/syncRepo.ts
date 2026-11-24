@@ -375,11 +375,20 @@ async function performSync(
   const before = await readRefs(base);
   const hasArchives = [...before.keys()].some((ref) => ref.startsWith(`${ARCHIVE_REF_PREFIX}/`));
 
+  const onlyBranch = await shallowOnlyBranch(
+    mode,
+    settings,
+    defaultBranch,
+    target.repo.defaultBranch,
+    authed,
+  );
+
   const fetchResult = await runGit(
     buildFetchArgs(mode, settings, {
       paranoid: settings.paranoid,
       prune: !settings.paranoid && !hasArchives,
       worktree: layout === "worktree",
+      onlyBranch,
     }),
     authed,
   );
@@ -506,18 +515,60 @@ async function applyParanoidConfig(
 // Fetch
 // ---------------------------------------------------------------------------
 
-export function refspecsFor(mode: CloneMode): string[] {
+export function refspecsFor(mode: CloneMode, onlyBranch: string | null = null): string[] {
+  if (onlyBranch !== null) {
+    return [`+refs/heads/${onlyBranch}:refs/heads/${onlyBranch}`];
+  }
   return mode === "mirror"
     ? ["+refs/*:refs/*"]
     : ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"];
 }
 
+/**
+ * The one branch a shallow backup is limited to, or null when it takes every
+ * branch and tag (shallow_refs "all", and every other clone mode).
+ *
+ * Depth 1 bounds history, not breadth: a repository with thousands of branches
+ * and tags still downloads one full tree per tip. Limiting the fetch to the
+ * default branch is what makes a huge repository small.
+ *
+ * An unknown default branch fails the run rather than widening the fetch. The
+ * setting exists to keep a backup small, and one transient ls-remote failure
+ * must not quietly download everything it was set to skip. The branch the last
+ * good sync recorded stands in when the origin did not answer this time.
+ */
+async function shallowOnlyBranch(
+  mode: CloneMode,
+  settings: ResolvedSettings,
+  advertised: string | null,
+  stored: string | null,
+  authed: GitRunOptions,
+): Promise<string | null> {
+  if (mode !== "shallow" || settings.shallow_refs !== "default_branch") {
+    return null;
+  }
+  const branch = advertised ?? (stored !== null && isPlausibleRef(stored) ? stored : null);
+  if (branch !== null) {
+    return branch;
+  }
+  // Ask once more without swallowing the failure, so an origin that is gone or
+  // refusing the credential fails the run as what it is, not as a generic error.
+  await runGit(["ls-remote", "--symref", "origin", "HEAD"], authed);
+  throw new Error(
+    "The origin does not say which branch is its default, so a shallow backup limited to the default branch has nothing to fetch.",
+  );
+}
+
 function buildFetchArgs(
   mode: CloneMode,
   settings: ResolvedSettings,
-  flags: { paranoid: boolean; prune: boolean; worktree: boolean },
+  flags: { paranoid: boolean; prune: boolean; worktree: boolean; onlyBranch: string | null },
 ): string[] {
   const args = ["fetch", "--progress", "--force"];
+  if (flags.onlyBranch !== null) {
+    // Without this git follows every tag that points into the fetched history.
+    args.push("--no-tags");
+  }
   if (flags.paranoid) {
     args.push("--no-prune");
   } else if (flags.prune) {
@@ -531,7 +582,7 @@ function buildFetchArgs(
     // so the "would clobber the checked out branch" guard has nothing to protect.
     args.push("--update-head-ok");
   }
-  args.push("origin", ...refspecsFor(mode));
+  args.push("origin", ...refspecsFor(mode, flags.onlyBranch));
   return args;
 }
 

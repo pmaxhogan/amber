@@ -22,6 +22,7 @@ describe("settingsRegistry shape", () => {
         "max_concurrent_syncs",
         "paranoid",
         "shallow_depth",
+        "shallow_refs",
         "sync_enabled",
         "sync_interval_minutes",
       ].sort(),
@@ -57,6 +58,7 @@ describe("defaults", () => {
     expect(defaultSettings()).toEqual({
       clone_mode: "bare",
       shallow_depth: 1,
+      shallow_refs: "all",
       sync_interval_minutes: 180,
       sync_enabled: true,
       lfs_enabled: true,
@@ -93,6 +95,7 @@ describe("scopes", () => {
     expect(settingKeysForScope("repo")).toEqual([
       "clone_mode",
       "shallow_depth",
+      "shallow_refs",
       "sync_interval_minutes",
       "sync_enabled",
       "lfs_enabled",
@@ -116,6 +119,10 @@ describe("parseSettingValue", () => {
     expect(parseSettingValue("clone_mode", "mirror")).toEqual({ ok: true, value: "mirror" });
     expect(parseSettingValue("paranoid", true)).toEqual({ ok: true, value: true });
     expect(parseSettingValue("shallow_depth", 5)).toEqual({ ok: true, value: 5 });
+    expect(parseSettingValue("shallow_refs", "default_branch")).toEqual({
+      ok: true,
+      value: "default_branch",
+    });
   });
 
   it("rejects invalid values with a message", () => {
@@ -124,6 +131,7 @@ describe("parseSettingValue", () => {
     const badDepth = parseSettingValue("shallow_depth", 0);
     expect(badDepth.ok).toBe(false);
     expect(parseSettingValue("shallow_depth", 1.5).ok).toBe(false);
+    expect(parseSettingValue("shallow_refs", "main").ok).toBe(false);
     expect(parseSettingValue("sync_enabled", "yes").ok).toBe(false);
     expect(parseSettingValue("sync_interval_minutes", -1).ok).toBe(false);
   });
