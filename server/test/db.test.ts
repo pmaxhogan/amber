@@ -109,6 +109,7 @@ describe("migrate", () => {
         "forges",
         "kv",
         "migrations",
+        "push_subscriptions",
         "repos",
         "settings",
         "sync_runs",

@@ -55,6 +55,12 @@ onBeforeUnmount(() => {
           <RouterLink v-for="link in NAV_LINKS" :key="link.to" :to="link.to">
             <AppIcon :name="link.icon" :size="17" />
             <span>{{ link.label }}</span>
+            <span
+              v-if="link.to === '/removed' && status.goneRepos > 0"
+              class="amber-nav__count"
+              :title="`${status.goneRepos} gone upstream`"
+              >{{ status.goneRepos }}</span
+            >
           </RouterLink>
         </nav>
         <div class="amber-sidebar__footer">

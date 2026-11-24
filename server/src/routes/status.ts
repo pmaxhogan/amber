@@ -1,6 +1,6 @@
 import type { Status } from "@amber/shared";
 import type { FastifyPluginAsync } from "fastify";
-import { countRepos, totalDiskUsageBytes } from "../domain/repos.ts";
+import { countGoneRepos, countRepos, totalDiskUsageBytes } from "../domain/repos.ts";
 
 /**
  * /api/status totals, queue depth, and breaker state.
@@ -23,6 +23,7 @@ export const statusRoutes: FastifyPluginAsync = async (app) => {
       queueDepth: queue.queueDepth,
       activeSyncs: queue.activeSyncs,
       totalRepos: countRepos(db),
+      goneRepos: countGoneRepos(db),
       totalDiskUsageBytes: totalDiskUsageBytes(db),
       breakerOpen: queue.breakerOpen,
     };

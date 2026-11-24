@@ -844,6 +844,7 @@ describe("GET /api/status", () => {
       queueDepth: 0,
       activeSyncs: 0,
       totalRepos: 0,
+      goneRepos: 0,
       totalDiskUsageBytes: 0,
       breakerOpen: false,
     });

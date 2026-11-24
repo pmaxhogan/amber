@@ -6,6 +6,11 @@
     <title>Amber</title>
     <meta name="description" content="Amber - git history, preserved." />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- use-credentials: the manifest sits behind the same SSO as the app, and
+         a manifest fetch carries no cookies unless asked to. -->
+    <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials" />
+    <link rel="apple-touch-icon" href="/icon-256.png" />
+    <meta name="theme-color" content="#14110d" />
   </head>
   <body>
     <div id="app"></div>

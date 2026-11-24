@@ -53,7 +53,10 @@ export interface TempApp {
  */
 export async function createTempApp(
   env: Record<string, string> = {},
-  extra: { scheduler?: Parameters<typeof buildApp>[0]["scheduler"] } = {},
+  extra: {
+    scheduler?: Parameters<typeof buildApp>[0]["scheduler"];
+    pushSender?: Parameters<typeof buildApp>[0]["pushSender"];
+  } = {},
 ): Promise<TempApp> {
   const dir = mkdtempSync(join(tmpdir(), "amber-app-"));
   const config = loadConfig({
@@ -85,6 +88,7 @@ export async function createTempApp(
     events,
     version: "9.9.9-test",
     ...(extra.scheduler === undefined ? {} : { scheduler: extra.scheduler }),
+    ...(extra.pushSender === undefined ? {} : { pushSender: extra.pushSender }),
   });
 
   return {

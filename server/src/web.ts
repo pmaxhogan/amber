@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import fastifyStatic from "@fastify/static";
 import type { FastifyPluginAsync } from "fastify";
 import type { Config } from "./config.ts";
@@ -53,6 +53,17 @@ export const webPlugin: FastifyPluginAsync<WebPluginOptions> = async (app, optio
     maxAge: "1y",
     immutable: true,
     index: false,
+    /**
+     * Only /assets is fingerprinted. The service worker, the manifest and the
+     * icons keep their names across deploys, so they must be revalidated: a
+     * service worker pinned for a year could never be fixed.
+     */
+    setHeaders: (response, filePath) => {
+      // index.html is sent by the fallback below, which sets no-store itself.
+      if (!filePath.includes(`${sep}assets${sep}`) && !filePath.endsWith("index.html")) {
+        void response.header("cache-control", "no-cache");
+      }
+    },
     // The fallback handles anything that is not a real file.
     wildcard: false,
   });

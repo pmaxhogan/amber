@@ -5,6 +5,7 @@ import type { Logger } from "pino";
 import type { Config } from "./config.ts";
 import type { Db } from "./db/db.ts";
 import { EventBus } from "./events.ts";
+import { createPushNotifier, type PushNotifier, type PushSender } from "./notify/push.ts";
 import { gitRemotePlugin } from "./gitremote/routes.ts";
 import { apiRoutes } from "./routes/index.ts";
 import { cfAccessPlugin, type CfAccessKeyGetter } from "./security/cfAccess.ts";
@@ -31,6 +32,7 @@ export interface AppContext {
   events: EventBus;
   version: string;
   scheduler?: SchedulerHandle;
+  push: PushNotifier;
 }
 
 export interface BuildAppDeps {
@@ -40,6 +42,8 @@ export interface BuildAppDeps {
   events?: EventBus;
   version?: string;
   scheduler?: SchedulerHandle;
+  /** Test seam: replaces the HTTP call to the browser push service. */
+  pushSender?: PushSender;
   /** Test seam for the CF Access JWKS. Omitted in production. */
   cfAccessGetKey?: CfAccessKeyGetter;
 }
@@ -67,11 +71,19 @@ export const INSECURE_BANNER =
  * drive it with app.inject() without binding a port.
  */
 export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
+  const events = deps.events ?? new EventBus();
+  const push = createPushNotifier({
+    db: deps.db,
+    log: deps.log,
+    publicOrigin: deps.config.publicOrigin,
+    ...(deps.pushSender === undefined ? {} : { send: deps.pushSender }),
+  });
   const ctx: AppContext = {
     config: deps.config,
     log: deps.log,
     db: deps.db,
-    events: deps.events ?? new EventBus(),
+    events,
+    push,
     version: deps.version ?? APP_VERSION,
     ...(deps.scheduler === undefined ? {} : { scheduler: deps.scheduler }),
   };
@@ -82,6 +94,16 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
   });
 
   app.decorate("amber", ctx);
+
+  // The sync engine only knows the bus; the notifier listens there for gone
+  // repositories, so neither imports the other.
+  const stopPush = events.tap((event) => {
+    push.handleEvent(event);
+  });
+  app.addHook("onClose", async () => {
+    stopPush();
+    await push.close();
+  });
 
   if (ctx.config.insecureMode) {
     deps.log.warn(INSECURE_BANNER);

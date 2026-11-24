@@ -21,6 +21,8 @@ export interface SyncRepoRow {
   nextSyncAt: number | null;
   consecutiveFailures: number;
   defaultBranch: string | null;
+  lastSuccessAt: number | null;
+  goneAt: number | null;
 }
 
 export interface SyncForgeRow {
@@ -59,6 +61,8 @@ interface RepoDbRow {
   next_sync_at: number | null;
   consecutive_failures: number;
   default_branch: string | null;
+  last_success_at: number | null;
+  gone_at: number | null;
   protocol: string;
   host: string;
   port: number | null;
@@ -68,7 +72,7 @@ interface RepoDbRow {
 const TARGET_SQL = `
   SELECT r.id, r.forge_id, r.path, r.display_name, r.slug, r.account_override_id,
          r.force_anonymous, r.state, r.next_sync_at, r.consecutive_failures,
-         r.default_branch, f.protocol, f.host, f.port, f.kind
+         r.default_branch, r.last_success_at, r.gone_at, f.protocol, f.host, f.port, f.kind
     FROM repos r
     JOIN forges f ON f.id = r.forge_id
    WHERE r.id = ?`;
@@ -91,6 +95,8 @@ export function loadSyncTarget(db: Db, repoId: number): SyncTarget | undefined {
       nextSyncAt: row.next_sync_at,
       consecutiveFailures: row.consecutive_failures,
       defaultBranch: row.default_branch,
+      lastSuccessAt: row.last_success_at,
+      goneAt: row.gone_at,
     },
     forge: {
       id: row.forge_id,
@@ -281,6 +287,11 @@ export interface RepoRunPatch {
   diskUsageBytes: number | null;
   defaultBranch: string | null;
   lastFetchHead: string | null;
+  /**
+   * Set on the failed run that makes the repository gone. An earlier gone_at
+   * is never overwritten, and any success clears it.
+   */
+  goneAt?: number | null;
 }
 
 /** Denormalized repo fields the listing screen reads without joining runs. */
@@ -289,7 +300,7 @@ export function applyRunToRepo(db: Db, repoId: number, patch: RepoRunPatch): voi
     db.run(
       `UPDATE repos
           SET last_sync_at = ?, last_success_at = ?, last_seen_at = ?, last_error = NULL,
-              consecutive_failures = 0, next_sync_at = ?, disk_usage_bytes = ?, default_branch = ?, last_fetch_head = ?,
+              consecutive_failures = 0, gone_at = NULL, next_sync_at = ?, disk_usage_bytes = ?, default_branch = ?, last_fetch_head = ?,
               updated_at = ?
         WHERE id = ?`,
       patch.now,
@@ -307,12 +318,14 @@ export function applyRunToRepo(db: Db, repoId: number, patch: RepoRunPatch): voi
   db.run(
     `UPDATE repos
         SET last_sync_at = ?, last_error = ?, consecutive_failures = ?, next_sync_at = ?,
+            gone_at = COALESCE(gone_at, ?),
             disk_usage_bytes = COALESCE(?, disk_usage_bytes), updated_at = ?
       WHERE id = ?`,
     patch.now,
     patch.error,
     patch.consecutiveFailures,
     patch.nextSyncAt,
+    patch.goneAt ?? null,
     patch.diskUsageBytes,
     patch.now,
     repoId,

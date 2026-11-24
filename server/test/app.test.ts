@@ -90,3 +90,20 @@ describe("EventBus", () => {
     expect(captured!.at).toBeGreaterThan(0);
   });
 });
+
+describe("EventBus taps", () => {
+  it("delivers to a tap without counting it, and survives clear()", () => {
+    const bus = new EventBus();
+    const seen: string[] = [];
+    const stop = bus.tap((event) => seen.push(event.type));
+
+    expect(bus.subscriberCount).toBe(0);
+    bus.publish("repo.gone", { repoId: 1 });
+    bus.clear();
+    bus.publish("repo.deleted", { repoId: 1 });
+    stop();
+    bus.publish("repo.created", { repoId: 1 });
+
+    expect(seen).toEqual(["repo.gone", "repo.deleted"]);
+  });
+});

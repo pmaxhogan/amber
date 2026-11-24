@@ -10,6 +10,12 @@ import ReposPage from "../pages/ReposPage.vue";
 export const routes: RouteRecordRaw[] = [
   { path: "/", name: "repos", component: ReposPage, meta: { title: "Repos" } },
   {
+    path: "/removed",
+    name: "removed",
+    component: () => import("../pages/RemovedPage.vue"),
+    meta: { title: "Removed" },
+  },
+  {
     path: "/import",
     name: "import",
     component: () => import("../pages/ImportPage.vue"),
@@ -58,6 +64,7 @@ export interface NavLink {
 /** Sidebar navigation, in display order. */
 export const NAV_LINKS: NavLink[] = [
   { to: "/", label: "Repos", icon: "repos" },
+  { to: "/removed", label: "Removed", icon: "removed" },
   { to: "/import", label: "Import", icon: "import" },
   { to: "/accounts", label: "Forges & Accounts", icon: "accounts" },
   { to: "/account-sync", label: "Account Sync", icon: "sync" },

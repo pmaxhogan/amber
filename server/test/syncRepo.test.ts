@@ -357,6 +357,86 @@ describe("failures", () => {
   });
 });
 
+describe("gone upstream", () => {
+  function goneAt(): number | null | undefined {
+    return db.get<{ gone_at: number | null }>("SELECT gone_at FROM repos WHERE id = ?", repoId)
+      ?.gone_at;
+  }
+  function goneEvents(): Record<string, unknown>[] {
+    return events.filter((event) => event.type === "repo.gone").map((event) => event.payload);
+  }
+  const missing = (): string => `${origin.url}-does-not-exist`;
+
+  it("marks a repo gone on the second not-found in a row after it had synced", async () => {
+    await sync();
+    const first = await sync({}, { remoteUrl: missing() });
+    expect(first.errorKind).toBe("not_found");
+    expect(goneAt()).toBeNull();
+    expect(goneEvents()).toEqual([]);
+
+    await sync({}, { remoteUrl: missing(), now: () => 5_000_000_000_000 });
+
+    expect(goneAt()).toBe(5_000_000_000_000);
+    expect(goneEvents()).toEqual([
+      expect.objectContaining({
+        repoId,
+        path: "acme/widgets",
+        host: "origin.test",
+        errorKind: "not_found",
+      }),
+    ]);
+  });
+
+  it("says it once: later failures keep the first gone time and stay quiet", async () => {
+    await sync();
+    await sync({}, { remoteUrl: missing() });
+    await sync({}, { remoteUrl: missing(), now: () => 5_000_000_000_000 });
+    await sync({}, { remoteUrl: missing(), now: () => 6_000_000_000_000 });
+
+    expect(goneAt()).toBe(5_000_000_000_000);
+    expect(goneEvents()).toHaveLength(1);
+  });
+
+  it("never calls a repo gone that has not synced even once", async () => {
+    await sync({}, { remoteUrl: missing() });
+    await sync({}, { remoteUrl: missing() });
+    await sync({}, { remoteUrl: missing() });
+
+    expect(goneAt()).toBeNull();
+    expect(goneEvents()).toEqual([]);
+  });
+
+  it("clears gone when the repo answers again, and can go gone a second time", async () => {
+    await sync();
+    await sync({}, { remoteUrl: missing() });
+    await sync({}, { remoteUrl: missing() });
+    expect(goneAt()).not.toBeNull();
+
+    await sync();
+    expect(goneAt()).toBeNull();
+
+    await sync({}, { remoteUrl: missing() });
+    await sync({}, { remoteUrl: missing() });
+    expect(goneAt()).not.toBeNull();
+    expect(goneEvents()).toHaveLength(2);
+  });
+
+  it("keeps the backup of a gone repo on disk", async () => {
+    await sync();
+    await sync({}, { remoteUrl: missing() });
+    await sync({}, { remoteUrl: missing() });
+
+    expect(existsSync(backupPath())).toBe(true);
+    expect((await backupGit(["rev-parse", "refs/heads/main"])).trim()).toMatch(/^[0-9a-f]{40}$/);
+  });
+});
+
+describe("missing repo", () => {
+  it("throws for a repo that does not exist, still", async () => {
+    await expect(sync({}, { repoId: 9999 })).rejects.toThrow(/does not exist/);
+  });
+});
+
 describe("retention", () => {
   it("keeps the newest runs per repo and every recent error", async () => {
     const now = Date.now();

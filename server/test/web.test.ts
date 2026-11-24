@@ -73,6 +73,20 @@ describe("with a built frontend on disk", () => {
     expect(response.headers["cache-control"]).toContain("max-age=31536000");
   });
 
+  it("makes the service worker and manifest revalidate, since they are not fingerprinted", async () => {
+    // Before the app is built: the static plugin lists its files at startup.
+    mkdirSync(webDir, { recursive: true });
+    writeFileSync(join(webDir, "sw.js"), "self.addEventListener('push', () => {});\n");
+    writeFileSync(join(webDir, "manifest.webmanifest"), "{}\n");
+    const instance = await build(true);
+
+    for (const url of ["/sw.js", "/manifest.webmanifest"]) {
+      const response = await instance.inject({ method: "GET", url });
+      expect(response.statusCode, url).toBe(200);
+      expect(response.headers["cache-control"], url).toBe("no-cache");
+    }
+  });
+
   it("answers client side routes with index.html so deep links work", async () => {
     const instance = await build(true);
     for (const url of ["/settings", "/accounts", "/about", "/settings/deep/link"]) {

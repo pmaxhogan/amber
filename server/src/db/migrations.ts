@@ -393,6 +393,46 @@ CREATE INDEX idx_account_syncs_account ON account_syncs (account_id);
 CREATE INDEX idx_account_syncs_forge ON account_syncs (forge_id);
 `;
 
+/**
+ * 007: gone repositories and web push.
+ *
+ * repos.gone_at is when a repository that had synced at least once was first
+ * judged gone upstream (sync/syncRepo.ts decides; a later success clears it).
+ * The backfill marks what is already gone at upgrade time, silently: nobody
+ * wants a burst of notifications about things that vanished months ago.
+ *
+ * push_subscriptions holds one row per browser that asked to be notified. The
+ * endpoint is a capability URL issued by the browser's push service.
+ */
+const goneAndPush = `
+ALTER TABLE repos ADD COLUMN gone_at INTEGER NULL;
+
+UPDATE repos
+   SET gone_at = COALESCE(last_sync_at, updated_at)
+ WHERE last_success_at IS NOT NULL
+   AND consecutive_failures >= 2
+   AND (
+     SELECT sr.error_kind FROM sync_runs sr
+      WHERE sr.repo_id = repos.id AND sr.finished_at IS NOT NULL
+      ORDER BY sr.started_at DESC, sr.id DESC
+      LIMIT 1
+   ) IN ('not_found', 'auth');
+
+CREATE INDEX idx_repos_gone ON repos (gone_at) WHERE gone_at IS NOT NULL;
+
+CREATE TABLE push_subscriptions (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint        TEXT    NOT NULL UNIQUE,
+  p256dh          TEXT    NOT NULL,
+  auth            TEXT    NOT NULL,
+  user_agent      TEXT    NULL,
+  last_success_at INTEGER NULL,
+  last_error      TEXT    NULL,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL
+);
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
@@ -400,4 +440,5 @@ export const migrations: readonly Migration[] = [
   { name: "004_namespace_sync", sql: namespaceSync },
   { name: "005_last_seen", sql: lastSeen },
   { name: "006_trending_sync", sql: trendingSync },
+  { name: "007_gone_and_push", sql: goneAndPush },
 ];

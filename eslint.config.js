@@ -63,6 +63,11 @@ export default tseslint.config(
     rules: { "no-console": ["error", { allow: ["error", "warn"] }] },
   },
   {
+    // The service worker is served as-is from /public, not bundled.
+    files: ["web/public/sw.js"],
+    languageOptions: { globals: { ...globals.serviceworker } },
+  },
+  {
     // pino only on the server and in shared code. No exceptions.
     files: ["server/**/*.ts", "shared/**/*.ts"],
     rules: { "no-console": "error" },

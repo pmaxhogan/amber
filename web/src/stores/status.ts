@@ -18,6 +18,7 @@ export const useStatusStore = defineStore("status", () => {
   const breakerOpen = computed(() => status.value?.breakerOpen === true);
   const activeSyncs = computed(() => status.value?.activeSyncs ?? 0);
   const queueDepth = computed(() => status.value?.queueDepth ?? 0);
+  const goneRepos = computed(() => status.value?.goneRepos ?? 0);
 
   /** One short phrase for the nav status pill. */
   const summary = computed(() => {
@@ -93,6 +94,7 @@ export const useStatusStore = defineStore("status", () => {
     breakerOpen,
     activeSyncs,
     queueDepth,
+    goneRepos,
     summary,
     tone,
     load,

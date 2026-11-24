@@ -25,6 +25,7 @@ const PINNED: Record<string, Record<string, unknown>> = {
   "repo.created": { repoId: 7 },
   "repo.updated": { repoId: 7 },
   "repo.deleted": { repoId: 7 },
+  "repo.gone": { repoId: 7 },
   "account_sync.finished": { accountSyncId: 3 },
   "status.changed": { activeSyncs: 2, queueDepth: 5, breakerOpen: false },
 };

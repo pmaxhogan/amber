@@ -46,6 +46,10 @@ export function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
     listTree: vi.fn().mockResolvedValue({ rows: [], total: 0, page: 1, perPage: 200 }),
     getBlob: vi.fn(),
     eventsUrl: vi.fn().mockReturnValue("/api/events"),
+    getPush: vi.fn().mockResolvedValue({ publicKey: "BPublicKey", devices: [] }),
+    subscribePush: vi.fn().mockResolvedValue(undefined),
+    unsubscribePush: vi.fn().mockResolvedValue(undefined),
+    testPush: vi.fn().mockResolvedValue({ sent: 1, failed: 0 }),
   };
   return { ...base, ...overrides } as unknown as ApiClient;
 }
@@ -57,6 +61,7 @@ export function makeStatus(overrides: Partial<Status> = {}): Status {
     queueDepth: 0,
     activeSyncs: 0,
     totalRepos: 0,
+    goneRepos: 0,
     totalDiskUsageBytes: 0,
     breakerOpen: false,
     ...overrides,
@@ -108,6 +113,7 @@ export function makeRepo(overrides: Partial<RepoRow> = {}): RepoRow {
     lastSyncAt: 1_700_000_000_000,
     lastSuccessAt: 1_700_000_000_000,
     lastSeenAt: 1_700_000_000_000,
+    goneAt: null,
     lastError: null,
     diskUsageBytes: 1_048_576,
     defaultBranch: "main",

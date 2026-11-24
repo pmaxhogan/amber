@@ -1,13 +1,15 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import type {
-  AmberEventType,
-  CloneMode,
-  ResolvedSettings,
-  SyncErrorKind,
-  SyncOutcome,
-  SyncRun,
+import {
+  GONE_AFTER_FAILURES,
+  GONE_ERROR_KINDS,
+  type AmberEventType,
+  type CloneMode,
+  type ResolvedSettings,
+  type SyncErrorKind,
+  type SyncOutcome,
+  type SyncRun,
 } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
@@ -262,6 +264,17 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
         backoffDelayMs(consecutiveFailures, intervalMs, random) *
           (errorKind === "rate_limited" ? RATE_LIMIT_BACKOFF_FACTOR : 1);
 
+  // Gone: it synced before, and now the forge keeps saying it is not there
+  // (or not ours to read, which is what a deleted or newly private repository
+  // looks like to an anonymous fetch). One such answer can be a blip, so it
+  // takes GONE_AFTER_FAILURES failures in a row, the latest of them this kind.
+  const becameGone =
+    errorKind !== null &&
+    (GONE_ERROR_KINDS as readonly string[]).includes(errorKind) &&
+    target.repo.lastSuccessAt !== null &&
+    target.repo.goneAt === null &&
+    consecutiveFailures >= GONE_AFTER_FAILURES;
+
   const run = db.tx(() => {
     const finished = finishSyncRun(db, runId, {
       finishedAt,
@@ -282,6 +295,7 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
       diskUsageBytes,
       defaultBranch: stats.defaultBranch ?? target.repo.defaultBranch,
       lastFetchHead: stats.lastFetchHead,
+      goneAt: becameGone ? finishedAt : null,
     });
     enforceRunRetention(db, repoId, finishedAt);
     return finished;
@@ -298,6 +312,21 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
     diskUsageBytes,
     slug: target.repo.slug,
   });
+  if (becameGone) {
+    log.warn(
+      { runId, errorKind, path: target.repo.path, host: target.forge.host },
+      "repository is gone upstream, keeping the backup",
+    );
+    deps.events?.publish("repo.gone", {
+      repoId,
+      slug: target.repo.slug,
+      path: target.repo.path,
+      host: target.forge.host,
+      errorKind,
+    });
+  } else if (outcome === "success" && target.repo.goneAt !== null) {
+    log.info({ runId, path: target.repo.path }, "repository is reachable upstream again");
+  }
   log.info({ runId, outcome, refsChanged: run.refsChanged }, "sync finished");
 
   return run;

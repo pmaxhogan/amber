@@ -75,6 +75,7 @@ server/src/
   providers/discovery.ts  # account-sync run: enumerate -> upsert repos
   gitremote/routes.ts     # smart HTTP read-only remote (/git/*)
   web.ts                  # serves the built SPA + client-route fallback
+  notify/push.ts          # web push: VAPID keys, subscriptions, gone notifications
   export/archive.ts       # zip/tar.gz/7z streaming of source, git-archive, file listing
   routes/*.ts             # REST routes per resource (thin; call domain/*)
   events.ts               # SSE broadcaster for live UI updates
@@ -129,6 +130,9 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   that contains it, whichever sync manages the row; never set by a failure.
   The listing sorts by it so a repo that disappeared upstream stands out.
   Migration 005 backfilled it from `last_success_at`).
+  `gone_at` INTEGER NULL (when a repository that had synced at least once was
+  judged gone upstream; see "Gone repositories" under Sync engine. Migration
+  007 backfilled it, silently, for repositories already gone at upgrade time).
   UNIQUE(forge_id, path). Re-importing an existing forge+path updates the account
   override instead of erroring (idempotent import).
 - `sync_runs`: `id` PK, `repo_id` FK CASCADE, `started_at`, `finished_at`,
@@ -212,8 +216,13 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
     Any 404/403/5xx/network failure on that check means KEEP the repo and keep
     syncing it - a repo that vanished or errors upstream is exactly what a
     backup must retain; only a confirmed intentional unstar frees disk.
+- `push_subscriptions`: `id` PK, `endpoint` TEXT UNIQUE (the capability URL a
+  browser's push service issued), `p256dh`, `auth`, `user_agent` TEXT NULL,
+  `last_success_at`, `last_error` TEXT NULL. One row per browser that asked to
+  be notified.
 - `kv`: `key` TEXT PK, `value` TEXT. Uses: git remote config (enabled, username,
-  scrypt password hash), instance id, cached JWKS, schema/state misc.
+  scrypt password hash), the web push VAPID key pair, instance id, cached JWKS,
+  schema/state misc.
 
 ## Layered settings
 
@@ -350,6 +359,17 @@ directory names never collide regardless of sanitization overlaps.
 - LFS fetch failures are non-fatal: they are logged at warn and the sync still
   records success. An LFS server that is down, rate limiting, or refusing a
   token must not cost the run its git objects, which are the part that matters.
+- Gone repositories: a repository is GONE when it has synced successfully at
+  least once and then `GONE_AFTER_FAILURES` (2) fetches in a row fail, the
+  latest with `not_found` or `auth`. Both kinds count because a deleted, taken
+  down or newly private repository answers an anonymous fetch with a
+  credential prompt (`auth`) and a token-bearing one with "not found". One
+  failure is not enough: forges blip. The failing run sets `repos.gone_at`
+  (never overwritten by later failures), publishes `repo.gone` once, and logs
+  at warn. Nothing else changes: the backup stays, and the repo keeps syncing
+  on its normal backoff, so the next success clears `gone_at` and it can go
+  gone, and notify, again later. A repository that never synced is never gone;
+  it is a typo.
 - Every sync records a `sync_runs` row + updates repo denormalized fields +
   `disk_usage_bytes` (recursive du, after the fetch) and emits an SSE event.
 
@@ -435,7 +455,8 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   - `POST /api/import/preview` (text blob -> per-line parse results),
     `POST /api/import` (commit; returns created/updated/failed per line)
   - `GET /api/repos` - server-side pagination
-    (`page`, `perPage<=200`, `sort`, `dir`, `q`, `forgeId`, `state`, `outcome`),
+    (`page`, `perPage<=200`, `sort`, `dir`, `q`, `forgeId`, `state`, `outcome`,
+    `gone` - true for only the repositories gone upstream, false for the rest),
     returns rows + total. `q` is a case-insensitive substring of the path or
     display name; when it is a pasted repository URL (any scheme, scp syntax,
     a `user@` prefix, `.git`, a trailing slash, a query string, or a deeper
@@ -467,8 +488,15 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
     password, and answers with the same shape GET does),
     `POST /api/git-remote/enable|disable|rotate` (enable/rotate return the
     plaintext password exactly once).
-  - `GET /api/status` - version, queue depth, active syncs, totals (repos, disk),
-    breaker state, insecure-mode flag.
+  - `GET /api/push` (`publicKey`, `devices`: push service host, user agent and
+    last delivery per subscribed browser - never an endpoint or key),
+    `POST /api/push/subscriptions` (a browser's `{ endpoint, keys }`; https
+    endpoints only; idempotent), `POST /api/push/unsubscribe` `{ endpoint }`
+    (in the body, since the endpoint is a capability that does not belong in a
+    URL), `POST /api/push/test` (sends a test notification; answers
+    `{ sent, failed }`).
+  - `GET /api/status` - version, queue depth, active syncs, totals (repos, gone
+    repos, disk), breaker state, insecure-mode flag.
   - `GET /api/events` - SSE stream. Frames are `{ type, at, payload }`, framed
     with a named `event:` line so a client can dispatch without parsing first.
     The payload contract is pinned in `shared/src/apiTypes.ts`
@@ -483,6 +511,7 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
     | `repo.created`          | `{ repoId }`                                |
     | `repo.updated`          | `{ repoId }`                                |
     | `repo.deleted`          | `{ repoId }`                                |
+    | `repo.gone`             | `{ repoId }`                                |
     | `account_sync.finished` | `{ accountSyncId }`                         |
     | `status.changed`        | `{ activeSyncs, queueDepth, breakerOpen }`  |
 
@@ -496,6 +525,45 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   `/api/forges` and `/api/accounts` answer with BARE ARRAYS, `/api/account-syncs`
   answers with a `{ rows }` envelope, and the paged endpoints answer with
   `{ rows, total, page, perPage }`.
+
+## Web push (notify/push.ts)
+
+Tells subscribed browsers when a repository goes gone upstream. Standard Web
+Push (RFC 8030) with VAPID (RFC 8292) through the `web-push` package, with
+amber as its own application server: no third-party account and nothing to
+configure.
+
+- The VAPID key pair is generated on first use and stored in `kv`. The private
+  key is instance state like the git remote password hash: it never appears in
+  a response or a log. The VAPID contact is `PUBLIC_ORIGIN` when that is https,
+  otherwise a placeholder mailto (push services reject a malformed contact).
+- Each browser subscribes for itself from the Removed page: it registers
+  `/sw.js`, asks permission, subscribes with its push service, and posts the
+  subscription to amber. An already subscribed browser re-posts on every visit,
+  so a restored database heals itself.
+- The notifier listens on the event bus through `EventBus.tap`, a server-side
+  listener that is deliberately not counted in `subscriberCount` (which stays
+  the number of connected SSE clients). The sync engine and the notifier never
+  import each other.
+- Gone repositories are batched for 30 seconds and sent as ONE notification
+  ("3 repositories are gone upstream: ..."). An expiring token makes every
+  private repository on a forge look gone within minutes; that must be one
+  push, not hundreds.
+- A push service answering 404 or 410 means the subscription is dead and its
+  row is deleted. Any other failure is recorded on the row and retried on the
+  next notification. A failed notification never fails a sync.
+- The service worker (`web/public/sw.js`, plain JS, served from the root
+  because its path is its scope) only shows notifications and opens the
+  Removed page on tap. It has no fetch handler and caches nothing, so it can
+  never serve a stale app. `web.ts` serves everything outside `/assets` with
+  `no-cache`, so the worker, the manifest and the icons are revalidated.
+- iOS delivers web push only to a site added to the Home Screen, hence the
+  manifest (`manifest.webmanifest`, linked with `crossorigin="use-credentials"`
+  because it sits behind the same SSO as the app). Push delivery itself goes
+  from the push service to the browser and never touches Cloudflare Access.
+- SSRF: a subscription endpoint is a URL amber later POSTs to. It must be
+  https, it is only accepted from an authenticated session, and the body sent
+  to it is encrypted to that subscription's own key.
 
 ## Security model
 
@@ -575,7 +643,10 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   inclusion (dots+edges) inside; also exported as favicon.svg/png and used in
   README and the CF Access app icon.
 - Pages: Repos (default; dense DataTable, lazy server-side mode, multi-select +
-  bulk bar, detail drawer with runs/errors/settings/export/clone), Import
+  bulk bar, detail drawer with runs/errors/settings/export/clone), Removed
+  (repositories gone upstream, newest first, with what the forge answered, the
+  same detail drawer for exporting the backup, and the per-device notification
+  toggle plus a test button; the sidebar entry carries the gone count), Import
   (textarea -> preview table -> commit), Forges & Accounts (forges + accounts CRUD,
   default badges, write-only password fields; the add/edit account form shows
   forge-kind-specific credential help - for GitHub: link to

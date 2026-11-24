@@ -130,6 +130,18 @@ body {
   font-size: 0.92rem;
 }
 
+.amber-nav__count {
+  margin-left: auto;
+  min-width: 1.35rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--amber-error-bg);
+  color: var(--amber-error);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-align: center;
+}
+
 .amber-nav a:hover {
   color: var(--p-text-color);
   background: var(--p-content-hover-background);

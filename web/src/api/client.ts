@@ -13,6 +13,8 @@ import {
   healthSchema,
   importCommitResponseSchema,
   importPreviewResponseSchema,
+  pushConfigSchema,
+  pushSendResultSchema,
   scopeSettingsResponseSchema,
   statusSchema,
   treePageSchema,
@@ -30,6 +32,9 @@ import {
   type Health,
   type ImportCommitResponse,
   type ImportPreviewResponse,
+  type PushConfig,
+  type PushSendResult,
+  type PushSubscribe,
   type RepoListQuery,
   type SettingKey,
   type SettingScope,
@@ -378,6 +383,22 @@ export function createApiClient(options: ApiClientOptions = {}) {
   // Account syncs
   // -------------------------------------------------------------------------
 
+  // -------------------------------------------------------------------------
+  // Web push
+  // -------------------------------------------------------------------------
+
+  const getPush = (signal?: AbortSignal): Promise<PushConfig> =>
+    request("/api/push", { schema: pushConfigSchema, signal });
+
+  const subscribePush = (input: PushSubscribe): Promise<void> =>
+    request("/api/push/subscriptions", { method: "POST", body: input });
+
+  const unsubscribePush = (endpoint: string): Promise<void> =>
+    request("/api/push/unsubscribe", { method: "POST", body: { endpoint } });
+
+  const testPush = (): Promise<PushSendResult> =>
+    request("/api/push/test", { method: "POST", schema: pushSendResultSchema });
+
   const listAccountSyncs = (signal?: AbortSignal): Promise<AccountSyncRow[]> =>
     request("/api/account-syncs", { schema: accountSyncListResponseSchema, signal }).then(
       (body) => body.rows,
@@ -522,6 +543,10 @@ export function createApiClient(options: ApiClientOptions = {}) {
     listTree,
     getBlob,
     eventsUrl,
+    getPush,
+    subscribePush,
+    unsubscribePush,
+    testPush,
   };
 }
 

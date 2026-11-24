@@ -185,6 +185,12 @@ export const repoSchema = z.object({
    * repository disappears.
    */
   lastSeenAt: epochMsSchema.nullable(),
+  /**
+   * When a repository that had synced at least once was judged gone upstream:
+   * GONE_AFTER_FAILURES fetches in a row answered "not found" or "access
+   * denied". Null while it is reachable; a later success clears it.
+   */
+  goneAt: epochMsSchema.nullable(),
   lastError: z.string().nullable(),
   diskUsageBytes: z.number().int().nonnegative().nullable(),
   defaultBranch: z.string().nullable(),
@@ -218,12 +224,18 @@ export interface RepoListExtras {
   lastErrorKind?: SyncErrorKind;
 }
 
+/** How many not-found or access-denied fetches in a row make a repository gone. */
+export const GONE_AFTER_FAILURES = 2;
+/** The failure kinds that mean "the repository is not there for us any more". */
+export const GONE_ERROR_KINDS = ["not_found", "auth"] as const;
+
 export const REPO_SORT_FIELDS = [
   "display_name",
   "path",
   "last_sync_at",
   "last_success_at",
   "last_seen_at",
+  "gone_at",
   "disk_usage_bytes",
   "next_sync_at",
   "created_at",
@@ -238,6 +250,8 @@ export const repoListQuerySchema = paginationQuerySchema.extend({
   forgeId: z.coerce.number().int().positive().optional(),
   state: repoStateSchema.optional(),
   outcome: syncOutcomeSchema.optional(),
+  /** true: only repositories that went gone upstream. false: only the rest. */
+  gone: queryFlagSchema.optional(),
 });
 export type RepoListQuery = z.infer<typeof repoListQuerySchema>;
 
@@ -722,10 +736,67 @@ export const statusSchema = z.object({
   queueDepth: z.number().int().nonnegative(),
   activeSyncs: z.number().int().nonnegative(),
   totalRepos: z.number().int().nonnegative(),
+  /** Repositories currently judged gone upstream. */
+  goneRepos: z.number().int().nonnegative(),
   totalDiskUsageBytes: z.number().int().nonnegative(),
   breakerOpen: z.boolean(),
 });
 export type Status = z.infer<typeof statusSchema>;
+
+// ---------------------------------------------------------------------------
+// Web push
+// ---------------------------------------------------------------------------
+
+/** What `PushSubscription.toJSON()` gives a browser, minus expirationTime. */
+export const pushSubscribeSchema = z.object({
+  endpoint: z
+    .url()
+    .max(2048)
+    .refine((value) => value.startsWith("https://"), "a push endpoint is always https"),
+  keys: z.object({
+    p256dh: z.string().min(1).max(512),
+    auth: z.string().min(1).max(512),
+  }),
+});
+export type PushSubscribe = z.infer<typeof pushSubscribeSchema>;
+
+export const pushUnsubscribeSchema = z.object({ endpoint: z.string().min(1).max(2048) });
+export type PushUnsubscribe = z.infer<typeof pushUnsubscribeSchema>;
+
+/** One subscribed browser. The endpoint itself is a capability and stays server side. */
+export const pushDeviceSchema = z.object({
+  id: idSchema,
+  /** The push service host, e.g. fcm.googleapis.com or web.push.apple.com. */
+  service: z.string(),
+  userAgent: z.string().nullable(),
+  createdAt: epochMsSchema,
+  lastSuccessAt: epochMsSchema.nullable(),
+  lastError: z.string().nullable(),
+});
+export type PushDevice = z.infer<typeof pushDeviceSchema>;
+
+export const pushConfigSchema = z.object({
+  /** VAPID public key, base64url: the applicationServerKey for subscribe(). */
+  publicKey: z.string().min(1),
+  devices: z.array(pushDeviceSchema),
+});
+export type PushConfig = z.infer<typeof pushConfigSchema>;
+
+export const pushSendResultSchema = z.object({
+  sent: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+});
+export type PushSendResult = z.infer<typeof pushSendResultSchema>;
+
+/** What the service worker receives and shows. */
+export const pushPayloadSchema = z.object({
+  title: z.string(),
+  body: z.string(),
+  /** Where a click on the notification lands, as an in-app path. */
+  url: z.string(),
+  tag: z.string(),
+});
+export type PushPayload = z.infer<typeof pushPayloadSchema>;
 
 export const healthSchema = z.object({
   ok: z.literal(true),
@@ -750,6 +821,7 @@ export const AMBER_EVENT_TYPES = [
   "repo.created",
   "repo.updated",
   "repo.deleted",
+  "repo.gone",
   "account_sync.finished",
   "status.changed",
 ] as const;
@@ -778,6 +850,7 @@ export const eventPayloadSchemas = {
   "repo.created": z.object({ repoId: idSchema }),
   "repo.updated": z.object({ repoId: idSchema }),
   "repo.deleted": z.object({ repoId: idSchema }),
+  "repo.gone": z.object({ repoId: idSchema }),
   "account_sync.finished": z.object({ accountSyncId: idSchema }),
   "status.changed": z.object({
     activeSyncs: z.number().int().nonnegative(),
