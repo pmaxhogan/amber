@@ -1,4 +1,5 @@
 import {
+  expectArray,
   getJson,
   matchesVisibility,
   normalizeRepoPath,
@@ -28,6 +29,11 @@ import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext, RepoAccess 
  * - Headers: https://docs.github.com/en/rest/using-the-rest-api/getting-started-with-the-rest-api?apiVersion=2022-11-28
  *   A User-Agent is mandatory (missing one is rejected with 403), Accept should
  *   be application/vnd.github+json, and tokens go in Authorization: Bearer.
+ * - Search: https://docs.github.com/en/rest/search/search?apiVersion=2022-11-28
+ *   `GET /search/repositories` answers with an object, `{ total_count, items }`,
+ *   not a bare array, and has its own rate limit (10 requests a minute
+ *   anonymously, 30 with a token; confirmed against the live API 2026-11-23).
+ *   per_page tops out at 100, so a trending listing is exactly one request.
  * - 404 vs 403: https://docs.github.com/en/rest/overview/troubleshooting-the-rest-api?apiVersion=2022-11-28
  *   GitHub answers 404 rather than 403 for private repositories you cannot see,
  *   so a 404 never proves a repository is gone.
@@ -37,6 +43,7 @@ import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext, RepoAccess 
 const API_VERSION = "2022-11-28";
 const USER_AGENT = "amber-git-backup";
 const PER_PAGE = "100";
+const MAX_SEARCH_PER_PAGE = 100;
 
 interface GitHubRepo {
   full_name?: unknown;
@@ -232,6 +239,31 @@ export const githubProvider: AccountSyncProvider = {
       yield* orgRepos(context, login);
     } else {
       yield* userRepos(context, login);
+    }
+  },
+
+  async *listTrending(
+    context: DiscoveryContext,
+    options: { since: Date; limit: number },
+  ): AsyncIterable<DiscoveredRepo> {
+    // The query github-trending-daily runs: whatever was created in the
+    // window, most starred first. A bare date is day-granular, so `>=` takes
+    // the whole of the first day (the reference uses `>` and loses it).
+    const since = options.since.toISOString().slice(0, 10);
+    const limit = Math.max(1, Math.min(MAX_SEARCH_PER_PAGE, Math.trunc(options.limit)));
+    const url = listUrl(apiBase(context.baseUrl), "/search/repositories", {
+      q: `created:>=${since}`,
+      sort: "stars",
+      order: "desc",
+      per_page: String(limit),
+    });
+    const response = await getJson<{ items?: unknown }>(context, url, {
+      headers: headers(context),
+      notFoundHint: "the repository search",
+    });
+    const items = expectArray<GitHubRepo>(response.data.items, "the search results");
+    for (const raw of items.slice(0, limit)) {
+      yield toDiscovered(raw);
     }
   },
 

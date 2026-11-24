@@ -105,14 +105,42 @@ describe("bulk and account sync payloads", () => {
     });
   });
 
-  it("defaults account sync to every repo every 6 hours", () => {
+  it("defaults account sync to every repo, leaving the interval to the route", () => {
     expect(upsertAccountSyncSchema.parse({ accountId: 2 })).toEqual({
       accountId: 2,
       source: "owned",
       visibility: "all",
       enabled: true,
-      intervalMinutes: 360,
     });
+  });
+
+  it("accepts a trending sync by forge, with its own knobs", () => {
+    expect(
+      upsertAccountSyncSchema.parse({ source: "trending", forgeId: 1, topN: 10, windowDays: 365 }),
+    ).toMatchObject({ source: "trending", forgeId: 1, topN: 10, windowDays: 365 });
+    expect(upsertAccountSyncSchema.safeParse({ source: "trending", forgeId: 1 }).success).toBe(
+      true,
+    );
+  });
+
+  it("rejects a trending sync with an account, a namespace, no forge or a silly size", () => {
+    const bad = [
+      { source: "trending" },
+      { source: "trending", forgeId: 1, accountId: 2 },
+      { source: "trending", forgeId: 1, namespace: "nodejs" },
+      { source: "trending", forgeId: 1, topN: 0 },
+      { source: "trending", forgeId: 1, topN: 101 },
+      { source: "trending", forgeId: 1, windowDays: 0 },
+      { source: "trending", forgeId: 1, windowDays: 3651 },
+    ];
+    for (const body of bad) {
+      expect(upsertAccountSyncSchema.safeParse(body).success, JSON.stringify(body)).toBe(false);
+    }
+  });
+
+  it("rejects the trending knobs on every other source", () => {
+    expect(upsertAccountSyncSchema.safeParse({ accountId: 2, topN: 5 }).success).toBe(false);
+    expect(upsertAccountSyncSchema.safeParse({ accountId: 2, windowDays: 5 }).success).toBe(false);
   });
 });
 

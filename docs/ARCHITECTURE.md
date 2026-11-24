@@ -70,7 +70,7 @@ server/src/
   sync/scheduler.ts       # queue, worker pool, stagger, backoff, breaker, startup catch-up
   sync/diskUsage.ts       # du of repo dirs (cached in DB per sync)
   providers/types.ts      # AccountSyncProvider interface (listRepos, listStarred?,
-                          #   listNamespaceRepos?, checkRepoAccess?)
+                          #   listNamespaceRepos?, listTrending?, checkRepoAccess?)
   providers/github.ts     # + gitlab.ts, bitbucket.ts, gitea.ts
   providers/discovery.ts  # account-sync run: enumerate -> upsert repos
   gitremote/routes.ts     # smart HTTP read-only remote (/git/*)
@@ -141,15 +141,42 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   NULL (NULL for global), `key` TEXT, `value` TEXT (JSON). UNIQUE(scope_type,
   scope_id, key).
 - `account_syncs`: `id` PK, `forge_id` FK CASCADE, `account_id` FK CASCADE
-  NULL, `source` ('owned'|'starred'|'namespace', default 'owned'), `namespace`
-  TEXT NULL, `visibility` ('all'|'public'|'private', applies to owned and
+  NULL, `source` ('owned'|'starred'|'namespace'|'trending', default 'owned'),
+  `namespace` TEXT NULL, `top_n` INTEGER NULL (1..100), `window_days` INTEGER
+  NULL (1..3650), `visibility` ('all'|'public'|'private', applies to owned and
   namespace syncs), `enabled` 0/1, `interval_minutes` (default 360),
   `next_run_at`, `last_run_at`, `last_error` TEXT NULL, `repos_discovered` INTEGER.
-  CHECKs: `namespace` is set exactly when source='namespace', and only a
-  namespace sync may have a NULL `account_id`. Partial unique indexes: one owned
-  and one starred sync per account (`(account_id, source) WHERE source IN
-  ('owned','starred')`), and one namespace sync per forge and name
-  (`(forge_id, namespace COLLATE NOCASE) WHERE source = 'namespace'`).
+  CHECKs: `namespace` is set exactly when source='namespace'; `top_n` and
+  `window_days` are set exactly when source='trending'; only a namespace or
+  trending sync may have a NULL `account_id`, and a trending sync always does.
+  Partial unique indexes: one owned and one starred sync per account
+  (`(account_id, source) WHERE source IN ('owned','starred')`), one namespace
+  sync per forge and name (`(forge_id, namespace COLLATE NOCASE) WHERE source =
+  'namespace'`), and one trending sync per forge and window (`(forge_id,
+  window_days) WHERE source = 'trending'`).
+  Trending sync semantics (GitHub kind only for now; error clearly elsewhere):
+  - Auto-discovery of repositories that are valuable and likely to be taken
+    down. Each run asks the forge for the `top_n` most-starred repositories
+    created in the last `window_days` days and imports the ones amber does not
+    have. GitHub: one request, `GET /search/repositories?q=created:>=DATE
+    &sort=stars&order=desc&per_page=N` - the same query the
+    github-trending-daily project runs. `top_n` is capped at 100 so a run is
+    always a single search page (the search API allows 10 requests a minute
+    anonymously).
+  - `window_days` is the identity next to the forge, so several can coexist: 3
+    days (the default) for what is blowing up right now, 365 for the year's
+    biggest. It is immutable; `top_n` is editable. The interval defaults to
+    1440 minutes instead of 360.
+  - It belongs to the forge and has no account: every run uses the forge's
+    default account, anonymous if there is none. Search only returns public
+    repositories, so visibility does not apply.
+  - It NEVER removes anything, and a repository that drops off the list is not
+    counted as vanished or logged: falling off is what trending lists do
+    daily. Whatever trended once keeps its backup and keeps syncing.
+  - A failed run of any source is retried after at most 60 minutes rather
+    than a full interval, so a rate-limited daily run does not skip its day.
+  - Migration 006 rebuilds the table again, with the same snapshot and restore
+    of `repos.managed_by_account_sync_id` as 004.
   Namespace sync semantics (GitHub kind only for now; error clearly elsewhere):
   - Backs up every repository a NAMED user or organization owns, whoever that
     is - not the account's own repos. GitHub: `GET /users/{name}` decides user
@@ -423,10 +450,13 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
     registry allowed-scopes), `GET /api/repos/:id/effective-settings` (explain).
   - `GET/POST /api/account-syncs`, `PATCH/DELETE /api/account-syncs/:id`,
     `POST /api/account-syncs/:id/run`. POST takes `accountId` for owned and
-    starred syncs (`forgeId` rejected), and `namespace` plus `forgeId` and/or
-    `accountId` for namespace syncs (both must agree on the forge). A duplicate
-    is a 409. PATCH edits only `visibility`, `enabled` and `intervalMinutes`;
-    the identity fields are stripped.
+    starred syncs (`forgeId` rejected), `namespace` plus `forgeId` and/or
+    `accountId` for namespace syncs (both must agree on the forge), and
+    `forgeId` plus optional `topN` (default 25) and `windowDays` (default 3)
+    for trending syncs (`accountId`, `namespace` and `visibility` rejected).
+    `intervalMinutes` defaults to 360, or 1440 for a trending sync. A duplicate
+    is a 409. PATCH edits only `visibility`, `enabled`, `intervalMinutes` and,
+    on a trending sync, `topN`; the identity fields are stripped.
   - `GET /api/git-remote` (enabled, username, cloneUrlTemplate, rotatedAt),
     `PATCH /api/git-remote` `{ username }` (renames the basic-auth user;
     works whether the remote is enabled or disabled, never touches the
@@ -555,7 +585,8 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   (personal access token, read_repository scope), Bitbucket (app password /
   API token with repository read), and Gitea (access token, repository read)), Account Sync (per-account
   enable/visibility/interval, plus whole-user-or-organization syncs with an
-  optional pinned account; usable with no accounts at all on GitHub), Settings (global editor + scope pickers, each field
+  optional pinned account, plus trending syncs that add the top N new
+  repositories daily; usable with no accounts at all on GitHub), Settings (global editor + scope pickers, each field
   shows which scope wins), Git Remote (enable, username, rotate, one-time password
   reveal, copyable clone URLs), About/Status.
 - SSE store keeps the table live (row-level updates, no refetch storms).

@@ -1,4 +1,7 @@
 import {
+  TRENDING_INTERVAL_MINUTES_DEFAULT,
+  TRENDING_TOP_N_DEFAULT,
+  TRENDING_WINDOW_DAYS_DEFAULT,
   updateAccountSyncSchema,
   upsertAccountSyncSchema,
   type AccountSync,
@@ -10,17 +13,22 @@ import { z } from "zod";
 import type { Db } from "../db/db.ts";
 import {
   findNamespaceSync,
+  findTrendingSync,
   getAccountSyncRow,
   insertAccountSync,
   mapAccountSync,
   runAccountSyncDetailed,
   supportsNamespaceSync,
   supportsStarredSync,
+  supportsTrendingSync,
   type DiscoveryDeps,
 } from "../providers/discovery.ts";
 import { createBackupFileRemover } from "./repos.ts";
 
 /** /api/account-syncs CRUD and manual run. */
+
+/** What the create schema used to default to, before trending brought its own. */
+const DEFAULT_INTERVAL_MINUTES = 360;
 
 const idParamsSchema = z.object({ id: z.coerce.number().int().positive() });
 const listQuerySchema = z.object({
@@ -31,8 +39,10 @@ interface AccountSyncRowShape {
   id: number;
   forge_id: number;
   account_id: number | null;
-  source: "owned" | "starred" | "namespace";
+  source: "owned" | "starred" | "namespace" | "trending";
   namespace: string | null;
+  top_n: number | null;
+  window_days: number | null;
   visibility: "all" | "public" | "private";
   enabled: number;
   interval_minutes: number;
@@ -153,6 +163,45 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
       );
     }
 
+    if (input.source === "trending") {
+      if (!supportsTrendingSync(forge.kind)) {
+        return fail(reply, 400, "unsupported_source", "Trending sync is GitHub-only for now");
+      }
+      const raw = request.body as Record<string, unknown> | null | undefined;
+      if (raw?.visibility !== undefined) {
+        return fail(
+          reply,
+          400,
+          "invalid_body",
+          "visibility does not apply to a trending sync; search results are always public",
+        );
+      }
+      // account_id is NULL here, and "account_id = NULL" never matches, so the
+      // generic duplicate lookup below cannot see an existing trending sync.
+      const windowDays = input.windowDays ?? TRENDING_WINDOW_DAYS_DEFAULT;
+      const existing = findTrendingSync(db, forgeId, windowDays);
+      if (existing !== undefined) {
+        return fail(
+          reply,
+          409,
+          "account_sync_exists",
+          `${forge.host} already has a trending sync over ${String(windowDays)} days (id ${String(existing.id)})`,
+        );
+      }
+      const created = insertAccountSync(db, {
+        forgeId,
+        accountId: null,
+        source: "trending",
+        namespace: null,
+        topN: input.topN ?? TRENDING_TOP_N_DEFAULT,
+        windowDays,
+        visibility: "all",
+        enabled: input.enabled,
+        intervalMinutes: input.intervalMinutes ?? TRENDING_INTERVAL_MINUTES_DEFAULT,
+      });
+      return reply.code(201).send(created);
+    }
+
     const namespace = input.source === "namespace" ? (input.namespace ?? null) : null;
     const duplicate =
       namespace === null
@@ -181,7 +230,7 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
       namespace,
       visibility: input.source === "starred" ? "all" : input.visibility,
       enabled: input.enabled,
-      intervalMinutes: input.intervalMinutes,
+      intervalMinutes: input.intervalMinutes ?? DEFAULT_INTERVAL_MINUTES,
     });
     return reply.code(201).send(created);
   });
@@ -209,19 +258,33 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
         "visibility applies to owned syncs only; a starred sync always takes the full list",
       );
     }
+    if (existing.source === "trending" && patch.visibility !== undefined) {
+      return fail(
+        reply,
+        400,
+        "invalid_body",
+        "visibility does not apply to a trending sync; search results are always public",
+      );
+    }
+    if (existing.source !== "trending" && patch.topN !== undefined) {
+      return fail(reply, 400, "invalid_body", "topN applies to trending syncs only");
+    }
 
     const now = Date.now();
     const visibility = patch.visibility ?? existing.visibility;
     const enabled = patch.enabled ?? existing.enabled === 1;
     const intervalMinutes = patch.intervalMinutes ?? existing.interval_minutes;
+    const topN = patch.topN ?? existing.top_n;
     // Re-enabling makes it due immediately; disabling clears the schedule.
     const nextRunAt = enabled ? (existing.enabled === 1 ? existing.next_run_at : now) : null;
 
     db.run(
       `UPDATE account_syncs
-          SET visibility = ?, enabled = ?, interval_minutes = ?, next_run_at = ?, updated_at = ?
+          SET visibility = ?, top_n = ?, enabled = ?, interval_minutes = ?, next_run_at = ?,
+              updated_at = ?
         WHERE id = ?`,
       visibility,
+      topN,
       enabled ? 1 : 0,
       intervalMinutes,
       nextRunAt,

@@ -10,6 +10,12 @@ import ToggleSwitch from "primevue/toggleswitch";
 import {
   parseNamespaceInput,
   supportsNamespaceSyncKind,
+  supportsTrendingSyncKind,
+  TRENDING_INTERVAL_MINUTES_DEFAULT,
+  TRENDING_TOP_N_DEFAULT,
+  TRENDING_TOP_N_MAX,
+  TRENDING_WINDOW_DAYS_DEFAULT,
+  TRENDING_WINDOW_DAYS_MAX,
   type Account,
   type AccountSyncSource,
   type AccountSyncVisibility,
@@ -52,8 +58,16 @@ function accountLabel(accountId: number): string {
   return forge === undefined ? account.username : `${account.username} at ${forge.host}`;
 }
 
+function windowLabel(days: number | null): string {
+  return days === 1 ? "day" : `${days ?? ""} days`;
+}
+
 /** What a sync card is titled: the account, or the namespace and its forge. */
 function syncTitle(sync: AccountSyncRow): string {
+  if (sync.source === "trending") {
+    const forge = forgeById.value.get(sync.forgeId);
+    return `Top ${sync.topN ?? ""} created in the last ${windowLabel(sync.windowDays)} on ${forge?.host ?? `forge ${sync.forgeId}`}`;
+  }
   if (sync.source !== "namespace") {
     return sync.accountId === null ? `sync ${sync.id}` : accountLabel(sync.accountId);
   }
@@ -71,7 +85,13 @@ const SOURCE_TAG: Record<AccountSyncSource, { label: string; severity: string }>
   owned: { label: "owned", severity: "secondary" },
   starred: { label: "starred", severity: "warn" },
   namespace: { label: "user or org", severity: "info" },
+  trending: { label: "trending", severity: "success" },
 };
+
+/** Forges whose provider can list what is trending. */
+const trendingForges = computed(() =>
+  forges.value.filter((forge) => supportsTrendingSyncKind(forge.kind)),
+);
 
 /** Forges whose provider can enumerate an arbitrary user or organization. */
 const namespaceForges = computed(() =>
@@ -116,6 +136,8 @@ interface SyncForm {
   accountId: number | null;
   forgeId: number | null;
   namespace: string;
+  topN: number;
+  windowDays: number;
   source: AccountSyncSource;
   visibility: AccountSyncVisibility;
   intervalMinutes: number;
@@ -127,6 +149,8 @@ function blankForm(): SyncForm {
     accountId: accounts.value[0]?.id ?? null,
     forgeId: namespaceForges.value[0]?.id ?? null,
     namespace: "",
+    topN: TRENDING_TOP_N_DEFAULT,
+    windowDays: TRENDING_WINDOW_DAYS_DEFAULT,
     source: accounts.value.length === 0 && namespaceForges.value.length > 0 ? "namespace" : "owned",
     visibility: "all",
     intervalMinutes: 360,
@@ -138,6 +162,8 @@ const form = ref<SyncForm>({
   accountId: null,
   forgeId: null,
   namespace: "",
+  topN: TRENDING_TOP_N_DEFAULT,
+  windowDays: TRENDING_WINDOW_DAYS_DEFAULT,
   source: "owned",
   visibility: "all",
   intervalMinutes: 360,
@@ -148,9 +174,10 @@ const accountOptions = computed(() =>
   accounts.value.map((account) => ({ label: accountLabel(account.id), value: account.id })),
 );
 
-const forgeOptions = computed(() =>
-  namespaceForges.value.map((forge) => ({ label: forge.host, value: forge.id })),
-);
+const forgeOptions = computed(() => {
+  const list = form.value.source === "trending" ? trendingForges.value : namespaceForges.value;
+  return list.map((forge) => ({ label: forge.host, value: forge.id }));
+});
 
 /** A namespace sync may borrow any account on its forge, or none. */
 const namespaceAccountOptions = computed(() => [
@@ -166,6 +193,7 @@ const parsedNamespace = computed(() => parseNamespaceInput(form.value.namespace)
 const sourceOptions = computed(() => {
   const starredAllowed = form.value.accountId !== null && supportsStarred(form.value.accountId);
   const namespaceAllowed = namespaceForges.value.length > 0;
+  const trendingAllowed = trendingForges.value.length > 0;
   return [
     {
       label:
@@ -187,16 +215,27 @@ const sourceOptions = computed(() => {
       value: "namespace",
       disabled: !namespaceAllowed,
     },
+    {
+      label: trendingAllowed ? "The top trending repositories, daily" : "Trending (GitHub only)",
+      value: "trending",
+      disabled: !trendingAllowed,
+    },
   ];
 });
 
-const canSave = computed(() =>
-  form.value.source === "namespace"
+const canSave = computed(() => {
+  if (form.value.source === "trending") return form.value.forgeId !== null;
+  return form.value.source === "namespace"
     ? form.value.forgeId !== null && parsedNamespace.value !== null
-    : form.value.accountId !== null,
-);
+    : form.value.accountId !== null;
+});
 
-const canCreate = computed(() => accounts.value.length > 0 || namespaceForges.value.length > 0);
+const canCreate = computed(
+  () =>
+    accounts.value.length > 0 ||
+    namespaceForges.value.length > 0 ||
+    trendingForges.value.length > 0,
+);
 
 const visibilityOptions = [
   { label: "All repositories", value: "all" },
@@ -216,6 +255,8 @@ function openEdit(sync: AccountSyncRow): void {
     accountId: sync.accountId,
     forgeId: sync.forgeId,
     namespace: sync.namespace ?? "",
+    topN: sync.topN ?? TRENDING_TOP_N_DEFAULT,
+    windowDays: sync.windowDays ?? TRENDING_WINDOW_DAYS_DEFAULT,
     source: sync.source,
     visibility: sync.visibility,
     intervalMinutes: sync.intervalMinutes,
@@ -234,6 +275,16 @@ function createBody(): UpsertAccountSyncInput | null {
     intervalMinutes: form.value.intervalMinutes,
     enabled: form.value.enabled,
   };
+  if (form.value.source === "trending") {
+    if (form.value.forgeId === null) return null;
+    return {
+      source: "trending",
+      forgeId: form.value.forgeId,
+      topN: form.value.topN,
+      windowDays: form.value.windowDays,
+      ...common,
+    };
+  }
   if (form.value.source === "namespace") {
     if (form.value.forgeId === null || parsedNamespace.value === null) return null;
     return {
@@ -265,7 +316,10 @@ async function save(): Promise<void> {
     } else {
       // Only these fields are editable; the rest identify the sync.
       await api.updateAccountSync(editing.value.id, {
-        ...(editing.value.source === "starred" ? {} : { visibility: form.value.visibility }),
+        ...(editing.value.source === "starred" || editing.value.source === "trending"
+          ? {}
+          : { visibility: form.value.visibility }),
+        ...(editing.value.source === "trending" ? { topN: form.value.topN } : {}),
         intervalMinutes: form.value.intervalMinutes,
         enabled: form.value.enabled,
       });
@@ -317,6 +371,27 @@ async function confirmDelete(): Promise<void> {
 }
 
 function onSourceChange(source: AccountSyncSource): void {
+  // Trending runs daily by default and everything else every six hours; follow
+  // the source only while the interval is still on one of those two defaults.
+  if (source === "trending" && form.value.intervalMinutes === 360) {
+    form.value.intervalMinutes = TRENDING_INTERVAL_MINUTES_DEFAULT;
+  } else if (
+    source !== "trending" &&
+    form.value.intervalMinutes === TRENDING_INTERVAL_MINUTES_DEFAULT
+  ) {
+    form.value.intervalMinutes = 360;
+  }
+  if (source === "trending") {
+    form.value.accountId = null;
+    form.value.forgeId = trendingForges.value[0]?.id ?? null;
+    return;
+  }
+  if (
+    form.value.forgeId === null ||
+    !namespaceForges.value.some((f) => f.id === form.value.forgeId)
+  ) {
+    form.value.forgeId = namespaceForges.value[0]?.id ?? null;
+  }
   if (source === "namespace") {
     const account =
       form.value.accountId === null ? undefined : accountById.value.get(form.value.accountId);
@@ -343,7 +418,7 @@ onMounted(() => void load());
   <section>
     <PageHeader
       title="Account Sync"
-      description="Discover repositories automatically from a linked account, instead of pasting URLs by hand."
+      description="Discover repositories automatically, from a linked account or from what is trending, instead of pasting URLs by hand."
     >
       <template #actions>
         <Button label="Add account sync" size="small" :disabled="!canCreate" @click="openCreate" />
@@ -365,7 +440,7 @@ onMounted(() => void load());
       v-else-if="syncs.length === 0 && error === null"
       icon="sync"
       title="No account syncs yet"
-      description="An account sync enumerates the repositories an account owns or has starred, or everything a GitHub user or organization owns, and imports whatever it finds on a schedule. Pasting https://github.com/nodejs on the Import page sets one up too."
+      description="An account sync enumerates the repositories an account owns or has starred, everything a GitHub user or organization owns, or the top trending repositories on GitHub, and imports whatever it finds on a schedule. Pasting https://github.com/nodejs on the Import page sets one up too."
     >
       <Button label="Add an account sync" @click="openCreate" />
     </EmptyState>
@@ -381,7 +456,10 @@ onMounted(() => void load());
                 :severity="SOURCE_TAG[sync.source].severity"
               />
               <span v-if="sync.source === 'namespace'">{{ viaLabel(sync) }}</span>
-              <span v-if="sync.source !== 'starred'">visibility: {{ sync.visibility }}</span>
+              <span v-if="sync.source === 'trending'">via the forge default account</span>
+              <span v-if="sync.source !== 'starred' && sync.source !== 'trending'"
+                >visibility: {{ sync.visibility }}</span
+              >
               <span>every {{ sync.intervalMinutes }} minutes</span>
             </p>
           </div>
@@ -431,6 +509,11 @@ onMounted(() => void load());
           their own. Nothing is ever removed: a repository that is deleted or moved away keeps its
           backup and keeps syncing.
         </p>
+        <p v-else-if="sync.source === 'trending'" class="amber-note">
+          Every run adds the {{ sync.topN }} most-starred repositories created in the last
+          {{ windowLabel(sync.windowDays) }}. Nothing is ever removed: a repository that stops
+          trending, or is taken down, keeps its backup.
+        </p>
       </article>
     </div>
 
@@ -459,7 +542,52 @@ onMounted(() => void load());
           </p>
         </div>
 
-        <template v-if="form.source === 'namespace'">
+        <template v-if="form.source === 'trending'">
+          <div class="amber-field">
+            <label for="sync-trending-forge">Forge</label>
+            <Select
+              v-model="form.forgeId"
+              input-id="sync-trending-forge"
+              :options="forgeOptions"
+              option-label="label"
+              option-value="value"
+              :disabled="editing !== null"
+            />
+          </div>
+
+          <div class="amber-field">
+            <label for="sync-top-n">How many repositories per run</label>
+            <InputNumber
+              v-model="form.topN"
+              input-id="sync-top-n"
+              :min="1"
+              :max="TRENDING_TOP_N_MAX"
+              :use-grouping="false"
+            />
+          </div>
+
+          <div class="amber-field">
+            <label for="sync-window-days">Created within</label>
+            <InputNumber
+              v-model="form.windowDays"
+              input-id="sync-window-days"
+              :min="1"
+              :max="TRENDING_WINDOW_DAYS_MAX"
+              :use-grouping="false"
+              suffix=" days"
+              :disabled="editing !== null"
+            />
+            <p class="amber-note">
+              Each run takes the most-starred repositories created within this window and adds the
+              ones amber does not have yet. {{ TRENDING_WINDOW_DAYS_DEFAULT }} days catches what is
+              blowing up right now, which is also what is most likely to be taken down; add a second
+              trending sync with 365 days for the year's biggest. Nothing this sync adds is ever
+              removed. It uses the forge default account, or no account at all.
+            </p>
+          </div>
+        </template>
+
+        <template v-else-if="form.source === 'namespace'">
           <div class="amber-field">
             <label for="sync-forge">Forge</label>
             <Select
@@ -523,7 +651,7 @@ onMounted(() => void load());
           />
         </div>
 
-        <div v-if="form.source !== 'starred'" class="amber-field">
+        <div v-if="form.source !== 'starred' && form.source !== 'trending'" class="amber-field">
           <label for="sync-visibility">Visibility</label>
           <Select
             v-model="form.visibility"
@@ -544,8 +672,8 @@ onMounted(() => void load());
             suffix=" minutes"
           />
           <p class="amber-note">
-            How often amber re-enumerates the account. This is separate from how often each
-            repository is fetched.
+            How often amber runs this discovery. This is separate from how often each repository is
+            fetched.
           </p>
         </div>
 

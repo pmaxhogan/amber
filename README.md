@@ -19,6 +19,9 @@ out as a read-only git remote.
 - **Whole users and organizations.** Paste `https://github.com/nodejs` into
   the import box and Amber backs up every repository that user or organization
   owns, picking up new ones as they are created.
+- **Trending discovery.** Add a trending sync and Amber backs up the top N
+  most-starred new GitHub repositories every day, before they can be taken
+  down. Nothing it adds is ever removed.
 - **Paranoid mode.** Never lose history. Pruning and garbage collection are
   disabled and every ref tip that upstream rewrites or deletes is archived under
   `refs/amber/archive/<timestamp>/` before the update lands.

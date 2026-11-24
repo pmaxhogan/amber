@@ -142,6 +142,8 @@ export function makeAccountSync(overrides: Partial<AccountSyncRow> = {}): Accoun
     accountId: 1,
     source: "owned",
     namespace: null,
+    topN: null,
+    windowDays: null,
     visibility: "all",
     enabled: true,
     intervalMinutes: 360,

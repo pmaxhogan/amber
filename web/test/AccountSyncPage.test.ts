@@ -323,3 +323,110 @@ describe("Namespace syncs", () => {
     });
   });
 });
+
+describe("Trending syncs", () => {
+  async function openTrendingForm() {
+    const { wrapper, api } = await mountPage();
+    await clickButton(wrapper, "Add account sync");
+    await flush();
+    await sourceSelect(wrapper)?.vm.$emit("update:modelValue", "trending");
+    await flush();
+    return { wrapper, api };
+  }
+
+  function selectById(wrapper: Awaited<ReturnType<typeof mountPage>>["wrapper"], id: string) {
+    return wrapper.findAllComponents(Select).find((select) => select.props("inputId") === id);
+  }
+
+  const trending = makeAccountSync({
+    id: 7,
+    source: "trending",
+    accountId: null,
+    topN: 10,
+    windowDays: 365,
+    intervalMinutes: 1440,
+  });
+
+  it("titles a trending sync by its size, window and forge, and says nothing is removed", async () => {
+    const api = buildApi({ listAccountSyncs: vi.fn().mockResolvedValue([trending]) });
+    const { wrapper } = await mountPage(api);
+    const card = wrapper.find(".sync-card");
+
+    expect(card.find("h2").text()).toBe("Top 10 created in the last 365 days on github.com");
+    expect(card.text()).toContain("trending");
+    expect(card.text()).toContain("via the forge default account");
+    expect(card.text()).not.toContain("visibility:");
+    expect(card.text()).toContain("Nothing is ever removed");
+  });
+
+  it("offers only forges that can list trending, and no account or visibility", async () => {
+    const { wrapper } = await openTrendingForm();
+
+    expect(selectById(wrapper, "sync-trending-forge")?.props("options")).toEqual([
+      { label: "github.com", value: 1 },
+    ]);
+    expect(wrapper.find("#sync-account").exists()).toBe(false);
+    expect(selectById(wrapper, "sync-visibility")).toBeUndefined();
+  });
+
+  it("creates a daily trending sync with the default size and window", async () => {
+    const { wrapper, api } = await openTrendingForm();
+
+    await clickButton(wrapper, "Create");
+    await flush();
+
+    expect(api.createAccountSync).toHaveBeenCalledWith({
+      source: "trending",
+      forgeId: 1,
+      topN: 25,
+      windowDays: 3,
+      intervalMinutes: 1440,
+      enabled: true,
+    });
+  });
+
+  it("goes back to the six-hour interval when the source changes away", async () => {
+    const { wrapper, api } = await openTrendingForm();
+    await sourceSelect(wrapper)?.vm.$emit("update:modelValue", "owned");
+    await flush();
+
+    await clickButton(wrapper, "Create");
+    await flush();
+
+    expect(api.createAccountSync).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "owned", accountId: 1, intervalMinutes: 360 }),
+    );
+  });
+
+  it("is offered on GitHub even with no accounts at all", async () => {
+    const api = buildApi({
+      listAccounts: vi.fn().mockResolvedValue([]),
+      listAccountSyncs: vi.fn().mockResolvedValue([]),
+    });
+    const { wrapper } = await mountPage(api);
+    await clickButton(wrapper, "Add account sync");
+    await flush();
+
+    const options = sourceSelect(wrapper)?.props("options") as {
+      value: string;
+      disabled: boolean;
+    }[];
+    expect(options.find((option) => option.value === "trending")?.disabled).toBe(false);
+  });
+
+  it("sends topN but neither visibility nor the window when saving an edit", async () => {
+    const api = buildApi({ listAccountSyncs: vi.fn().mockResolvedValue([trending]) });
+    const { wrapper } = await mountPage(api);
+
+    await clickButton(wrapper, "Edit");
+    await flush();
+    await clickButton(wrapper, "Save");
+    await flush();
+
+    expect(api.updateAccountSync).toHaveBeenCalledWith(7, {
+      topN: 10,
+      intervalMinutes: 1440,
+      enabled: true,
+    });
+  });
+});

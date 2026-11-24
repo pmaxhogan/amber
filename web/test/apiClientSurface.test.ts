@@ -285,6 +285,8 @@ describe("account syncs", () => {
     accountId: 2,
     source: "owned",
     namespace: null,
+    topN: null,
+    windowDays: null,
     visibility: "all",
     enabled: true,
     intervalMinutes: 360,

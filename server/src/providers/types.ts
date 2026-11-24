@@ -70,6 +70,16 @@ export interface AccountSyncProvider {
    */
   listNamespaceRepos?(context: DiscoveryContext, namespace: string): AsyncIterable<DiscoveredRepo>;
   /**
+   * The `limit` most-starred repositories created at or after `since`, most
+   * starred first. This is what "trending" means here: young repositories that
+   * collected stars fast. Optional: only GitHub implements it. The caller
+   * supplies `since` because a provider has no clock of its own.
+   */
+  listTrending?(
+    context: DiscoveryContext,
+    options: { since: Date; limit: number },
+  ): AsyncIterable<DiscoveredRepo>;
+  /**
    * Whether `path` is still reachable with this context's credentials. Used
    * before a starred sync removes a repository: only a definite "accessible"
    * proves the star was dropped deliberately rather than the repo vanishing.

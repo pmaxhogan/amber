@@ -311,10 +311,93 @@ ALTER TABLE repos ADD COLUMN last_seen_at INTEGER NULL;
 UPDATE repos SET last_seen_at = last_success_at;
 `;
 
+/**
+ * 006: trending syncs. A fourth source that adds the top_n most-starred
+ * repositories created in the last window_days days, daily. A forge may have
+ * several, one per window (3 days for what is blowing up right now, 365 for
+ * the year's biggest). It belongs to a forge and never to an
+ * account (it always runs with the forge default account, or anonymously), so
+ * the account_id CHECK widens along with the source CHECK, which means another
+ * table rebuild. Same snapshot and restore of repos.managed_by_account_sync_id
+ * as 004, for the same reason: DROP TABLE fires that column's ON DELETE SET
+ * NULL.
+ */
+const trendingSync = `
+CREATE TEMP TABLE account_sync_links_006 AS
+  SELECT id, managed_by_account_sync_id AS sync_id
+    FROM repos
+   WHERE managed_by_account_sync_id IS NOT NULL;
+
+CREATE TABLE account_syncs_006 (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  forge_id         INTEGER NOT NULL REFERENCES forges (id) ON DELETE CASCADE,
+  -- NULL for a trending sync, and for a namespace sync that runs with the
+  -- forge default account.
+  account_id       INTEGER NULL REFERENCES accounts (id) ON DELETE CASCADE,
+  source           TEXT    NOT NULL DEFAULT 'owned'
+                     CHECK (source IN ('owned', 'starred', 'namespace', 'trending')),
+  -- The user or organization a namespace sync enumerates.
+  namespace        TEXT    NULL,
+  -- How many repositories a trending sync takes per run.
+  top_n            INTEGER NULL CHECK (top_n IS NULL OR top_n BETWEEN 1 AND 100),
+  -- How far back a trending sync looks at repository creation dates.
+  window_days      INTEGER NULL CHECK (window_days IS NULL OR window_days BETWEEN 1 AND 3650),
+  -- Applies to 'owned' and 'namespace' only.
+  visibility       TEXT    NOT NULL DEFAULT 'all' CHECK (visibility IN ('all', 'public', 'private')),
+  enabled          INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+  interval_minutes INTEGER NOT NULL DEFAULT 360 CHECK (interval_minutes >= 1),
+  next_run_at      INTEGER NULL,
+  last_run_at      INTEGER NULL,
+  last_error       TEXT    NULL,
+  repos_discovered INTEGER NULL,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  CHECK ((source = 'namespace') = (namespace IS NOT NULL)),
+  CHECK ((source = 'trending') = (top_n IS NOT NULL)),
+  CHECK ((source = 'trending') = (window_days IS NOT NULL)),
+  CHECK (source = 'trending' OR source = 'namespace' OR account_id IS NOT NULL),
+  CHECK (source <> 'trending' OR account_id IS NULL)
+);
+
+INSERT INTO account_syncs_006 (
+  id, forge_id, account_id, source, namespace, top_n, window_days, visibility, enabled,
+  interval_minutes, next_run_at, last_run_at, last_error, repos_discovered, created_at, updated_at
+)
+SELECT
+  id, forge_id, account_id, source, namespace, NULL, NULL, visibility, enabled, interval_minutes,
+  next_run_at, last_run_at, last_error, repos_discovered, created_at, updated_at
+FROM account_syncs;
+
+DROP TABLE account_syncs;
+
+ALTER TABLE account_syncs_006 RENAME TO account_syncs;
+
+UPDATE repos
+   SET managed_by_account_sync_id = (
+         SELECT sync_id FROM account_sync_links_006 l WHERE l.id = repos.id
+       )
+ WHERE id IN (SELECT id FROM account_sync_links_006)
+   AND (SELECT sync_id FROM account_sync_links_006 l WHERE l.id = repos.id)
+       IN (SELECT id FROM account_syncs);
+
+DROP TABLE account_sync_links_006;
+
+CREATE UNIQUE INDEX idx_account_syncs_account_source
+  ON account_syncs (account_id, source) WHERE source IN ('owned', 'starred');
+CREATE UNIQUE INDEX idx_account_syncs_namespace
+  ON account_syncs (forge_id, namespace COLLATE NOCASE) WHERE source = 'namespace';
+CREATE UNIQUE INDEX idx_account_syncs_trending
+  ON account_syncs (forge_id, window_days) WHERE source = 'trending';
+CREATE INDEX idx_account_syncs_due ON account_syncs (next_run_at) WHERE enabled = 1;
+CREATE INDEX idx_account_syncs_account ON account_syncs (account_id);
+CREATE INDEX idx_account_syncs_forge ON account_syncs (forge_id);
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
   { name: "003_default_forges", sql: defaultForges },
   { name: "004_namespace_sync", sql: namespaceSync },
   { name: "005_last_seen", sql: lastSeen },
+  { name: "006_trending_sync", sql: trendingSync },
 ];

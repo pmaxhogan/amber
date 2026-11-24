@@ -443,8 +443,15 @@ export type AccountSyncVisibility = z.infer<typeof accountSyncVisibilitySchema>;
  * rather than to an account: the account is optional, and when absent the run
  * uses the forge's default account, or goes anonymous when there is none. One
  * namespace sync per (forge, namespace), compared case-insensitively.
+ *
+ * 'trending' adds the `topN` most-starred repositories created on the forge in
+ * the last `windowDays` days (GitHub only for now), every run. It belongs to
+ * the forge and never to an account: it always runs with the forge default
+ * account, or anonymously. Nothing it added is ever removed. One per (forge,
+ * windowDays), so a 3-day sync for what is blowing up right now can sit next
+ * to a 365-day one for the year's biggest.
  */
-export const accountSyncSourceSchema = z.enum(["owned", "starred", "namespace"]);
+export const accountSyncSourceSchema = z.enum(["owned", "starred", "namespace", "trending"]);
 export type AccountSyncSource = z.infer<typeof accountSyncSourceSchema>;
 
 /** Forge kinds whose provider can enumerate an arbitrary user or organization. */
@@ -453,6 +460,25 @@ export const NAMESPACE_SYNC_FORGE_KINDS = ["github"] as const;
 export function supportsNamespaceSyncKind(kind: string): boolean {
   return (NAMESPACE_SYNC_FORGE_KINDS as readonly string[]).includes(kind);
 }
+
+/** Forge kinds whose provider can list what is trending. */
+export const TRENDING_SYNC_FORGE_KINDS = ["github"] as const;
+
+export function supportsTrendingSyncKind(kind: string): boolean {
+  return (TRENDING_SYNC_FORGE_KINDS as readonly string[]).includes(kind);
+}
+
+/** A trending sync looks at repositories created within this many days. */
+export const TRENDING_WINDOW_DAYS_DEFAULT = 3;
+export const TRENDING_WINDOW_DAYS_MAX = 3650;
+/** One search page: more would need pagination against a 10/min anonymous limit. */
+export const TRENDING_TOP_N_MAX = 100;
+export const TRENDING_TOP_N_DEFAULT = 25;
+/** A trending sync runs daily unless told otherwise. */
+export const TRENDING_INTERVAL_MINUTES_DEFAULT = 1440;
+
+export const trendingTopNSchema = z.number().int().min(1).max(TRENDING_TOP_N_MAX);
+export const trendingWindowDaysSchema = z.number().int().min(1).max(TRENDING_WINDOW_DAYS_MAX);
 
 /**
  * A user or organization login. Deliberately looser than GitHub's own rule
@@ -492,13 +518,18 @@ export const accountSyncSchema = z.object({
   forgeId: idSchema,
   /**
    * Always set for 'owned' and 'starred'. For 'namespace', null means "the
-   * forge's default account at run time, or anonymous".
+   * forge's default account at run time, or anonymous". Always null for
+   * 'trending', which means the same thing.
    */
   accountId: idSchema.nullable(),
   source: accountSyncSourceSchema,
   /** The user or organization a 'namespace' sync enumerates; null otherwise. */
   namespace: z.string().nullable(),
-  /** Meaningful for 'owned' and 'namespace'; starred syncs always take the full list. */
+  /** How many repositories a 'trending' sync takes per run; null otherwise. */
+  topN: z.number().int().nullable(),
+  /** How many days back a 'trending' sync looks at creation dates; null otherwise. */
+  windowDays: z.number().int().nullable(),
+  /** Meaningful for 'owned' and 'namespace' only. */
   visibility: accountSyncVisibilitySchema,
   enabled: z.boolean(),
   intervalMinutes: z.number().int().min(1),
@@ -528,7 +559,9 @@ export type AccountSyncListResponse = z.infer<typeof accountSyncListResponseSche
  * 'owned' and 'starred' need `accountId`. 'namespace' needs `namespace` plus
  * either `accountId` (whose forge it then runs on) or `forgeId` (run with the
  * forge default account); naming both is allowed when they agree, which the
- * route checks because only it can see the account's forge.
+ * route checks because only it can see the account's forge. 'trending' needs
+ * `forgeId` and takes `topN` and `windowDays`; it has no account, namespace or visibility, and
+ * its interval defaults to a day rather than six hours.
  */
 export const upsertAccountSyncSchema = z
   .object({
@@ -536,12 +569,55 @@ export const upsertAccountSyncSchema = z
     forgeId: idSchema.optional(),
     source: accountSyncSourceSchema.default("owned"),
     namespace: namespaceSchema.optional(),
-    /** Rejected on starred syncs by the routes rather than silently dropped. */
+    /** Trending syncs only; defaults to TRENDING_TOP_N_DEFAULT there. */
+    topN: trendingTopNSchema.optional(),
+    /** Trending syncs only; defaults to TRENDING_WINDOW_DAYS_DEFAULT there. */
+    windowDays: trendingWindowDaysSchema.optional(),
+    /** Rejected on starred and trending syncs by the routes rather than silently dropped. */
     visibility: accountSyncVisibilitySchema.default("all"),
     enabled: z.boolean().default(true),
-    intervalMinutes: z.number().int().min(1).default(360),
+    /** Defaults to 360, or to a day for a trending sync (applied by the route). */
+    intervalMinutes: z.number().int().min(1).optional(),
   })
   .superRefine((value, ctx) => {
+    if (value.source !== "trending" && value.topN !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["topN"],
+        message: "topN applies to trending syncs only",
+      });
+    }
+    if (value.source !== "trending" && value.windowDays !== undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["windowDays"],
+        message: "windowDays applies to trending syncs only",
+      });
+    }
+    if (value.source === "trending") {
+      if (value.forgeId === undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["forgeId"],
+          message: "a trending sync needs a forgeId",
+        });
+      }
+      if (value.accountId !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["accountId"],
+          message: "a trending sync runs with the forge default account; omit accountId",
+        });
+      }
+      if (value.namespace !== undefined) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["namespace"],
+          message: "namespace applies to namespace syncs only",
+        });
+      }
+      return;
+    }
     if (value.source === "namespace") {
       if (value.namespace === undefined) {
         ctx.addIssue({ code: "custom", path: ["namespace"], message: "namespace is required" });
@@ -585,11 +661,13 @@ export type UpsertAccountSync = z.infer<typeof upsertAccountSyncSchema>;
 export type UpsertAccountSyncInput = z.input<typeof upsertAccountSyncSchema>;
 
 /**
- * accountId, forgeId, source and namespace are immutable: change any of them
+ * accountId, forgeId, source, namespace and windowDays are immutable: change any of them
  * by deleting and recreating.
  */
 export const updateAccountSyncSchema = z.object({
   visibility: accountSyncVisibilitySchema.optional(),
+  /** Trending syncs only. */
+  topN: trendingTopNSchema.optional(),
   enabled: z.boolean().optional(),
   intervalMinutes: z.number().int().min(1).optional(),
 });

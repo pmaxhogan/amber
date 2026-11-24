@@ -1,9 +1,9 @@
-import type {
-  AccountSync,
-  AccountSyncRunResult,
-  AccountSyncSource,
-  AccountSyncVisibility,
-  ForgeKind,
+import {
+  type AccountSync,
+  type AccountSyncRunResult,
+  type AccountSyncSource,
+  type AccountSyncVisibility,
+  type ForgeKind,
 } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
@@ -33,10 +33,11 @@ import type {
  * upsert repo rows for them.
  *
  * Removal policy, which is the whole point of a backup tool:
- * - sources 'owned' and 'namespace' NEVER remove anything. A repository
+ * - sources 'owned', 'namespace' and 'trending' NEVER remove anything. A repository
  *   that disappeared from the listing may have been deleted or transferred
  *   upstream, which is exactly the case the backup exists for. It is logged
- *   and counted as vanished.
+ *   and counted as vanished. (A trending sync does not even count it: a
+ *   repository drops off the trending list every day by design.)
  * - source 'starred' removes a repository only when the forge confirms the
  *   repository is still there (HTTP 200) and it is simply no longer starred,
  *   and only when this sync created the row (origin 'account_sync'). Any
@@ -44,6 +45,9 @@ import type {
  */
 
 const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+/** The longest a failed run waits before trying again, whatever its interval. */
+export const FAILED_RUN_RETRY_MINUTES = 60;
 /** New repos are spread over at most this window so a first sync does not stampede. */
 export const STAGGER_WINDOW_MS = 5 * MINUTE_MS;
 const STAGGER_STEP_MAX_MS = 2_000;
@@ -87,6 +91,8 @@ interface AccountSyncRow {
   account_id: number | null;
   source: AccountSyncSource;
   namespace: string | null;
+  top_n: number | null;
+  window_days: number | null;
   visibility: AccountSyncVisibility;
   enabled: number;
   interval_minutes: number;
@@ -140,6 +146,24 @@ export function supportsNamespaceSync(kind: string): boolean {
   return providerForKind(kind)?.listNamespaceRepos !== undefined;
 }
 
+/** Trending syncs need a provider that can search by creation date and stars. */
+export function supportsTrendingSync(kind: string): boolean {
+  return providerForKind(kind)?.listTrending !== undefined;
+}
+
+/** The trending sync on this forge with this window, if there is one. */
+export function findTrendingSync(
+  db: Db,
+  forgeId: number,
+  windowDays: number,
+): AccountSyncRow | undefined {
+  return db.get<AccountSyncRow>(
+    "SELECT * FROM account_syncs WHERE forge_id = ? AND source = 'trending' AND window_days = ?",
+    forgeId,
+    windowDays,
+  );
+}
+
 export function mapAccountSync(row: AccountSyncRow): AccountSync {
   return {
     id: row.id,
@@ -147,6 +171,8 @@ export function mapAccountSync(row: AccountSyncRow): AccountSync {
     accountId: row.account_id,
     source: row.source,
     namespace: row.namespace,
+    topN: row.top_n,
+    windowDays: row.window_days,
     visibility: row.visibility,
     enabled: row.enabled === 1,
     intervalMinutes: row.interval_minutes,
@@ -181,6 +207,10 @@ export interface NewAccountSync {
   accountId: number | null;
   source: AccountSyncSource;
   namespace: string | null;
+  /** Required for a trending sync, absent or null for every other source. */
+  topN?: number | null;
+  /** Required for a trending sync, absent or null for every other source. */
+  windowDays?: number | null;
   visibility: AccountSyncVisibility;
   enabled: boolean;
   intervalMinutes: number;
@@ -194,13 +224,15 @@ export function insertAccountSync(
 ): AccountSync {
   const inserted = db.run(
     `INSERT INTO account_syncs (
-       forge_id, account_id, source, namespace, visibility, enabled, interval_minutes,
-       next_run_at, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       forge_id, account_id, source, namespace, top_n, window_days, visibility, enabled,
+       interval_minutes, next_run_at, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     input.forgeId,
     input.accountId,
     input.source,
     input.namespace,
+    input.topN ?? null,
+    input.windowDays ?? null,
     input.visibility,
     input.enabled ? 1 : 0,
     input.intervalMinutes,
@@ -332,6 +364,9 @@ export async function runAccountSyncDetailed(
     if (row.source === "namespace" && provider.listNamespaceRepos === undefined) {
       throw new Error("Syncing a whole user or organization is GitHub-only for now");
     }
+    if (row.source === "trending" && provider.listTrending === undefined) {
+      throw new Error("Trending sync is GitHub-only for now");
+    }
 
     const context: DiscoveryContext = {
       baseUrl: buildBaseUrl(forge),
@@ -340,11 +375,11 @@ export async function runAccountSyncDetailed(
       // stored secret; a namespace sync may also have no account at all.
       token: account === undefined ? null : resolveToken(account, deps.secretKey ?? null, decrypt),
       // Visibility is an owned-sync concept; a starred list is whatever it is.
-      visibility: row.source === "starred" ? "all" : row.visibility,
+      visibility: row.source === "starred" || row.source === "trending" ? "all" : row.visibility,
       fetch: deps.fetch,
     };
 
-    const iterable = listingFor(provider, context, row);
+    const iterable = listingFor(provider, context, row, startedAt);
 
     const byPath = new Map<string, DiscoveredRepo>();
     for await (const repo of iterable) {
@@ -372,9 +407,13 @@ export async function runAccountSyncDetailed(
         row.id,
       )
       .filter((repo) => !byPath.has(repo.path));
-    vanished = stale.length;
+    // Yesterday's trending repositories are all "stale" today, by design. That
+    // is not a repository vanishing, so it is neither counted nor logged.
+    vanished = row.source === "trending" ? 0 : stale.length;
 
-    if (row.source === "starred") {
+    if (row.source === "trending") {
+      // Nothing to reconcile: whatever trended once stays backed up.
+    } else if (row.source === "starred") {
       // A listing that comes back completely empty after a run that found
       // repositories is far more likely to be a lost scope or a forge glitch
       // than the account unstarring everything at once. One confirmed unstar is
@@ -428,7 +467,17 @@ export async function runAccountSyncDetailed(
   }
 
   const finishedAt = now();
-  const nextRunAt = finishedAt + jitteredInterval(row.interval_minutes, random);
+  // A failed run comes back within the hour instead of sitting out a whole
+  // interval: a daily trending sync that met a rate limit would otherwise skip
+  // a day, and the day's list is gone by then.
+  const nextRunAt =
+    finishedAt +
+    jitteredInterval(
+      error === null
+        ? row.interval_minutes
+        : Math.min(row.interval_minutes, FAILED_RUN_RETRY_MINUTES),
+      random,
+    );
   db.run(
     `UPDATE account_syncs
         SET last_run_at = ?, next_run_at = ?, last_error = ?, repos_discovered = ?, updated_at = ?
@@ -458,7 +507,19 @@ function listingFor(
   provider: AccountSyncProvider,
   context: DiscoveryContext,
   row: AccountSyncRow,
+  now: number,
 ): AsyncIterable<DiscoveredRepo> {
+  if (
+    row.source === "trending" &&
+    row.top_n !== null &&
+    row.window_days !== null &&
+    provider.listTrending !== undefined
+  ) {
+    return provider.listTrending(context, {
+      since: new Date(now - row.window_days * DAY_MS),
+      limit: row.top_n,
+    });
+  }
   if (row.source === "starred" && provider.listStarred !== undefined) {
     return provider.listStarred(context);
   }

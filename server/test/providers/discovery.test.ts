@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { supportsNamespaceSyncKind } from "@amber/shared";
+import { supportsNamespaceSyncKind, supportsTrendingSyncKind } from "@amber/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb, type Db } from "../../src/db/db.ts";
 import { migrate } from "../../src/db/migrate.ts";
@@ -14,6 +14,7 @@ import {
   runDueAccountSyncs,
   supportsNamespaceSync,
   supportsStarredSync,
+  supportsTrendingSync,
   type DiscoveryDeps,
 } from "../../src/providers/discovery.ts";
 import { ProviderError } from "../../src/providers/http.ts";
@@ -469,8 +470,28 @@ describe("runAccountSync, owned", () => {
 
     expect(result.error).toContain("rate limited");
     expect(result.error).toContain("Retry after 90s");
-    expect(result.accountSync.nextRunAt).toBe(10_000 + 360 * 60_000);
+    // A failure retries within the hour rather than after the full six.
+    expect(result.accountSync.nextRunAt).toBe(10_000 + 60 * 60_000);
     expect(result.accountSync.lastRunAt).toBe(10_000);
+  });
+
+  it("never stretches a short interval when a run fails", async () => {
+    const { accountId } = seed();
+    const syncId = createSync(accountId, "owned", { intervalMinutes: 5 });
+    const failing: AccountSyncProvider = {
+      kind: "github",
+      listRepos(): AsyncIterable<DiscoveredRepo> {
+        throw new Error("boom");
+      },
+    };
+
+    const result = await runAccountSyncDetailed(
+      db,
+      syncId,
+      baseDeps(failing, { now: () => 10_000 }),
+    );
+
+    expect(result.accountSync.nextRunAt).toBe(10_000 + 5 * 60_000);
   });
 
   it("refuses a generic forge with an actionable message", async () => {
@@ -930,5 +951,117 @@ describe("runAccountSync, namespace", () => {
     for (const kind of ["github", "gitlab", "bitbucket", "gitea", "generic"]) {
       expect(supportsNamespaceSyncKind(kind)).toBe(supportsNamespaceSync(kind));
     }
+  });
+});
+
+describe("runAccountSync, trending", () => {
+  const NOW = Date.UTC(2026, 10, 23, 12, 0, 0);
+
+  function trendingProvider(
+    pages: DiscoveredRepo[][],
+    calls: { since: Date; limit: number; context: DiscoveryContext }[] = [],
+  ): AccountSyncProvider {
+    let call = 0;
+    return {
+      kind: "github",
+      listRepos: () => toAsync([]),
+      listTrending(context, options): AsyncIterable<DiscoveredRepo> {
+        calls.push({ ...options, context });
+        const page = pages[Math.min(call, pages.length - 1)] ?? [];
+        call += 1;
+        return toAsync(page);
+      },
+    };
+  }
+
+  function createTrending(forgeId: number, topN = 10, windowDays = 3): number {
+    return db.run(
+      `INSERT INTO account_syncs (forge_id, source, top_n, window_days, enabled, interval_minutes, created_at, updated_at)
+       VALUES (?, 'trending', ?, ?, 1, 1440, 1, 1)`,
+      forgeId,
+      topN,
+      windowDays,
+    ).lastInsertRowid;
+  }
+
+  it("asks for the top N created inside the window and creates a row for each", async () => {
+    const { forgeId } = seed();
+    const syncId = createTrending(forgeId, 7, 365);
+    const calls: { since: Date; limit: number; context: DiscoveryContext }[] = [];
+    const provider = trendingProvider([[repo("a/hot"), repo("b/warm")]], calls);
+
+    const result = await runAccountSyncDetailed(db, syncId, baseDeps(provider, { now: () => NOW }));
+
+    expect(result).toMatchObject({
+      discovered: 2,
+      created: 2,
+      vanished: 0,
+      removed: 0,
+      error: null,
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.limit).toBe(7);
+    expect(calls[0]?.since.getTime()).toBe(NOW - 365 * 24 * 60 * 60 * 1000);
+    expect(calls[0]?.context.visibility).toBe("all");
+    const rows = repoRows();
+    expect(rows.map((row) => row.path)).toEqual(["a/hot", "b/warm"]);
+    expect(rows.every((row) => row.managed_by_account_sync_id === syncId)).toBe(true);
+    expect(rows.every((row) => row.origin === "account_sync")).toBe(true);
+    // Daily, not the six-hourly default: 1440 minutes at the 0.5 jitter midpoint.
+    expect(result.accountSync.nextRunAt).toBe(NOW + 1440 * 60_000);
+  });
+
+  it("keeps everything that stopped trending and does not call it vanished", async () => {
+    const { forgeId } = seed();
+    const syncId = createTrending(forgeId);
+    const provider = trendingProvider([[repo("a/hot"), repo("b/warm")], [repo("c/new")], []]);
+    const deps = baseDeps(provider, { now: () => NOW });
+
+    await runAccountSyncDetailed(db, syncId, deps);
+    const second = await runAccountSyncDetailed(db, syncId, deps);
+    const third = await runAccountSyncDetailed(db, syncId, deps);
+
+    expect(second).toMatchObject({
+      discovered: 1,
+      created: 1,
+      vanished: 0,
+      removed: 0,
+      retained: 0,
+    });
+    expect(third).toMatchObject({ discovered: 0, created: 0, vanished: 0, removed: 0 });
+    expect(repoRows().map((row) => row.path)).toEqual(["a/hot", "b/warm", "c/new"]);
+    expect(deletions).toEqual([]);
+  });
+
+  it("runs with the forge default account's token, and anonymously without one", async () => {
+    const { forgeId, accountId } = seed();
+    const syncId = createTrending(forgeId);
+    const calls: { since: Date; limit: number; context: DiscoveryContext }[] = [];
+    const provider = trendingProvider([[repo("a/hot")]], calls);
+
+    await runAccountSyncDetailed(db, syncId, baseDeps(provider));
+    expect(calls[0]?.context).toMatchObject({ username: "octocat", token: null });
+
+    db.run("DELETE FROM accounts WHERE id = ?", accountId);
+    const result = await runAccountSyncDetailed(db, syncId, baseDeps(provider));
+    expect(result.error).toBeNull();
+    expect(calls[1]?.context).toMatchObject({ username: "", token: null });
+  });
+
+  it("records a clear error on a forge whose provider cannot list trending", async () => {
+    const { forgeId } = seed();
+    const syncId = createTrending(forgeId);
+
+    const result = await runAccountSyncDetailed(db, syncId, baseDeps(fakeProvider({})));
+
+    expect(result.error).toBe("Trending sync is GitHub-only for now");
+  });
+
+  it("reports trending support for GitHub only, in step with the shared list", () => {
+    for (const kind of ["github", "gitlab", "bitbucket", "gitea", "generic"]) {
+      expect(supportsTrendingSync(kind)).toBe(supportsTrendingSyncKind(kind));
+    }
+    expect(supportsTrendingSync("github")).toBe(true);
+    expect(supportsTrendingSync("gitlab")).toBe(false);
   });
 });

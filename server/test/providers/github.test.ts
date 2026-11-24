@@ -471,3 +471,88 @@ describe("githubProvider.listNamespaceRepos", () => {
     expect((failure as Error).message).toContain("user or organization named nobody-here");
   });
 });
+
+describe("githubProvider.listTrending", () => {
+  function trending(ctx: ReturnType<typeof ghContext>, since: string, limit: number) {
+    const list = githubProvider.listTrending;
+    if (list === undefined) {
+      throw new Error("the GitHub provider must implement listTrending");
+    }
+    return collect(list(ctx, { since: new Date(since), limit }));
+  }
+
+  it("searches for the most-starred repositories created since the given day", async () => {
+    let seenPath = "";
+    http
+      .pool(API)
+      .intercept({
+        path: (path) => {
+          seenPath = path;
+          return path.startsWith("/search/repositories");
+        },
+        method: "GET",
+      })
+      .reply(
+        200,
+        { total_count: 2, incomplete_results: false, items: [repo("a/hot"), repo("b/warm")] },
+        { headers: JSON_HEADERS },
+      );
+
+    const repos = await trending(ghContext(), "2026-11-20T15:04:05Z", 10);
+
+    expect(repos.map((r) => r.path)).toEqual(["a/hot", "b/warm"]);
+    const params = new URL(`${API}${seenPath}`).searchParams;
+    expect(params.get("q")).toBe("created:>=2026-11-20");
+    expect(params.get("sort")).toBe("stars");
+    expect(params.get("order")).toBe("desc");
+    expect(params.get("per_page")).toBe("10");
+  });
+
+  it("never asks for or yields more than one page of 100", async () => {
+    let seenPath = "";
+    const items = Array.from({ length: 120 }, (_, index) => repo(`o/r${String(index)}`));
+    http
+      .pool(API)
+      .intercept({
+        path: (path) => {
+          seenPath = path;
+          return path.startsWith("/search/repositories");
+        },
+        method: "GET",
+      })
+      .reply(200, { items }, { headers: JSON_HEADERS });
+
+    const repos = await trending(ghContext(), "2026-11-20T00:00:00Z", 5000);
+
+    expect(new URL(`${API}${seenPath}`).searchParams.get("per_page")).toBe("100");
+    expect(repos).toHaveLength(100);
+  });
+
+  it("rejects a search answer that has no item list", async () => {
+    http
+      .pool(API)
+      .intercept({ path: (path) => path.startsWith("/search/repositories"), method: "GET" })
+      .reply(200, { message: "nope" }, { headers: JSON_HEADERS });
+
+    await expect(trending(ghContext(), "2026-11-20T00:00:00Z", 10)).rejects.toMatchObject({
+      kind: "invalid_response",
+    });
+  });
+
+  it("surfaces the search rate limit as rate_limited", async () => {
+    http
+      .pool(API)
+      .intercept({ path: (path) => path.startsWith("/search/repositories"), method: "GET" })
+      .reply(
+        403,
+        { message: "API rate limit exceeded" },
+        { headers: { ...JSON_HEADERS, "x-ratelimit-remaining": "0" } },
+      );
+
+    const failure = await trending(ghContext(), "2026-11-20T00:00:00Z", 10).catch(
+      (cause: unknown) => cause,
+    );
+    expect(failure).toBeInstanceOf(ProviderError);
+    expect(failure).toMatchObject({ kind: "rate_limited" });
+  });
+});

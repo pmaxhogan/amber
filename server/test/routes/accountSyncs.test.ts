@@ -505,3 +505,103 @@ describe("POST /api/account-syncs, namespace", () => {
     });
   });
 });
+
+describe("/api/account-syncs, trending", () => {
+  async function post(payload: Record<string, unknown>) {
+    return app.inject({ method: "POST", url: "/api/account-syncs", payload });
+  }
+
+  it("creates a daily top-25 over 3 days by default, with no account", async () => {
+    const forgeId = seedForge("github", "github.com");
+
+    const response = await post({ source: "trending", forgeId });
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json<AccountSync>()).toMatchObject({
+      forgeId,
+      accountId: null,
+      source: "trending",
+      namespace: null,
+      topN: 25,
+      windowDays: 3,
+      intervalMinutes: 1440,
+      enabled: true,
+    });
+    expect(response.json<AccountSync>().nextRunAt).not.toBeNull();
+  });
+
+  it("allows one per window on a forge and answers 409 for a repeat", async () => {
+    const forgeId = seedForge("github", "github.com");
+
+    expect((await post({ source: "trending", forgeId })).statusCode).toBe(201);
+    const yearly = await post({ source: "trending", forgeId, topN: 10, windowDays: 365 });
+    expect(yearly.statusCode).toBe(201);
+    expect(yearly.json<AccountSync>()).toMatchObject({ topN: 10, windowDays: 365 });
+
+    const repeat = await post({ source: "trending", forgeId, topN: 50, windowDays: 365 });
+    expect(repeat.statusCode).toBe(409);
+    expect(repeat.json<{ error: string; message: string }>()).toMatchObject({
+      error: "account_sync_exists",
+    });
+    expect(repeat.json<{ message: string }>().message).toContain("365 days");
+  });
+
+  it("rejects it anywhere but GitHub, and rejects a visibility", async () => {
+    const gitlab = seedForge("gitlab", "gitlab.com");
+    const elsewhere = await post({ source: "trending", forgeId: gitlab });
+    expect(elsewhere.statusCode).toBe(400);
+    expect(elsewhere.json<{ error: string }>().error).toBe("unsupported_source");
+
+    const forgeId = seedForge("github", "github.com");
+    const visible = await post({ source: "trending", forgeId, visibility: "public" });
+    expect(visible.statusCode).toBe(400);
+    expect((await post({ source: "trending", forgeId: 9999 })).statusCode).toBe(404);
+    expect((await post({ source: "trending" })).statusCode).toBe(400);
+  });
+
+  it("keeps the six-hour default for every other source", async () => {
+    const forgeId = seedForge("github", "github.com");
+    const response = await post({ source: "namespace", forgeId, namespace: "nodejs" });
+    expect(response.json<AccountSync>()).toMatchObject({ intervalMinutes: 360, topN: null });
+  });
+
+  it("edits topN, and only on a trending sync", async () => {
+    const forgeId = seedForge("github", "github.com");
+    const created = (await post({ source: "trending", forgeId })).json<AccountSync>();
+    const other = (
+      await post({ source: "namespace", forgeId, namespace: "nodejs" })
+    ).json<AccountSync>();
+
+    const patched = await app.inject({
+      method: "PATCH",
+      url: `/api/account-syncs/${String(created.id)}`,
+      payload: { topN: 100, intervalMinutes: 720, windowDays: 30 },
+    });
+    expect(patched.statusCode).toBe(200);
+    // windowDays identifies the sync and is stripped, like namespace.
+    expect(patched.json<AccountSync>()).toMatchObject({
+      topN: 100,
+      windowDays: 3,
+      intervalMinutes: 720,
+    });
+
+    const visibility = await app.inject({
+      method: "PATCH",
+      url: `/api/account-syncs/${String(created.id)}`,
+      payload: { visibility: "public" },
+    });
+    expect(visibility.statusCode).toBe(400);
+    const wrongSource = await app.inject({
+      method: "PATCH",
+      url: `/api/account-syncs/${String(other.id)}`,
+      payload: { topN: 5 },
+    });
+    expect(wrongSource.statusCode).toBe(400);
+    const tooMany = await app.inject({
+      method: "PATCH",
+      url: `/api/account-syncs/${String(created.id)}`,
+      payload: { topN: 101 },
+    });
+    expect(tooMany.statusCode).toBe(400);
+  });
+});
