@@ -13,6 +13,7 @@ import type {
   SyncRun,
   UpdateRepo,
 } from "@amber/shared";
+import { parseImportLine } from "@amber/shared";
 import type { Db } from "../db/db.ts";
 import { conflict, invalid, isUniqueViolation, notFound } from "./errors.ts";
 import { requireForge } from "./forges.ts";
@@ -244,14 +245,66 @@ function likePattern(term: string): string {
   return `%${term.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
 }
 
+/**
+ * What a pasted repository URL names, when the search term is one. People
+ * paste whatever is in the address bar or their clipboard, so this is far
+ * more forgiving than import: any scheme (ssh:// and git:// included), scp
+ * syntax (`git@host:owner/repo`), a `user@` prefix, a trailing `.git` or
+ * slash, a query string or fragment, and extra page segments such as
+ * `/tree/main` all reduce to a host and a path. Null when the term does not
+ * look like a URL at all, so plain words keep the plain substring search.
+ */
+export function parseSearchUrl(term: string): { host: string; path: string } | null {
+  let value = term.trim().replace(/[?#].*$/, "");
+  const scp = /^[A-Za-z0-9._-]+@([^:/\s]+):(?!\d+(?:\/|$))(.+)$/.exec(value);
+  if (scp !== null) {
+    value = `https://${scp[1] ?? ""}/${scp[2] ?? ""}`;
+  }
+  value = value.replace(/^(?:ssh|git|git\+ssh):\/\//i, "https://");
+  // Who it was fetched as does not identify the repo, and a password must
+  // never get as far as a parser that would echo it back in an error.
+  value = value.replace(/^((?:[a-zA-Z][a-zA-Z0-9+.-]*:\/\/)?)[^/@]*@/, "$1");
+  const hadScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(value);
+  const parsed = parseImportLine(value)?.parsed;
+  if (parsed === undefined) {
+    return null;
+  }
+  // Without a scheme, "nodejs/node" parses as host "nodejs"; only a dotted
+  // name (or localhost) is really a host.
+  if (!hadScheme && !parsed.host.includes(".") && parsed.host !== "localhost") {
+    return null;
+  }
+  return { host: parsed.host, path: parsed.path };
+}
+
 export function listRepos(db: Db, query: RepoListQuery): Page<Repo> {
   const where: string[] = [];
   const params: (string | number)[] = [];
 
   if (query.q !== undefined && query.q.trim() !== "") {
     const pattern = likePattern(query.q.trim());
-    where.push(`(repos.path LIKE ? ESCAPE '\\' OR repos.display_name LIKE ? ESCAPE '\\')`);
-    params.push(pattern, pattern);
+    const url = parseSearchUrl(query.q);
+    if (url === null) {
+      where.push(`(repos.path LIKE ? ESCAPE '\\' OR repos.display_name LIKE ? ESCAPE '\\')`);
+      params.push(pattern, pattern);
+    } else {
+      // A pasted URL: the repo on that host whose path it names, everything
+      // under it when it names an owner (github.com/nodejs), or the repo a
+      // deeper page belongs to (github.com/nodejs/node/tree/main). The plain
+      // substring match stays so an odd path that happens to parse still hits.
+      where.push(
+        `(repos.path LIKE ? ESCAPE '\\' OR repos.display_name LIKE ? ESCAPE '\\' OR (
+            repos.forge_id IN (SELECT id FROM forges WHERE host = ?)
+            AND (
+              repos.path = ? COLLATE NOCASE
+              OR repos.path LIKE ? ESCAPE '\\'
+              OR substr(?, 1, length(repos.path) + 1) = repos.path || '/' COLLATE NOCASE
+            )
+          ))`,
+      );
+      const under = `${url.path.replace(/[\\%_]/g, (char) => `\\${char}`)}/%`;
+      params.push(pattern, pattern, url.host, url.path, under, url.path);
+    }
   }
   if (query.forgeId !== undefined) {
     where.push("repos.forge_id = ?");

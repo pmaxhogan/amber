@@ -17,6 +17,7 @@ import {
   getRepoBySlug,
   isSafeSlug,
   listRepos,
+  parseSearchUrl,
   listSyncRuns,
   normalizeRepoPath,
   requestSyncNow,
@@ -329,6 +330,58 @@ describe("listRepos", () => {
     expect(desc[0]?.path).toBe("facebook/react");
     const asc = listRepos(db, query({ sort: "last_seen_at", dir: "asc" })).rows;
     expect(asc.map((repo) => repo.lastSeenAt)).toEqual([1_000, 3_000, null, null]);
+  });
+
+  it("finds a repo from its pasted URL, in every shape a URL gets pasted in", () => {
+    const shapes = [
+      "https://github.com/nodejs/node",
+      "http://github.com/nodejs/node",
+      "github.com/nodejs/node",
+      "github.com/nodejs/node/",
+      "https://github.com/nodejs/node.git",
+      "https://pmaxhogan@github.com/nodejs/node",
+      "pmaxhogan@github.com/nodejs/node.git",
+      "https://user:secret@github.com/nodejs/node",
+      "git@github.com:nodejs/node.git",
+      "ssh://git@github.com/nodejs/node.git",
+      "git://github.com/nodejs/node",
+      "https://GitHub.com/NodeJS/Node",
+      "https://github.com/nodejs/node/tree/main/lib",
+      "https://github.com/nodejs/node/issues?q=is%3Aopen#top",
+      "  https://github.com/nodejs/node  ",
+    ];
+    for (const q of shapes) {
+      const page = listRepos(db, query({ q }));
+      expect(
+        page.rows.map((repo) => repo.path),
+        q,
+      ).toEqual(["nodejs/node"]);
+    }
+  });
+
+  it("keeps a pasted URL to its own forge, and lists an owner's repos from a profile URL", () => {
+    createRepo(db, { forgeId: otherForgeId, path: "nodejs/node" });
+    make("nodejs/undici");
+
+    const onGitlab = listRepos(db, query({ q: "https://gitlab.com/nodejs/node" }));
+    expect(onGitlab.rows.map((repo) => repo.forgeId)).toEqual([otherForgeId]);
+    expect(listRepos(db, query({ q: "https://github.com/nodejs/node" })).total).toBe(1);
+    expect(listRepos(db, query({ q: "https://github.com/nodejs" })).total).toBe(2);
+    expect(listRepos(db, query({ q: "https://github.com/nodejs/nope" })).total).toBe(0);
+    expect(listRepos(db, query({ q: "https://example.com/nodejs/node" })).total).toBe(0);
+  });
+
+  it("only treats a term as a URL when it names a host", () => {
+    expect(parseSearchUrl("nodejs/node")).toBeNull();
+    expect(parseSearchUrl("node")).toBeNull();
+    expect(parseSearchUrl("100%")).toBeNull();
+    expect(parseSearchUrl("github.com/nodejs/node.git")).toEqual({
+      host: "github.com",
+      path: "nodejs/node",
+    });
+    expect(parseSearchUrl("git@host.example:8022/x/y")?.host).toBe("host.example");
+    // A plain owner/repo term is still the substring search it always was.
+    expect(listRepos(db, query({ q: "nodejs/node" })).total).toBe(1);
   });
 
   it("filters by a case insensitive substring of path or display name", () => {

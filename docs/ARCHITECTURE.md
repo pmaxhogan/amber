@@ -436,7 +436,11 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
     `POST /api/import` (commit; returns created/updated/failed per line)
   - `GET /api/repos` - server-side pagination
     (`page`, `perPage<=200`, `sort`, `dir`, `q`, `forgeId`, `state`, `outcome`),
-    returns rows + total. Each row is DENORMALIZED with four read-only extras
+    returns rows + total. `q` is a case-insensitive substring of the path or
+    display name; when it is a pasted repository URL (any scheme, scp syntax,
+    a `user@` prefix, `.git`, a trailing slash, a query string, or a deeper
+    page such as `/tree/main`) it also matches by forge host plus path, so
+    the URL finds its repo and an owner URL lists that owner's repos. Each row is DENORMALIZED with four read-only extras
     the listing renders and `repos` does not store: `cloneMode` and
     `syncEnabled` (layered settings, batch-resolved for the whole page in one
     pass per scope) plus `lastOutcome` and `lastErrorKind` (from the newest
