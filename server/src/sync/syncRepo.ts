@@ -2,8 +2,6 @@ import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  GONE_AFTER_FAILURES,
-  GONE_ERROR_KINDS,
   type AmberEventType,
   type CloneMode,
   type ResolvedSettings,
@@ -17,7 +15,12 @@ import { getCredential, markAccountUsed } from "../domain/accounts.ts";
 import { resolveSettings } from "../domain/settings.ts";
 import { isPlausibleRef } from "../gitRef.ts";
 import { createConsoleLogger } from "../logging.ts";
-import { backoffDelayMs, jitteredIntervalMs, RATE_LIMIT_BACKOFF_FACTOR } from "./backoff.ts";
+import {
+  backoffDelayMs,
+  goneRecheckCapMs,
+  jitteredIntervalMs,
+  RATE_LIMIT_BACKOFF_FACTOR,
+} from "./backoff.ts";
 import { directorySizeBytes } from "./diskUsage.ts";
 import {
   classifyGitFailure,
@@ -27,6 +30,7 @@ import {
   scrubCredentials,
   type GitRunOptions,
 } from "./gitCli.ts";
+import { judgeGone } from "./gone.ts";
 import {
   applyRunToRepo,
   enforceRunRetention,
@@ -34,6 +38,7 @@ import {
   loadSyncTarget,
   resolveRepoAccount,
   startSyncRun,
+  unreachableSince,
   type RepoAccount,
   type SyncForgeRow,
   type SyncTarget,
@@ -257,23 +262,35 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
   const finishedAt = now();
   const intervalMs = settings.sync_interval_minutes * 60_000;
   const consecutiveFailures = outcome === "success" ? 0 : target.repo.consecutiveFailures + 1;
+
+  // Gone: it synced before, and the forge has kept saying it is not there for
+  // hours (or said outright that it was taken down). sync/gone.ts owns the rule.
+  const goneReason =
+    outcome === "success"
+      ? null
+      : judgeGone({
+          errorKind,
+          error,
+          forgeKind: target.forge.kind,
+          lastSuccessAt: target.repo.lastSuccessAt,
+          goneAt: target.repo.goneAt,
+          consecutiveFailures,
+          unreachableSince: unreachableSince(db, repoId, runId) ?? startedAt,
+          now: finishedAt,
+        });
+  const becameGone = goneReason !== null;
+  const goneSince = becameGone ? finishedAt : target.repo.goneAt;
+
   const nextSyncAt =
     outcome === "success"
       ? finishedAt + jitteredIntervalMs(intervalMs, random)
       : finishedAt +
-        backoffDelayMs(consecutiveFailures, intervalMs, random) *
+        backoffDelayMs(
+          consecutiveFailures,
+          goneRecheckCapMs(intervalMs, goneSince, finishedAt),
+          random,
+        ) *
           (errorKind === "rate_limited" ? RATE_LIMIT_BACKOFF_FACTOR : 1);
-
-  // Gone: it synced before, and now the forge keeps saying it is not there
-  // (or not ours to read, which is what a deleted or newly private repository
-  // looks like to an anonymous fetch). One such answer can be a blip, so it
-  // takes GONE_AFTER_FAILURES failures in a row, the latest of them this kind.
-  const becameGone =
-    errorKind !== null &&
-    (GONE_ERROR_KINDS as readonly string[]).includes(errorKind) &&
-    target.repo.lastSuccessAt !== null &&
-    target.repo.goneAt === null &&
-    consecutiveFailures >= GONE_AFTER_FAILURES;
 
   const run = db.tx(() => {
     const finished = finishSyncRun(db, runId, {
@@ -314,7 +331,7 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
   });
   if (becameGone) {
     log.warn(
-      { runId, errorKind, path: target.repo.path, host: target.forge.host },
+      { runId, errorKind, reason: goneReason, path: target.repo.path, host: target.forge.host },
       "repository is gone upstream, keeping the backup",
     );
     deps.events?.publish("repo.gone", {
@@ -323,6 +340,7 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
       path: target.repo.path,
       host: target.forge.host,
       errorKind,
+      reason: goneReason,
     });
   } else if (outcome === "success" && target.repo.goneAt !== null) {
     log.info({ runId, path: target.repo.path }, "repository is reachable upstream again");

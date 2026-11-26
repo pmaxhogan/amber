@@ -229,6 +229,32 @@ export function startSyncRun(db: Db, repoId: number, startedAt: number): number 
   ).lastInsertRowid;
 }
 
+/**
+ * When the unbroken run of not-found or access-denied failures leading up to
+ * `beforeRunId` began, or null when the run before it was anything else (a
+ * success, another kind of failure, or nothing at all).
+ *
+ * Read from sync_runs rather than kept on the repo row: error rows are
+ * retained for 30 days, far longer than the window this feeds.
+ */
+export function unreachableSince(db: Db, repoId: number, beforeRunId: number): number | null {
+  return (
+    db.get<{ at: number | null }>(
+      `SELECT MIN(started_at) AS at FROM sync_runs
+        WHERE repo_id = ? AND id < ?
+          AND id > COALESCE((
+            SELECT MAX(id) FROM sync_runs
+             WHERE repo_id = ? AND id < ?
+               AND NOT (outcome = 'error' AND COALESCE(error_kind, '') IN ('not_found', 'auth'))
+          ), 0)`,
+      repoId,
+      beforeRunId,
+      repoId,
+      beforeRunId,
+    )?.at ?? null
+  );
+}
+
 export interface FinishRunPatch {
   finishedAt: number;
   outcome: SyncRun["outcome"];

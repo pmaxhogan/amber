@@ -71,8 +71,62 @@ describe("Removed list", () => {
     expect(rows[0]?.text()).toContain("github.com");
     expect(rows[0]?.text()).toContain("not found");
     expect(rows[1]?.text()).toContain("not found or private");
-    expect(rows[0]?.find("a").attributes("href")).toBe("https://github.com/acme/taken-down");
-    expect(rows[0]?.find("a").attributes("rel")).toContain("noopener");
+    const upstream = rows[0]?.find(".removed-actions a");
+    expect(upstream?.attributes("href")).toBe("https://github.com/acme/taken-down");
+    expect(upstream?.attributes("rel")).toContain("noopener");
+  });
+
+  it("names a GitHub DMCA takedown and links the notice", async () => {
+    const takenDown = makeRepo({
+      id: 6,
+      path: "realdody/Leonida",
+      goneAt: 1_700_000_600_000,
+      lastErrorKind: "auth",
+      lastOutcome: "error",
+      lastError:
+        "git fetch failed (128): remote: Repository unavailable due to DMCA takedown.\n" +
+        "remote: See the takedown notice for more details:\n" +
+        "remote:   https://github.com/github/dmca/blob/master/2026/11/2026-11-24-take-two.md.\n" +
+        "fatal: unable to access 'https://github.com/realdody/Leonida.git/': The requested URL returned error: 403",
+    });
+    const { wrapper } = await mountPage(buildApi([takenDown, ...GONE]));
+    const rows = wrapper.findAll("tbody tr");
+
+    expect(rows[0]?.text()).toContain("DMCA takedown");
+    expect(rows[0]?.text()).not.toContain("not found");
+    const notice = rows[0]?.find("a.removed-notice");
+    expect(notice?.attributes("href")).toBe(
+      "https://github.com/github/dmca/blob/master/2026/11/2026-11-24-take-two.md",
+    );
+    expect(notice?.attributes("rel")).toContain("noopener");
+    // The others keep what the forge said about them.
+    expect(rows[1]?.text()).not.toContain("DMCA");
+    expect(rows[1]?.find("a.removed-notice").exists()).toBe(false);
+  });
+
+  it("does not read a takedown into the same words from another forge", async () => {
+    const elsewhere = makeForge({ id: 2, host: "git.example", kind: "generic" });
+    const repo = makeRepo({
+      id: 7,
+      forgeId: 2,
+      path: "a/b",
+      goneAt: 1_700_000_600_000,
+      lastErrorKind: "auth",
+      lastOutcome: "error",
+      lastError: "remote: Repository unavailable due to DMCA takedown.",
+    });
+    const api = buildApi([repo], { listForges: vi.fn().mockResolvedValue([GITHUB, elsewhere]) });
+    const { wrapper } = await mountPage(api);
+
+    expect(wrapper.find("tbody tr").text()).toContain("not found or private");
+    expect(wrapper.find("tbody tr").text()).not.toContain("DMCA");
+  });
+
+  it("shows when each one was last checked", async () => {
+    const { wrapper } = await mountPage();
+    const headers = wrapper.findAll("thead th").map((th) => th.text());
+    expect(headers).toContain("Last checked");
+    expect(wrapper.find("tbody tr td.removed-checked").attributes("title")).toBeTruthy();
   });
 
   it("says so when nothing has been removed", async () => {

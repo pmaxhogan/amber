@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  GONE_CONFIRM_MS,
   MAX_PER_PAGE,
   bulkRepoRequestSchema,
   createAccountSchema,
   createForgeSchema,
+  dmcaTakedown,
   forgeSchema,
   healthSchema,
   pageSchema,
@@ -225,5 +227,43 @@ describe("namespace syncs", () => {
   it("lists GitHub as the only namespace-capable kind for now", () => {
     expect(supportsNamespaceSyncKind("github")).toBe(true);
     expect(supportsNamespaceSyncKind("gitlab")).toBe(false);
+  });
+});
+
+describe("gone repositories", () => {
+  const LEONIDA =
+    "git fetch failed (128): remote: Repository unavailable due to DMCA takedown.\n" +
+    "remote: See the takedown notice for more details:\n" +
+    "remote:   https://github.com/github/dmca/blob/master/2026/11/2026-11-24-take-two.md.\n" +
+    "fatal: unable to access 'https://github.com/realdody/Leonida.git/': The requested URL returned error: 403";
+
+  it("waits hours, not minutes, before a not-found repository counts as gone", () => {
+    expect(GONE_CONFIRM_MS).toBeGreaterThanOrEqual(60 * 60 * 1000);
+  });
+
+  it("reads a GitHub DMCA takedown, and the notice it links, out of git's error", () => {
+    expect(dmcaTakedown("github", LEONIDA)).toEqual({
+      noticeUrl: "https://github.com/github/dmca/blob/master/2026/11/2026-11-24-take-two.md",
+    });
+  });
+
+  it("still reads the takedown when the notice link is missing or points elsewhere", () => {
+    expect(dmcaTakedown("github", "remote: Repository unavailable due to DMCA takedown.")).toEqual({
+      noticeUrl: null,
+    });
+    expect(
+      dmcaTakedown(
+        "github",
+        "remote: Repository unavailable due to DMCA takedown.\nremote:   https://evil.example/github/dmca/x.md",
+      ),
+    ).toEqual({ noticeUrl: null });
+  });
+
+  it("is a GitHub-only status: other forges and other errors are not takedowns", () => {
+    expect(dmcaTakedown("gitlab", LEONIDA)).toBeNull();
+    expect(dmcaTakedown("generic", LEONIDA)).toBeNull();
+    expect(dmcaTakedown(undefined, LEONIDA)).toBeNull();
+    expect(dmcaTakedown("github", "remote: Repository not found.")).toBeNull();
+    expect(dmcaTakedown("github", null)).toBeNull();
   });
 });

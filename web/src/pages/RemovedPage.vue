@@ -2,7 +2,7 @@
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from "vue";
 import Button from "primevue/button";
 import Tag from "primevue/tag";
-import type { Account, Forge } from "@amber/shared";
+import { dmcaTakedown, type Account, type Forge } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
 import type { RepoRow } from "../api/types.ts";
@@ -43,11 +43,23 @@ function hostOf(repo: RepoRow): string {
   return forgeById.value.get(repo.forgeId)?.host ?? "";
 }
 
+interface Reason {
+  label: string;
+  severity: string;
+  /** The published takedown notice, when the forge linked one. */
+  noticeUrl: string | null;
+}
+
 /** Why amber thinks it is gone, in the words of what the forge answered. */
-function reason(repo: RepoRow): { label: string; severity: string } {
+function reason(repo: RepoRow): Reason {
+  // GitHub is the one forge that says a repository was taken down, and why.
+  const takedown = dmcaTakedown(forgeById.value.get(repo.forgeId)?.kind, repo.lastError);
+  if (takedown !== null) {
+    return { label: "DMCA takedown", severity: "danger", noticeUrl: takedown.noticeUrl };
+  }
   return repo.lastErrorKind === "auth"
-    ? { label: "not found or private", severity: "warn" }
-    : { label: "not found", severity: "danger" };
+    ? { label: "not found or private", severity: "warn", noticeUrl: null }
+    : { label: "not found", severity: "danger", noticeUrl: null };
 }
 
 async function load(quiet = false): Promise<void> {
@@ -185,7 +197,7 @@ onBeforeUnmount(() => {
   <section>
     <PageHeader
       title="Removed"
-      description="Repositories that synced at least once and can no longer be fetched upstream: deleted, taken down, or made private. Amber keeps every backup and keeps checking."
+      description="Repositories that synced at least once and have not been fetchable upstream for hours: deleted, taken down, or made private. Amber keeps every backup and keeps checking, so one that comes back leaves this list."
     />
 
     <div class="amber-card removed-push">
@@ -222,7 +234,7 @@ onBeforeUnmount(() => {
       v-else-if="repos.length === 0 && error === null"
       icon="check"
       title="Nothing has been removed"
-      description="Every repository that has synced is still reachable upstream. When one stops answering twice in a row, it shows up here and its backup is kept."
+      description="Every repository that has synced is still reachable upstream. When one stays unreachable for six hours, or GitHub says it was taken down, it shows up here and its backup is kept."
     />
 
     <div v-else-if="repos.length > 0" class="amber-card removed-table-wrap">
@@ -231,6 +243,7 @@ onBeforeUnmount(() => {
           <tr>
             <th scope="col">Repository</th>
             <th scope="col">Gone since</th>
+            <th scope="col">Last checked</th>
             <th scope="col">Last good sync</th>
             <th scope="col">Backup size</th>
             <th scope="col">Forge said</th>
@@ -246,11 +259,25 @@ onBeforeUnmount(() => {
               <div class="amber-muted removed-host">{{ hostOf(repo) }}</div>
             </td>
             <td :title="absoluteTime(repo.goneAt)">{{ relativeTime(repo.goneAt) }}</td>
+            <td class="removed-checked" :title="absoluteTime(repo.lastSyncAt)">
+              {{ relativeTime(repo.lastSyncAt) }}
+            </td>
             <td :title="absoluteTime(repo.lastSuccessAt)">
               {{ relativeTime(repo.lastSuccessAt) }}
             </td>
             <td>{{ humanBytes(repo.diskUsageBytes) }}</td>
-            <td><Tag :value="reason(repo).label" :severity="reason(repo).severity" /></td>
+            <td>
+              <Tag :value="reason(repo).label" :severity="reason(repo).severity" />
+              <a
+                v-if="reason(repo).noticeUrl"
+                class="removed-notice"
+                :href="reason(repo).noticeUrl ?? undefined"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                notice <AppIcon name="external" :size="13" />
+              </a>
+            </td>
             <td class="removed-actions">
               <a :href="upstreamUrl(repo)" target="_blank" rel="noopener noreferrer">
                 upstream <AppIcon name="external" :size="13" />
@@ -354,7 +381,12 @@ onBeforeUnmount(() => {
   font-size: 0.78rem;
 }
 
-.removed-actions a {
+.removed-notice {
+  margin-left: 0.5rem;
+}
+
+.removed-actions a,
+.removed-notice {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
@@ -362,7 +394,8 @@ onBeforeUnmount(() => {
   text-decoration: none;
 }
 
-.removed-actions a:hover {
+.removed-actions a:hover,
+.removed-notice:hover {
   color: var(--p-text-color);
 }
 

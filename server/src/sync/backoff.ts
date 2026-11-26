@@ -35,3 +35,24 @@ export function jitteredIntervalMs(intervalMs: number, random: () => number = Ma
   const spread = intervalMs * JITTER_FRACTION;
   return Math.max(1, Math.round(intervalMs - spread + random() * spread * 2));
 }
+
+/** A freshly gone repository is looked at again at least this often. */
+export const GONE_RECHECK_MS = 60 * 60_000;
+/** How long after going gone a repository keeps that closer watch. */
+export const GONE_RECHECK_WINDOW_MS = 7 * 24 * 60 * 60_000;
+
+/**
+ * The ceiling a failing repository's backoff is capped at.
+ *
+ * Normally that is its own sync interval. A repository that went gone in the
+ * last week is checked at least hourly instead: forges bring repositories
+ * back, and one that is reachable again must not sit on the Removed page until
+ * a three hour interval comes round. After a week it is as gone as it will
+ * get, and it returns to its interval.
+ */
+export function goneRecheckCapMs(intervalMs: number, goneAt: number | null, now: number): number {
+  if (goneAt === null || now - goneAt >= GONE_RECHECK_WINDOW_MS) {
+    return intervalMs;
+  }
+  return Math.min(intervalMs, GONE_RECHECK_MS);
+}

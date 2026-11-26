@@ -15,7 +15,8 @@ import type { Db } from "../db/db.ts";
  *
  * Gone repositories are batched for a short window before anything is sent. A
  * token that expires makes every private repository on that forge look gone
- * within minutes of each other, and that is one notification, not two hundred.
+ * one after another, and those that cross the line together are one
+ * notification, not two hundred.
  */
 
 export const KV_VAPID_PUBLIC = "push.vapid_public";
@@ -58,6 +59,8 @@ interface SubscriptionRow extends StoredSubscription {
 interface GoneRepo {
   path: string;
   host: string;
+  /** A GoneReason off the repo.gone event; absent on older or partial payloads. */
+  reason?: string;
 }
 
 function readKv(db: Db, key: string): string | undefined {
@@ -182,6 +185,14 @@ function statusOf(cause: unknown): number | null {
 /** What a batch of gone repositories says on a lock screen. */
 export function goneNotification(repos: readonly GoneRepo[]): PushPayload {
   const names = repos.map((repo) => `${repo.host}/${repo.path}`);
+  if (names.length === 1 && repos[0]?.reason === "dmca_takedown") {
+    return {
+      title: "A repository was taken down",
+      body: `${names[0] ?? ""} was removed by a DMCA takedown. Amber is keeping its backup.`,
+      url: "/removed",
+      tag: "amber-gone",
+    };
+  }
   if (names.length === 1) {
     return {
       title: "A repository is gone upstream",
@@ -318,11 +329,11 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
       if (event.type !== "repo.gone") {
         return;
       }
-      const { path, host } = event.payload;
+      const { path, host, reason } = event.payload;
       if (typeof path !== "string" || typeof host !== "string") {
         return;
       }
-      pending.push({ path, host });
+      pending.push({ path, host, reason: typeof reason === "string" ? reason : undefined });
       if (timer === null) {
         timer = setTimeout(() => {
           timer = null;

@@ -187,8 +187,9 @@ export const repoSchema = z.object({
   lastSeenAt: epochMsSchema.nullable(),
   /**
    * When a repository that had synced at least once was judged gone upstream:
-   * GONE_AFTER_FAILURES fetches in a row answered "not found" or "access
-   * denied". Null while it is reachable; a later success clears it.
+   * its fetches answered "not found" or "access denied" for GONE_CONFIRM_MS
+   * on end, or GitHub said it was taken down. Null while it is reachable; a
+   * later success clears it.
    */
   goneAt: epochMsSchema.nullable(),
   lastError: z.string().nullable(),
@@ -224,10 +225,52 @@ export interface RepoListExtras {
   lastErrorKind?: SyncErrorKind;
 }
 
-/** How many not-found or access-denied fetches in a row make a repository gone. */
+/** The fewest not-found or access-denied fetches in a row a gone repository needs. */
 export const GONE_AFTER_FAILURES = 2;
+/**
+ * How long those answers have to keep coming before the repository is gone.
+ *
+ * A count alone is not enough: the retry after a first failure comes a minute
+ * or two later, so two in a row only ever proved two minutes. Forges hide
+ * public repositories for hours and then bring them back (measured on GitHub,
+ * 2026-11: 1.2h and 2.2h), and a repository that is back by the next look was
+ * never removed.
+ */
+export const GONE_CONFIRM_MS = 6 * 60 * 60 * 1000;
 /** The failure kinds that mean "the repository is not there for us any more". */
 export const GONE_ERROR_KINDS = ["not_found", "auth"] as const;
+
+/** Why a repository is gone: what the forge answered, or a takedown it named. */
+export const GONE_REASONS = ["dmca_takedown", ...GONE_ERROR_KINDS] as const;
+export type GoneReason = (typeof GONE_REASONS)[number];
+
+export interface TakedownNotice {
+  /** The notice GitHub published for the takedown, when its answer linked one. */
+  noticeUrl: string | null;
+}
+
+const DMCA_TAKEDOWN = /repository unavailable due to dmca takedown/i;
+/** GitHub publishes every notice in github/dmca; nothing else is worth linking. */
+const DMCA_NOTICE_URL = /https:\/\/github\.com\/github\/dmca\/[^\s"'<>]+/;
+
+/**
+ * Whether a failed fetch says GitHub disabled the repository over a DMCA
+ * takedown, read from what git printed (`repos.last_error`, `sync_runs.error`).
+ *
+ * GitHub only: it is the one forge that answers a fetch this way, and the
+ * words are the forge's to choose, so another forge saying them proves
+ * nothing. Null for every other forge kind and every other error.
+ */
+export function dmcaTakedown(
+  forgeKind: string | null | undefined,
+  error: string | null | undefined,
+): TakedownNotice | null {
+  if (forgeKind !== "github" || typeof error !== "string" || !DMCA_TAKEDOWN.test(error)) {
+    return null;
+  }
+  const url = DMCA_NOTICE_URL.exec(error)?.[0].replace(/[.,;:)]+$/, "");
+  return { noticeUrl: url ?? null };
+}
 
 export const REPO_SORT_FIELDS = [
   "display_name",

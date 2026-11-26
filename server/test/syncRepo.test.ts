@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { AmberEventType } from "@amber/shared";
+import { GONE_CONFIRM_MS, type AmberEventType } from "@amber/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db/db.ts";
 import { createAccount, getAccount } from "../src/domain/accounts.ts";
@@ -431,41 +431,80 @@ describe("gone upstream", () => {
     return events.filter((event) => event.type === "repo.gone").map((event) => event.payload);
   }
   const missing = (): string => `${origin.url}-does-not-exist`;
+  const T0 = 5_000_000_000_000;
+  const HOUR = 60 * 60 * 1000;
+  /** One not-found answer at a chosen moment. */
+  const failAt = (at: number): ReturnType<typeof sync> =>
+    sync({}, { remoteUrl: missing(), now: () => at });
+  /** Not found for the whole confirmation window: gone at T0 + GONE_CONFIRM_MS. */
+  async function goGone(from = T0): Promise<number> {
+    await failAt(from);
+    await failAt(from + GONE_CONFIRM_MS);
+    return from + GONE_CONFIRM_MS;
+  }
 
-  it("marks a repo gone on the second not-found in a row after it had synced", async () => {
+  it("does not call a repo gone over an outage of a few hours", async () => {
     await sync();
-    const first = await sync({}, { remoteUrl: missing() });
+    const first = await failAt(T0);
     expect(first.errorKind).toBe("not_found");
+    await failAt(T0 + 2 * 60_000);
+    await failAt(T0 + HOUR);
+    await failAt(T0 + GONE_CONFIRM_MS - 1);
+
     expect(goneAt()).toBeNull();
     expect(goneEvents()).toEqual([]);
 
-    await sync({}, { remoteUrl: missing(), now: () => 5_000_000_000_000 });
+    await sync();
+    expect(goneAt()).toBeNull();
+    expect(goneEvents()).toEqual([]);
+  });
 
-    expect(goneAt()).toBe(5_000_000_000_000);
+  it("marks a repo gone once not-found has lasted the confirmation window", async () => {
+    await sync();
+    await failAt(T0);
+    await failAt(T0 + HOUR);
+    expect(goneAt()).toBeNull();
+
+    await failAt(T0 + GONE_CONFIRM_MS);
+
+    expect(goneAt()).toBe(T0 + GONE_CONFIRM_MS);
     expect(goneEvents()).toEqual([
       expect.objectContaining({
         repoId,
         path: "acme/widgets",
         host: "origin.test",
         errorKind: "not_found",
+        reason: "not_found",
       }),
     ]);
   });
 
+  it("measures the window from the first answer since the last good sync", async () => {
+    await sync();
+    await failAt(T0);
+    await failAt(T0 + GONE_CONFIRM_MS - HOUR);
+    await sync();
+    // The clock starts over: these two are only an hour apart.
+    await failAt(T0 + GONE_CONFIRM_MS);
+    await failAt(T0 + GONE_CONFIRM_MS + HOUR);
+
+    expect(goneAt()).toBeNull();
+  });
+
   it("says it once: later failures keep the first gone time and stay quiet", async () => {
     await sync();
-    await sync({}, { remoteUrl: missing() });
-    await sync({}, { remoteUrl: missing(), now: () => 5_000_000_000_000 });
-    await sync({}, { remoteUrl: missing(), now: () => 6_000_000_000_000 });
+    const at = await goGone();
+    await failAt(at + HOUR);
+    await failAt(at + 30 * HOUR);
 
-    expect(goneAt()).toBe(5_000_000_000_000);
+    expect(goneAt()).toBe(at);
     expect(goneEvents()).toHaveLength(1);
   });
 
   it("never calls a repo gone that has not synced even once", async () => {
-    await sync({}, { remoteUrl: missing() });
-    await sync({}, { remoteUrl: missing() });
-    await sync({}, { remoteUrl: missing() });
+    await failAt(T0);
+    await failAt(T0 + GONE_CONFIRM_MS);
+    await failAt(T0 + 2 * GONE_CONFIRM_MS);
 
     expect(goneAt()).toBeNull();
     expect(goneEvents()).toEqual([]);
@@ -473,26 +512,41 @@ describe("gone upstream", () => {
 
   it("clears gone when the repo answers again, and can go gone a second time", async () => {
     await sync();
-    await sync({}, { remoteUrl: missing() });
-    await sync({}, { remoteUrl: missing() });
-    expect(goneAt()).not.toBeNull();
+    const at = await goGone();
+    expect(goneAt()).toBe(at);
 
     await sync();
     expect(goneAt()).toBeNull();
 
-    await sync({}, { remoteUrl: missing() });
-    await sync({}, { remoteUrl: missing() });
+    await goGone(at + HOUR);
     expect(goneAt()).not.toBeNull();
     expect(goneEvents()).toHaveLength(2);
   });
 
   it("keeps the backup of a gone repo on disk", async () => {
     await sync();
-    await sync({}, { remoteUrl: missing() });
-    await sync({}, { remoteUrl: missing() });
+    await goGone();
 
+    expect(goneAt()).not.toBeNull();
     expect(existsSync(backupPath())).toBe(true);
     expect((await backupGit(["rev-parse", "refs/heads/main"])).trim()).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("looks at a freshly gone repo again within the hour, whatever its interval", async () => {
+    await sync();
+    const at = await goGone();
+    // Deep in backoff, on a daily interval: the next look would be a day out.
+    db.run("UPDATE repos SET consecutive_failures = 20 WHERE id = ?", repoId);
+    await sync(
+      { sync_interval_minutes: 24 * 60 },
+      { remoteUrl: missing(), now: () => at + HOUR, random: () => 0.5 },
+    );
+
+    const next = db.get<{ next_sync_at: number }>(
+      "SELECT next_sync_at FROM repos WHERE id = ?",
+      repoId,
+    )?.next_sync_at;
+    expect(next).toBe(at + HOUR + HOUR);
   });
 });
 

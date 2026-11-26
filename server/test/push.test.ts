@@ -97,6 +97,17 @@ describe("goneNotification", () => {
     });
   });
 
+  it("says so when the one repository was taken down by a DMCA notice", () => {
+    expect(
+      goneNotification([{ host: "github.com", path: "a/b", reason: "dmca_takedown" }]),
+    ).toEqual({
+      title: "A repository was taken down",
+      body: "github.com/a/b was removed by a DMCA takedown. Amber is keeping its backup.",
+      url: "/removed",
+      tag: "amber-gone",
+    });
+  });
+
   it("names up to three and counts the rest", () => {
     const repos = ["a", "b", "c", "d", "e"].map((name) => ({
       host: "h.example",

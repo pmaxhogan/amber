@@ -67,6 +67,7 @@ server/src/
   domain/importer.ts      # URL parsing + bulk import
   sync/gitCli.ts          # hardened git spawn wrapper (askpass, allowlisted flags)
   sync/syncRepo.ts        # single-repo sync: modes, paranoid archival, LFS
+  sync/gone.ts            # the rule for "this repository is gone upstream"
   sync/scheduler.ts       # queue, worker pool, stagger, backoff, breaker, startup catch-up
   sync/diskUsage.ts       # du of repo dirs (cached in DB per sync)
   providers/types.ts      # AccountSyncProvider interface (listRepos, listStarred?,
@@ -368,17 +369,32 @@ directory names never collide regardless of sanitization overlaps.
 - LFS fetch failures are non-fatal: they are logged at warn and the sync still
   records success. An LFS server that is down, rate limiting, or refusing a
   token must not cost the run its git objects, which are the part that matters.
-- Gone repositories: a repository is GONE when it has synced successfully at
-  least once and then `GONE_AFTER_FAILURES` (2) fetches in a row fail, the
-  latest with `not_found` or `auth`. Both kinds count because a deleted, taken
-  down or newly private repository answers an anonymous fetch with a
-  credential prompt (`auth`) and a token-bearing one with "not found". One
-  failure is not enough: forges blip. The failing run sets `repos.gone_at`
-  (never overwritten by later failures), publishes `repo.gone` once, and logs
-  at warn. Nothing else changes: the backup stays, and the repo keeps syncing
-  on its normal backoff, so the next success clears `gone_at` and it can go
-  gone, and notify, again later. A repository that never synced is never gone;
-  it is a typo.
+- Gone repositories (`sync/gone.ts` owns the rule, `judgeGone`): a repository
+  is GONE when it has synced successfully at least once and its fetches have
+  then failed with `not_found` or `auth` for `GONE_CONFIRM_MS` (6 hours) on
+  end, at least `GONE_AFTER_FAILURES` (2) of them. Both kinds count because a
+  deleted, taken down or newly private repository answers an anonymous fetch
+  with a credential prompt (`auth`) and a token-bearing one with "not found".
+  The window is measured from the first failure of the current unbroken run of
+  those two kinds (read from `sync_runs`), so a success or a different kind of
+  failure starts it over. It is a span of time, not a count, because the retry
+  after a first failure comes a minute or two later: the original rule (two in
+  a row) flagged anything unreachable for two minutes, and forges hide public
+  repositories for hours and then bring them back (measured on GitHub,
+  2026-11: 1.2h and 2.2h). The one exception is a GitHub DMCA takedown
+  (`dmcaTakedown` in shared, matched on what git printed and gated on the
+  forge kind): the forge has said outright that the repository was removed, so
+  the first such answer is enough. The failing run sets `repos.gone_at` (never
+  overwritten by later failures), publishes `repo.gone` once with a `reason`
+  (`dmca_takedown`, `not_found` or `auth`), and logs at warn. Nothing else
+  changes: the backup stays and the repo keeps syncing, so the next success
+  clears `gone_at` and it can go gone, and notify, again later. For a week
+  after going gone its backoff is capped at one hour instead of its sync
+  interval (`goneRecheckCapMs`), so a repository that comes back leaves the
+  Removed page within the hour. A repository that never synced is never gone;
+  it is a typo. Why it is gone is not stored: the Removed page derives it from
+  `last_error` and the newest run's kind, so it always says what the forge
+  says now.
 - Every sync records a `sync_runs` row + updates repo denormalized fields +
   `disk_usage_bytes` (recursive du, after the fetch) and emits an SSE event.
 
@@ -556,8 +572,10 @@ configure.
   import each other.
 - Gone repositories are batched for 30 seconds and sent as ONE notification
   ("3 repositories are gone upstream: ..."). An expiring token makes every
-  private repository on a forge look gone within minutes; that must be one
-  push, not hundreds.
+  private repository on a forge look gone one after another; those that cross
+  the line together must be one push, not hundreds. A notification about a
+  single repository that GitHub took down over a DMCA notice says so ("was
+  removed by a DMCA takedown") instead of "can no longer be fetched".
 - A push service answering 404 or 410 means the subscription is dead and its
   row is deleted. Any other failure is recorded on the row and retried on the
   next notification. A failed notification never fails a sync.
@@ -653,8 +671,9 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   README and the CF Access app icon.
 - Pages: Repos (default; dense DataTable, lazy server-side mode, multi-select +
   bulk bar, detail drawer with runs/errors/settings/export/clone), Removed
-  (repositories gone upstream, newest first, with what the forge answered, the
-  same detail drawer for exporting the backup, and the per-device notification
+  (repositories gone upstream, newest first, with when each was last checked
+  and what the forge answered, a GitHub DMCA takedown named as such with a link
+  to the published notice, the same detail drawer for exporting the backup, and the per-device notification
   toggle plus a test button; the sidebar entry carries the gone count), Import
   (textarea -> preview table -> commit), Forges & Accounts (forges + accounts CRUD,
   default badges, write-only password fields; the add/edit account form shows

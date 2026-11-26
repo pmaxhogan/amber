@@ -22,9 +22,10 @@ out as a read-only git remote.
 - **Trending discovery.** Add a trending sync and Amber backs up the top N
   most-starred new GitHub repositories every day, before they can be taken
   down. Nothing it adds is ever removed.
-- **Know when something disappears.** A repository that had synced and can no
-  longer be fetched lands on the Removed page, keeps its backup, and sends a
-  push notification to every browser you turned notifications on in.
+- **Know when something disappears.** A repository that had synced and then
+  stays unfetchable for hours, or that GitHub takes down over a DMCA notice,
+  lands on the Removed page, keeps its backup, and sends a push notification
+  to every browser you turned notifications on in.
 - **Paranoid mode.** Never lose history. Pruning and garbage collection are
   disabled and every ref tip that upstream rewrites or deletes is archived under
   `refs/amber/archive/<timestamp>/` before the update lands.
