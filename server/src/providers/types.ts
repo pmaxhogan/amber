@@ -39,6 +39,13 @@ export type ForkLookup =
   | { status: "unknown"; rateLimited: boolean };
 
 /**
+ * Whether a user or organization still exists on the forge. Only "exists" and
+ * "missing" are answers; every failure is "unknown".
+ */
+export type OwnerLookup =
+  { status: "exists" } | { status: "missing" } | { status: "unknown"; rateLimited: boolean };
+
+/**
  * The subset of fetch the providers use. Injectable so tests can hand in an
  * undici MockAgent-bound fetch instead of mutating the global dispatcher.
  */
@@ -111,4 +118,10 @@ export interface AccountSyncProvider {
    * throws on a forge failure.
    */
   getForkParent?(context: DiscoveryContext, path: string): Promise<ForkLookup>;
+  /**
+   * Ask the forge whether the user or organization `owner` still exists. One
+   * GET, never throws on a forge failure. Used to tell "this repository was
+   * removed" from "its whole account was".
+   */
+  checkOwner?(context: DiscoveryContext, owner: string): Promise<OwnerLookup>;
 }

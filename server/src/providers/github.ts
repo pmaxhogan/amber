@@ -14,6 +14,7 @@ import type {
   DiscoveredRepo,
   DiscoveryContext,
   ForkLookup,
+  OwnerLookup,
   RepoAccess,
 } from "./types.ts";
 
@@ -324,6 +325,28 @@ export const githubProvider: AccountSyncProvider = {
         ? { status: "not_fork" }
         : { status: "unknown", rateLimited: false };
     } catch (cause) {
+      return forkLookupFailure(cause);
+    }
+  },
+
+  async checkOwner(context: DiscoveryContext, owner: string): Promise<OwnerLookup> {
+    const name = owner.trim();
+    if (name === "" || name.includes("/")) {
+      return { status: "unknown", rateLimited: false };
+    }
+    try {
+      // One endpoint answers for users and organizations alike.
+      await getJson<unknown>(
+        context,
+        `${apiBase(context.baseUrl)}/users/${encodeURIComponent(name)}`,
+        { headers: headers(context), notFoundHint: name },
+      );
+      return { status: "exists" };
+    } catch (cause) {
+      if (cause instanceof ProviderError && cause.kind === "not_found") {
+        // A deleted account and a suspended one both answer 404.
+        return { status: "missing" };
+      }
       return forkLookupFailure(cause);
     }
   },

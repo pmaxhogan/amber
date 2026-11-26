@@ -498,6 +498,47 @@ describe("fork parent in listings", () => {
   });
 });
 
+describe("ownerGone in reads", () => {
+  const set = (id: number, fields: string, ...values: number[]): void => {
+    db.run(`UPDATE repos SET ${fields} WHERE id = ?`, ...values, id);
+  };
+
+  it("is null until someone has asked", () => {
+    const repo = make("a/gone");
+    set(repo.id, "gone_at = ?", 500);
+
+    expect(getRepo(db, repo.id)?.ownerGone).toBeNull();
+  });
+
+  it("reports the stored answer for a gone repo", () => {
+    const missing = make("a/missing");
+    const present = make("a/present");
+    set(missing.id, "gone_at = ?, owner_gone = 1, owner_checked_at = ?", 500, 600);
+    set(present.id, "gone_at = ?, owner_gone = 0, owner_checked_at = ?", 500, 600);
+
+    expect(getRepo(db, missing.id)?.ownerGone).toBe(true);
+    expect(getRepo(db, present.id)?.ownerGone).toBe(false);
+    const listed = listRepos(db, query()).rows;
+    expect(listed.find((row) => row.path === "a/missing")?.ownerGone).toBe(true);
+    expect(listed.find((row) => row.path === "a/present")?.ownerGone).toBe(false);
+  });
+
+  it("is null for a repo that is not gone, whatever is stored", () => {
+    const back = make("a/back");
+    set(back.id, "owner_gone = 1, owner_checked_at = ?", 600);
+
+    expect(getRepo(db, back.id)?.ownerGone).toBeNull();
+    expect(listRepos(db, query()).rows[0]?.ownerGone).toBeNull();
+  });
+
+  it("is null when the repo went gone again after the owner was last asked", () => {
+    const again = make("a/again");
+    set(again.id, "gone_at = ?, owner_gone = 1, owner_checked_at = ?", 900, 600);
+
+    expect(getRepo(db, again.id)?.ownerGone).toBeNull();
+  });
+});
+
 describe("counts and totals", () => {
   it("counts repos and sums disk usage, coalescing an empty table to zero", () => {
     expect(countRepos(db)).toBe(0);

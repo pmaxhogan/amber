@@ -200,6 +200,14 @@ export const repoSchema = z.object({
    * existed still parses.
    */
   forkParent: z.string().nullable().default(null),
+  /**
+   * For a gone repository: whether its owner (user or organization) answers
+   * 404 on the forge too, i.e. the whole account was deleted or suspended and
+   * not just this repository. Null while nobody has asked, when the forge
+   * gave no clear answer, and always for a repository that is not gone. Read
+   * through `.default(null)` so a payload from before this existed still parses.
+   */
+  ownerGone: z.boolean().nullable().default(null),
   lastError: z.string().nullable(),
   diskUsageBytes: z.number().int().nonnegative().nullable(),
   defaultBranch: z.string().nullable(),

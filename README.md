@@ -24,7 +24,8 @@ out as a read-only git remote.
   down. Nothing it adds is ever removed.
 - **Know when something disappears.** A repository that had synced and then
   stays unfetchable for hours, or that GitHub takes down over a DMCA notice,
-  lands on the Removed page, keeps its backup, and sends a push notification
+  lands on the Removed page (which says whether just the repository went or
+  its owner's whole account did), keeps its backup, and sends a push notification
   to every browser you turned notifications on in.
 - **Browse a backup.** Read what a backup holds without cloning it: files at
   any branch, tag or commit, rendered READMEs and images, history and diffs.

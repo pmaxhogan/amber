@@ -7,6 +7,7 @@ import type { RepoFileRemover } from "../src/domain/repos.ts";
 import { createConsoleLogger } from "../src/logging.ts";
 import type { DiscoveryDeps } from "../src/providers/discovery.ts";
 import type { ForkResolverDeps } from "../src/providers/forks.ts";
+import type { OwnerResolverDeps } from "../src/providers/owners.ts";
 
 let db: Db;
 let timer: AccountSyncTimer | undefined;
@@ -192,5 +193,64 @@ describe("account sync timer", () => {
     await timer.tick();
 
     expect(published).toEqual([["repo.updated", { repoId: 7 }]]);
+  });
+  it("runs the gone owner resolver after the fork pass with its own cooldowns and the base logger", async () => {
+    const order: string[] = [];
+    let forkDeps: ForkResolverDeps | undefined;
+    let ownerDeps: OwnerResolverDeps | undefined;
+    timer = startAccountSyncTimer({
+      db,
+      log,
+      secretKey: null,
+      removeFiles: noopRemover,
+      intervalMs: 60_000,
+      run: () => Promise.resolve([]),
+      resolveForks: (_database, deps) => {
+        order.push("forks");
+        forkDeps = deps;
+        return Promise.resolve();
+      },
+      resolveOwners: (_database, deps) => {
+        order.push("owners");
+        ownerDeps = deps;
+        return Promise.resolve();
+      },
+    });
+
+    await timer.tick();
+
+    expect(order).toEqual(["forks", "owners"]);
+    expect(ownerDeps?.cooldowns).toBeInstanceOf(Map);
+    expect(ownerDeps?.cooldowns).not.toBe(forkDeps?.cooldowns);
+    expect(ownerDeps?.log).toBe(log);
+  });
+
+  it("survives a throwing owner resolver and still publishes repo.updated for a changed owner", async () => {
+    const published: unknown[] = [];
+    let passes = 0;
+    timer = startAccountSyncTimer({
+      db,
+      log,
+      secretKey: null,
+      removeFiles: noopRemover,
+      intervalMs: 60_000,
+      events: { publish: (type, payload) => published.push([type, payload]) },
+      run: () => Promise.resolve([]),
+      resolveForks: () => Promise.resolve(),
+      resolveOwners: (_database, deps) => {
+        passes += 1;
+        if (passes === 1) {
+          deps.onResolved?.(4);
+          return Promise.reject(new Error("owners broke"));
+        }
+        return Promise.resolve();
+      },
+    });
+
+    await timer.tick();
+    await timer.tick();
+
+    expect(passes).toBe(2);
+    expect(published).toEqual([["repo.updated", { repoId: 4 }]]);
   });
 });

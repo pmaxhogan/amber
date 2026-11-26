@@ -75,6 +75,7 @@ server/src/
   providers/github.ts     # + gitlab.ts, bitbucket.ts, gitea.ts
   providers/discovery.ts  # account-sync run: enumerate -> upsert repos
   providers/forks.ts      # background resolver: which repository a fork came from
+  providers/owners.ts     # background resolver: is a gone repository's owner gone too
   gitremote/routes.ts     # smart HTTP read-only remote (/git/*)
   web.ts                  # serves the built SPA + client-route fallback
   notify/push.ts          # web push: VAPID keys, subscriptions, gone notifications
@@ -143,6 +144,10 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   the path, on the same forge, of the repository this one was forked from. It
   only means something once `fork_known` is 1: then NULL is "not a fork".
   `fork_checked_at` is the last time the forge was asked, whatever it said.
+  `owner_gone` INTEGER NULL (0/1), `owner_checked_at` INTEGER NULL (migration
+  009; see "Gone owners" under Sync engine). Whether the account that owned a
+  gone repository is gone as well. NULL until the forge has answered, and
+  only meaningful while `gone_at` is set.
   UNIQUE(forge_id, path). Re-importing an existing forge+path updates the account
   override instead of erroring (idempotent import).
 - `sync_runs`: `id` PK, `repo_id` FK CASCADE, `started_at`, `finished_at`,
@@ -421,6 +426,19 @@ directory names never collide regardless of sanitization overlaps.
   have no provider and stay unknown. Known gap: on GitLab and Bitbucket a fork
   whose upstream is private or deleted reads as "not a fork", because the
   forge's answer cannot tell the two apart.
+- Gone owners (`providers/owners.ts`, `resolveGoneOwners`): a repository can
+  vanish on its own, or because its whole owner did: a deleted or suspended
+  account takes every repository it owned with it, and the two read the same
+  from a failed fetch. For gone repositories only, amber asks the forge
+  whether the owner (the first path segment) still exists: GitHub `GET
+  /users/{owner}`, which answers for users and organizations alike and says
+  404 for a deleted or suspended account; Gitea the same way. One lookup per
+  forge and owner covers every gone repository of that owner, at most 20
+  owners per account-sync tick, rechecked every 6 hours because accounts get
+  hidden and restored. A failed lookup is not an answer. The API reports it
+  as `ownerGone` (null for a repository that is not gone, or that went gone
+  again after the last answer), and the Removed page shows "account removed"
+  for it, unless the forge named a DMCA takedown, which wins.
 - Every sync records a `sync_runs` row + updates repo denormalized fields +
   `disk_usage_bytes` (recursive du, after the fetch) and emits an SSE event.
 
@@ -829,7 +847,9 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   screens), Removed
   (repositories gone upstream, newest first, with when each was last checked
   and what the forge answered, a GitHub DMCA takedown named as such with a link
-  to the published notice, the same detail drawer for exporting the backup, and the per-device notification
+  to the published notice, "account removed" when the owner is gone as well,
+  the upstream each fork came from when that was learned before it went gone
+  (a gone repository answers 404 to the fork lookup too), the same detail drawer for exporting the backup, and the per-device notification
   toggle plus a test button; the sidebar entry carries the gone count), Import
   (textarea -> preview table -> commit), Forges & Accounts (forges + accounts CRUD,
   default badges, write-only password fields; the add/edit account form shows

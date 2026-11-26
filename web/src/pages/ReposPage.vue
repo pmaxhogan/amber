@@ -26,6 +26,7 @@ import { useEventsStore } from "../stores/events.ts";
 import AppIcon from "../components/AppIcon.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import EmptyState from "../components/EmptyState.vue";
+import ForkParentLink from "../components/ForkParentLink.vue";
 import ErrorState from "../components/ErrorState.vue";
 import OutcomeBadge from "../components/OutcomeBadge.vue";
 import PageHeader from "../components/PageHeader.vue";
@@ -398,45 +399,6 @@ function repoUrl(row: RepoRow): string {
   return forge === undefined ? row.path : `${forgeOrigin(forge)}/${row.path}`;
 }
 
-/** The upstream's page on the forge. Null when the repo's forge is not loaded yet. */
-function forkParentUrl(row: RepoRow): string | null {
-  const forge = forgeById.value.get(row.forgeId);
-  if (forge === undefined || row.forkParent === null) return null;
-  const path = row.forkParent
-    .split("/")
-    .filter((segment) => segment !== "")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  return `${forgeOrigin(forge)}/${path}`;
-}
-
-/**
- * A plain click on the upstream opens its drawer when amber backs it up, and
- * the forge page when it does not. The cell is a real link, so a modified or
- * middle click goes to the forge as the browser would anyway; either way the
- * click must not also reach the table's row handler, which opens this row.
- */
-function onForkParentClick(event: MouseEvent, row: RepoRow): void {
-  event.stopPropagation();
-  const modified = event.ctrlKey || event.metaKey || event.shiftKey || event.altKey;
-  if (event.button !== 0 || modified) return;
-  const parentId = row.forkParentRepoId;
-  if (parentId === null || parentId === undefined) return;
-  event.preventDefault();
-  void openForkParent(row, parentId);
-}
-
-async function openForkParent(row: RepoRow, parentId: number): Promise<void> {
-  try {
-    // The upstream may not be on this page of the table, so read it by id.
-    openDrawer(await api.getRepo(parentId));
-  } catch (cause) {
-    toast.failure("Could not open the upstream repository", cause);
-    const url = forkParentUrl(row);
-    if (url !== null) window.open(url, "_blank", "noopener,noreferrer");
-  }
-}
-
 interface AccountBadge {
   label: string;
   severity: "secondary" | "info" | "warn";
@@ -661,22 +623,7 @@ onBeforeUnmount(() => {
 
       <Column header="Fork of" sort-field="fork_parent" sortable header-style="white-space: nowrap">
         <template #body="{ data }">
-          <template v-if="data.forkParent">
-            <a
-              v-if="forkParentUrl(data)"
-              :href="forkParentUrl(data) ?? undefined"
-              target="_blank"
-              rel="noopener noreferrer"
-              class="fork-link mono"
-              :title="data.forkParent"
-              @click="onForkParentClick($event, data)"
-              @keydown.enter.stop
-              >{{ data.forkParent }}</a
-            >
-            <span v-else class="fork-link mono" :title="data.forkParent">{{
-              data.forkParent
-            }}</span>
-          </template>
+          <ForkParentLink :repo="data" :forge="forgeById.get(data.forgeId)" @open="openDrawer" />
         </template>
       </Column>
 
@@ -862,17 +809,6 @@ onBeforeUnmount(() => {
 }
 
 .repo-status--syncing {
-  color: var(--p-primary-color);
-}
-
-.fork-link {
-  display: inline-block;
-  max-width: 18rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: bottom;
-  font-size: 0.82rem;
   color: var(--p-primary-color);
 }
 

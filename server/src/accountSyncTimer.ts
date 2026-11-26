@@ -5,6 +5,7 @@ import type { RepoFileRemover } from "./domain/repos.ts";
 import type { EventBus } from "./events.ts";
 import { runDueAccountSyncs, type DiscoveryDeps } from "./providers/discovery.ts";
 import { resolvePendingForks, type ForkResolverDeps } from "./providers/forks.ts";
+import { resolveGoneOwners, type OwnerResolverDeps } from "./providers/owners.ts";
 
 /**
  * Account sync runs on its own cadence rather than through the repo
@@ -28,13 +29,15 @@ export interface AccountSyncTimerOptions {
    * files without it, so omitting it silently retains every removal forever.
    */
   removeFiles: RepoFileRemover;
-  /** When given, a resolved fork parent publishes repo.updated so an open table refreshes. */
+  /** When given, a resolved fork parent or gone owner publishes repo.updated so an open table refreshes. */
   events?: Pick<EventBus, "publish">;
   intervalMs?: number;
   /** Test seam. */
   run?: (db: Db, deps: DiscoveryDeps) => Promise<AccountSyncRunResult[]>;
   /** Test seam for the fork parent resolver that follows each account sync pass. */
   resolveForks?: (db: Db, deps: ForkResolverDeps) => Promise<unknown>;
+  /** Test seam for the gone-owner resolver that follows the fork pass. */
+  resolveOwners?: (db: Db, deps: OwnerResolverDeps) => Promise<unknown>;
 }
 
 export interface AccountSyncTimer {
@@ -53,6 +56,16 @@ export function startAccountSyncTimer(options: AccountSyncTimerOptions): Account
     log: options.log,
     secretKey: options.secretKey,
     // Lives as long as the timer so a rate limit cooldown outlasts its pass.
+    cooldowns: new Map<number, number>(),
+    onResolved: (repoId) => {
+      options.events?.publish("repo.updated", { repoId });
+    },
+  };
+  const resolveOwners = options.resolveOwners ?? resolveGoneOwners;
+  const ownerDeps: OwnerResolverDeps = {
+    log: options.log,
+    secretKey: options.secretKey,
+    // Its own cooldowns: a forge limiting fork lookups may still answer these.
     cooldowns: new Map<number, number>(),
     onResolved: (repoId) => {
       options.events?.publish("repo.updated", { repoId });
@@ -92,6 +105,11 @@ export function startAccountSyncTimer(options: AccountSyncTimerOptions): Account
       await resolveForks(options.db, forkDeps);
     } catch (error) {
       log.error({ err: error }, "fork parent pass failed");
+    }
+    try {
+      await resolveOwners(options.db, ownerDeps);
+    } catch (error) {
+      log.error({ err: error }, "gone owner pass failed");
     } finally {
       inFlight = false;
     }

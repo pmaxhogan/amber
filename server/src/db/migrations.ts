@@ -456,6 +456,23 @@ ALTER TABLE repos ADD COLUMN fork_checked_at INTEGER NULL;
 CREATE INDEX idx_repos_fork_unknown ON repos (fork_checked_at) WHERE fork_known = 0;
 `;
 
+/**
+ * 009: is the owner gone too.
+ *
+ * When a repository goes gone, the reason is either that one repository was
+ * removed or that the whole account (user or organization) was deleted or
+ * suspended, which takes everything it owned along. owner_gone records what
+ * the forge said about the owner: 1 = the owner 404s as well, 0 = the owner is
+ * still there, NULL = nobody has asked. It only means something while gone_at
+ * is set. owner_checked_at is the last time the forge was asked, whatever it
+ * said, so an owner that comes back (accounts get hidden and restored) is
+ * picked up again.
+ */
+const ownerGone = `
+ALTER TABLE repos ADD COLUMN owner_gone INTEGER NULL CHECK (owner_gone IN (0, 1));
+ALTER TABLE repos ADD COLUMN owner_checked_at INTEGER NULL;
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
@@ -465,4 +482,5 @@ export const migrations: readonly Migration[] = [
   { name: "006_trending_sync", sql: trendingSync },
   { name: "007_gone_and_push", sql: goneAndPush },
   { name: "008_fork_parent", sql: forkParent },
+  { name: "009_owner_gone", sql: ownerGone },
 ];

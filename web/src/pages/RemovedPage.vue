@@ -12,6 +12,7 @@ import { useToaster } from "../lib/toast.ts";
 import { useEventsStore } from "../stores/events.ts";
 import AppIcon from "../components/AppIcon.vue";
 import EmptyState from "../components/EmptyState.vue";
+import ForkParentLink from "../components/ForkParentLink.vue";
 import ErrorState from "../components/ErrorState.vue";
 import ListSkeleton from "../components/ListSkeleton.vue";
 import PageHeader from "../components/PageHeader.vue";
@@ -48,6 +49,13 @@ interface Reason {
   severity: string;
   /** The published takedown notice, when the forge linked one. */
   noticeUrl: string | null;
+  /** What the tag means, for a tooltip. */
+  title?: string;
+}
+
+/** The user or organization segment of a repository path. */
+function ownerOf(repo: RepoRow): string {
+  return repo.path.split("/")[0] ?? "";
 }
 
 /** Why amber thinks it is gone, in the words of what the forge answered. */
@@ -56,6 +64,16 @@ function reason(repo: RepoRow): Reason {
   const takedown = dmcaTakedown(forgeById.value.get(repo.forgeId)?.kind, repo.lastError);
   if (takedown !== null) {
     return { label: "DMCA takedown", severity: "danger", noticeUrl: takedown.noticeUrl };
+  }
+  // The forge's explicit statement wins above; otherwise a 404 on the owner
+  // too means the whole account went, which takes its repositories with it.
+  if (repo.ownerGone === true) {
+    return {
+      label: "account removed",
+      severity: "danger",
+      noticeUrl: null,
+      title: `${hostOf(repo)}/${ownerOf(repo)} is gone too: the account was deleted or suspended, which takes every repository it owned with it.`,
+    };
   }
   return repo.lastErrorKind === "auth"
     ? { label: "not found or private", severity: "warn", noticeUrl: null }
@@ -242,6 +260,7 @@ onBeforeUnmount(() => {
         <thead>
           <tr>
             <th scope="col">Repository</th>
+            <th scope="col">Fork of</th>
             <th scope="col">Gone since</th>
             <th scope="col">Last checked</th>
             <th scope="col">Last good sync</th>
@@ -258,6 +277,9 @@ onBeforeUnmount(() => {
               </button>
               <div class="amber-muted removed-host">{{ hostOf(repo) }}</div>
             </td>
+            <td>
+              <ForkParentLink :repo="repo" :forge="forgeById.get(repo.forgeId)" @open="open" />
+            </td>
             <td :title="absoluteTime(repo.goneAt)">{{ relativeTime(repo.goneAt) }}</td>
             <td class="removed-checked" :title="absoluteTime(repo.lastSyncAt)">
               {{ relativeTime(repo.lastSyncAt) }}
@@ -267,7 +289,11 @@ onBeforeUnmount(() => {
             </td>
             <td>{{ humanBytes(repo.diskUsageBytes) }}</td>
             <td>
-              <Tag :value="reason(repo).label" :severity="reason(repo).severity" />
+              <Tag
+                :value="reason(repo).label"
+                :severity="reason(repo).severity"
+                :title="reason(repo).title"
+              />
               <a
                 v-if="reason(repo).noticeUrl"
                 class="removed-notice"

@@ -44,6 +44,8 @@ interface RepoRow {
   last_seen_at: number | null;
   gone_at: number | null;
   fork_parent: string | null;
+  owner_gone: number | null;
+  owner_checked_at: number | null;
   last_error: string | null;
   disk_usage_bytes: number | null;
   default_branch: string | null;
@@ -57,9 +59,24 @@ const REPO_COLUMNS = `repos.id, repos.forge_id, repos.path, repos.display_name, 
   repos.short_id, repos.account_override_id, repos.force_anonymous,
   repos.managed_by_account_sync_id, repos.state, repos.next_sync_at, repos.consecutive_failures,
   repos.last_sync_at, repos.last_success_at, repos.last_seen_at, repos.gone_at,
-  repos.fork_parent, repos.last_error,
+  repos.fork_parent, repos.owner_gone, repos.owner_checked_at, repos.last_error,
   repos.disk_usage_bytes, repos.default_branch, repos.last_fetch_head, repos.origin,
   repos.created_at, repos.updated_at`;
+
+/**
+ * Whether the owner is gone too, as of this repo's current gone episode. A
+ * repo that came back, or went gone again after the owner was last asked,
+ * must not carry the old answer.
+ */
+function ownerGoneOf(row: RepoRow): boolean | null {
+  if (row.gone_at === null || row.owner_gone === null) {
+    return null;
+  }
+  if (row.owner_checked_at !== null && row.owner_checked_at < row.gone_at) {
+    return null;
+  }
+  return row.owner_gone === 1;
+}
 
 function toRepo(row: RepoRow): Repo {
   return {
@@ -80,6 +97,7 @@ function toRepo(row: RepoRow): Repo {
     lastSeenAt: row.last_seen_at,
     goneAt: row.gone_at,
     forkParent: row.fork_parent,
+    ownerGone: ownerGoneOf(row),
     lastError: row.last_error,
     diskUsageBytes: row.disk_usage_bytes,
     defaultBranch: row.default_branch,

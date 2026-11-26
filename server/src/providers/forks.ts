@@ -60,17 +60,21 @@ interface PendingRow {
   port: number | null;
 }
 
-interface AccountRow {
+export interface ForkAccountRow {
   username: string;
   secret_enc: Uint8Array | null;
 }
+type AccountRow = ForkAccountRow;
 
 /**
  * The credential a repo's own fetches would use: force_anonymous wins, then
  * the override, then the forge default. An account from another forge is never
  * used, so a token cannot be presented to a host it was not registered for.
  */
-function accountFor(db: Db, row: PendingRow): AccountRow | undefined {
+export function accountFor(
+  db: Db,
+  row: Pick<PendingRow, "forge_id" | "account_override_id" | "force_anonymous">,
+): AccountRow | undefined {
   if (row.force_anonymous === 1) {
     return undefined;
   }

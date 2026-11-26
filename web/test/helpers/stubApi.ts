@@ -115,6 +115,7 @@ export function makeRepo(overrides: Partial<RepoRow> = {}): RepoRow {
     lastSeenAt: 1_700_000_000_000,
     goneAt: null,
     forkParent: null,
+    ownerGone: null,
     lastError: null,
     diskUsageBytes: 1_048_576,
     defaultBranch: "main",

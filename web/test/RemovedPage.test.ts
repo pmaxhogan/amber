@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
+import { defineComponent, h } from "vue";
 import RemovedPage from "../src/pages/RemovedPage.vue";
 import { mountGlobals } from "./helpers/mount.ts";
 import { clickButton, findButton, flush } from "./helpers/dom.ts";
@@ -12,6 +13,18 @@ const pushLib = vi.hoisted(() => ({
   disablePush: vi.fn(),
 }));
 vi.mock("../src/lib/push.ts", () => pushLib);
+
+// The real drawer is a large async component; what matters here is which repo
+// it was opened on.
+vi.mock("../src/components/RepoDetailDrawer.vue", () => ({
+  __esModule: true,
+  default: defineComponent({
+    props: { repo: { type: Object, required: true } },
+    setup(props) {
+      return () => h("div", { class: "drawer-stub" }, (props.repo as { path: string }).path);
+    },
+  }),
+}));
 
 const GITHUB = makeForge({ id: 1, host: "github.com", kind: "github" });
 
@@ -147,6 +160,103 @@ describe("Removed list", () => {
     const api = buildApi(GONE, { listRepos: vi.fn().mockRejectedValue(new Error("boom")) });
     const { wrapper } = await mountPage(api);
     expect(wrapper.text()).toContain("Could not load removed repositories");
+  });
+});
+
+describe("Removed list, owner account", () => {
+  const gone = (extra: Record<string, unknown>) =>
+    makeRepo({
+      id: 9,
+      path: "rowanbyte3329/stardew-valley-mod-manager",
+      goneAt: 1_700_000_600_000,
+      lastErrorKind: "not_found",
+      lastOutcome: "error",
+      ...extra,
+    });
+
+  it("says the account was removed when the owner 404s too, and explains it", async () => {
+    const { wrapper } = await mountPage(buildApi([gone({ ownerGone: true })]));
+
+    const tag = wrapper.find("tbody tr .p-tag");
+    expect(tag.text()).toBe("account removed");
+    expect(tag.attributes("title")).toContain("github.com/rowanbyte3329");
+    expect(tag.attributes("title")).toContain("deleted or suspended");
+    expect(wrapper.find("tbody tr").text()).not.toContain("not found");
+    expect(wrapper.find(".removed-actions a").attributes("href")).toBe(
+      "https://github.com/rowanbyte3329/stardew-valley-mod-manager",
+    );
+  });
+
+  it("lets the forge's own DMCA statement win over the owner being gone", async () => {
+    const takenDown = gone({
+      ownerGone: true,
+      lastErrorKind: "auth",
+      lastError:
+        "remote: Repository unavailable due to DMCA takedown.\n" +
+        "remote:   https://github.com/github/dmca/blob/master/2026/11/x.md.",
+    });
+    const { wrapper } = await mountPage(buildApi([takenDown]));
+
+    expect(wrapper.find("tbody tr .p-tag").text()).toBe("DMCA takedown");
+  });
+
+  it.each([null, false])("keeps the usual tag when ownerGone is %s", async (ownerGone) => {
+    const { wrapper } = await mountPage(buildApi([gone({ ownerGone })]));
+
+    expect(wrapper.find("tbody tr .p-tag").text()).toBe("not found");
+    expect(wrapper.find("tbody tr").text()).not.toContain("account removed");
+  });
+});
+
+describe("Removed list, fork of", () => {
+  const rows = [
+    makeRepo({
+      id: 1,
+      path: "me/tracked",
+      goneAt: 2,
+      forkParent: "up/tracked",
+      forkParentRepoId: 9,
+    }),
+    makeRepo({ id: 2, path: "me/untracked", goneAt: 1, forkParent: "up/untracked" }),
+    makeRepo({ id: 3, path: "me/plain", goneAt: 0, forkParent: null }),
+  ];
+
+  it("shows the upstream as a real link after the repository column", async () => {
+    const { wrapper } = await mountPage(buildApi(rows));
+
+    expect(wrapper.findAll("thead th")[1]?.text()).toBe("Fork of");
+    const links = wrapper.findAll("a.fork-link");
+    expect(links.map((link) => link.attributes("href"))).toEqual([
+      "https://github.com/up/tracked",
+      "https://github.com/up/untracked",
+    ]);
+    expect(wrapper.findAll("tbody tr")[2]?.find("a.fork-link").exists()).toBe(false);
+  });
+
+  it("opens the drawer on a tracked upstream, fetched by id", async () => {
+    const getRepo = vi.fn().mockResolvedValue(makeRepo({ id: 9, path: "up/tracked" }));
+    const { wrapper } = await mountPage(buildApi(rows, { getRepo }));
+
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    wrapper.findAll("a.fork-link")[0]?.element.dispatchEvent(event);
+    await flush();
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(getRepo).toHaveBeenCalledWith(9);
+    expect(wrapper.findAll(".drawer-stub").map((node) => node.text())).toEqual(["up/tracked"]);
+  });
+
+  it("leaves an untracked upstream to the browser and opens nothing", async () => {
+    const getRepo = vi.fn();
+    const { wrapper } = await mountPage(buildApi(rows, { getRepo }));
+
+    const event = new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 });
+    wrapper.findAll("a.fork-link")[1]?.element.dispatchEvent(event);
+    await flush();
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(getRepo).not.toHaveBeenCalled();
+    expect(wrapper.find(".drawer-stub").exists()).toBe(false);
   });
 });
 

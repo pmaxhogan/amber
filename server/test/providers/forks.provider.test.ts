@@ -363,3 +363,99 @@ describe("bitbucket fork knowledge", () => {
     ]);
   });
 });
+
+describe("checkOwner", () => {
+  function owner(provider: AccountSyncProvider, ctx: ReturnType<typeof context>, name: string) {
+    if (provider.checkOwner === undefined) {
+      throw new Error(`${provider.kind} must implement checkOwner`);
+    }
+    return provider.checkOwner(ctx, name);
+  }
+
+  const cases = [
+    {
+      name: "github",
+      provider: githubProvider,
+      origin: "https://api.github.com",
+      base: "",
+      baseUrl: "https://github.com",
+    },
+    {
+      name: "gitea",
+      provider: giteaProvider,
+      origin: "https://gitea.example.com",
+      base: "/api/v1",
+      baseUrl: "https://gitea.example.com",
+    },
+  ];
+
+  describe.each(cases)("$name", ({ provider, origin, base, baseUrl }) => {
+    const ctx = (extra: Parameters<typeof context>[0] = {}): ReturnType<typeof context> =>
+      context({ baseUrl, fetch: http.fetch, ...extra });
+    const get = (name: string) =>
+      http.pool(origin).intercept({ path: `${base}/users/${name}`, method: "GET" });
+
+    it("says exists for a 200 and missing for a 404", async () => {
+      get("alive").reply(200, { login: "alive" }, { headers: JSON_HEADERS });
+      get("deleted").reply(404, { message: "Not Found" }, { headers: JSON_HEADERS });
+
+      expect(await owner(provider, ctx(), "alive")).toEqual({ status: "exists" });
+      expect(await owner(provider, ctx(), "deleted")).toEqual({ status: "missing" });
+    });
+
+    it.each([403, 401, 500, 502])("answers unknown, never missing, for HTTP %i", async (status) => {
+      get("who").reply(status, { message: "nope" }, { headers: JSON_HEADERS });
+
+      expect(await owner(provider, ctx(), "who")).toEqual({
+        status: "unknown",
+        rateLimited: false,
+      });
+    });
+
+    it("flags rate limiting", async () => {
+      get("slow").reply(429, {}, { headers: JSON_HEADERS });
+
+      expect(await owner(provider, ctx(), "slow")).toEqual({
+        status: "unknown",
+        rateLimited: true,
+      });
+    });
+
+    it("answers unknown when the network fails", async () => {
+      get("net").replyWithError(new Error("boom"));
+
+      expect(await owner(provider, ctx(), "net")).toEqual({
+        status: "unknown",
+        rateLimited: false,
+      });
+    });
+
+    it("refuses an empty or multi-segment owner without asking", async () => {
+      expect(await owner(provider, ctx(), "")).toMatchObject({ status: "unknown" });
+      expect(await owner(provider, ctx(), "a/b")).toMatchObject({ status: "unknown" });
+    });
+  });
+
+  it("flags a GitHub 403 with an exhausted quota as rate limited", async () => {
+    http
+      .pool("https://api.github.com")
+      .intercept({ path: "/users/limited", method: "GET" })
+      .reply(
+        403,
+        { message: "API rate limit exceeded" },
+        {
+          headers: { ...JSON_HEADERS, "x-ratelimit-remaining": "0" },
+        },
+      );
+
+    expect(await owner(githubProvider, context({ fetch: http.fetch }), "limited")).toEqual({
+      status: "unknown",
+      rateLimited: true,
+    });
+  });
+
+  it("is not implemented for gitlab and bitbucket, whose docs give no equally clear answer", () => {
+    expect(gitlabProvider.checkOwner).toBeUndefined();
+    expect(bitbucketProvider.checkOwner).toBeUndefined();
+  });
+});
