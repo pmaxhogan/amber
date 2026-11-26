@@ -55,6 +55,7 @@ async function main(): Promise<void> {
     log,
     secretKey: config.secretKey,
     removeFiles: createBackupFileRemover(config),
+    events,
   });
 
   const reminder = config.insecureMode

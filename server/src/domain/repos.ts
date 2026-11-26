@@ -43,6 +43,7 @@ interface RepoRow {
   last_success_at: number | null;
   last_seen_at: number | null;
   gone_at: number | null;
+  fork_parent: string | null;
   last_error: string | null;
   disk_usage_bytes: number | null;
   default_branch: string | null;
@@ -56,7 +57,7 @@ const REPO_COLUMNS = `repos.id, repos.forge_id, repos.path, repos.display_name, 
   repos.short_id, repos.account_override_id, repos.force_anonymous,
   repos.managed_by_account_sync_id, repos.state, repos.next_sync_at, repos.consecutive_failures,
   repos.last_sync_at, repos.last_success_at, repos.last_seen_at, repos.gone_at,
-  repos.last_error,
+  repos.fork_parent, repos.last_error,
   repos.disk_usage_bytes, repos.default_branch, repos.last_fetch_head, repos.origin,
   repos.created_at, repos.updated_at`;
 
@@ -78,6 +79,7 @@ function toRepo(row: RepoRow): Repo {
     lastSuccessAt: row.last_success_at,
     lastSeenAt: row.last_seen_at,
     goneAt: row.gone_at,
+    forkParent: row.fork_parent,
     lastError: row.last_error,
     diskUsageBytes: row.disk_usage_bytes,
     defaultBranch: row.default_branch,
@@ -178,9 +180,49 @@ export function displayNameFor(path: string): string {
 // Reads
 // ---------------------------------------------------------------------------
 
+/**
+ * For each repo that is a fork, the id of the row that backs up its upstream on
+ * the same forge, or null when amber does not track it. One query for the whole
+ * set. The match ignores case because forges treat paths that way, while
+ * repos.path keeps whatever spelling the import used. Repos that are not forks
+ * are left out of the map.
+ */
+function forkParentRepoIds(db: Db, children: readonly RepoRow[]): Map<number, number | null> {
+  const forks = children.filter((row) => row.fork_parent !== null);
+  const found = new Map<number, number | null>();
+  for (const row of forks) {
+    found.set(row.id, null);
+  }
+  if (forks.length === 0) {
+    return found;
+  }
+  const marks = forks.map(() => "?").join(", ");
+  const matches = db.all<{ child_id: number; parent_id: number }>(
+    `SELECT child.id AS child_id, MIN(parent.id) AS parent_id
+       FROM repos child
+       JOIN repos parent
+         ON parent.forge_id = child.forge_id
+        AND parent.path = child.fork_parent COLLATE NOCASE
+        AND parent.id <> child.id
+      WHERE child.id IN (${marks})
+      GROUP BY child.id`,
+    ...forks.map((row) => row.id),
+  );
+  for (const match of matches) {
+    found.set(match.child_id, match.parent_id);
+  }
+  return found;
+}
+
 export function getRepo(db: Db, id: number): Repo | undefined {
   const row = db.get<RepoRow>(`SELECT ${REPO_COLUMNS} FROM repos WHERE repos.id = ?`, id);
-  return row === undefined ? undefined : toRepo(row);
+  if (row === undefined) {
+    return undefined;
+  }
+  const repo = toRepo(row);
+  const parentId = forkParentRepoIds(db, [row]).get(row.id);
+  // Only forks carry the key: the single read has to agree with the listing.
+  return parentId === undefined ? repo : { ...repo, forkParentRepoId: parentId };
 }
 
 export function requireRepo(db: Db, id: number): Repo {
@@ -221,6 +263,8 @@ const SORT_SQL: Readonly<Record<RepoSortField, string>> = {
   // that vanished longest ago rather than with imports still waiting to clone.
   last_seen_at: "repos.last_seen_at IS NULL, repos.last_seen_at",
   gone_at: "repos.gone_at IS NULL, repos.gone_at",
+  // Non-forks and repos nobody has asked about yet sort last either way.
+  fork_parent: "repos.fork_parent IS NULL, repos.fork_parent COLLATE NOCASE",
   disk_usage_bytes: "repos.disk_usage_bytes",
   next_sync_at: "repos.next_sync_at",
   created_at: "repos.created_at",
@@ -358,10 +402,14 @@ export function listRepos(db: Db, query: RepoListQuery): Page<Repo> {
     rows.map((row) => row.id),
   );
 
+  const parentIds = forkParentRepoIds(db, rows);
+
   const listed = rows.map((row): Repo => {
     const resolved = settings.get(row.id);
+    const parentId = parentIds.get(row.id);
     return {
       ...toRepo(row),
+      ...(parentId === undefined ? {} : { forkParentRepoId: parentId }),
       cloneMode: resolved?.clone_mode,
       syncEnabled: resolved?.sync_enabled,
       lastOutcome: row.last_outcome === null ? undefined : (row.last_outcome as SyncOutcome),

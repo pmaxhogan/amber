@@ -192,6 +192,13 @@ export const repoSchema = z.object({
    * later success clears it.
    */
   goneAt: epochMsSchema.nullable(),
+  /**
+   * The repository this one was forked from, as a path on the same forge
+   * (`torvalds/linux`). Null when it is not a fork, and also while amber has
+   * not asked the forge yet. Defaulted so a response from before the column
+   * existed still parses.
+   */
+  forkParent: z.string().nullable().default(null),
   lastError: z.string().nullable(),
   diskUsageBytes: z.number().int().nonnegative().nullable(),
   defaultBranch: z.string().nullable(),
@@ -214,6 +221,12 @@ export const repoSchema = z.object({
   syncEnabled: z.boolean().optional(),
   lastOutcome: syncOutcomeSchema.optional(),
   lastErrorKind: syncErrorKindSchema.optional(),
+  /**
+   * The id of the repo row backing up `forkParent`, when amber tracks it on
+   * the same forge; null when it does not. Lets the "Fork of" cell open the
+   * upstream's own backup instead of the forge.
+   */
+  forkParentRepoId: idSchema.nullable().optional(),
 });
 export type Repo = z.infer<typeof repoSchema>;
 
@@ -223,6 +236,7 @@ export interface RepoListExtras {
   syncEnabled: boolean;
   lastOutcome?: SyncOutcome;
   lastErrorKind?: SyncErrorKind;
+  forkParentRepoId?: number | null;
 }
 
 /** The fewest not-found or access-denied fetches in a row a gone repository needs. */
@@ -279,6 +293,7 @@ export const REPO_SORT_FIELDS = [
   "last_success_at",
   "last_seen_at",
   "gone_at",
+  "fork_parent",
   "disk_usage_bytes",
   "next_sync_at",
   "created_at",

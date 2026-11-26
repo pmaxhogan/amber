@@ -28,12 +28,18 @@ export type TreeEntry = SharedTreeEntry;
 export class ExportError extends Error {
   override readonly name = "ExportError";
   readonly statusCode: number;
+  /**
+   * What went wrong, for the log only: it can hold a temp directory path or a
+   * tool's own words, so it is never part of an answer.
+   */
+  readonly detail: string | undefined;
 
   // Not a constructor parameter property: node's strip-only TypeScript mode
   // rejects those, and `npm run dev` runs this file directly.
-  constructor(message: string, statusCode: number) {
+  constructor(message: string, statusCode: number, detail?: string) {
     super(message);
     this.statusCode = statusCode;
+    this.detail = detail;
   }
 }
 
@@ -222,6 +228,13 @@ export function streamBlob(repoDir: string, oid: string): Readable {
   child.stdout.pipe(out);
   child.on("error", (error: Error) => out.destroy(error));
   child.stderr.resume();
+  // A client that goes away destroys the stream; without this the child sits
+  // blocked on a full pipe until its timer fires.
+  out.on("close", () => {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
+  });
   return out;
 }
 
@@ -435,8 +448,9 @@ async function runProcessOk(
   const result = await runProcess(command, args, options);
   if (result.code !== 0) {
     throw new ExportError(
-      `${command} failed with ${String(result.code)}: ${result.stderr.trim().slice(0, 500)}`,
+      "Could not build the 7z archive.",
       500,
+      `${command} ${args.join(" ")} exited with ${String(result.code)}: ${result.stderr.trim().slice(0, 500)}`,
     );
   }
   return result;

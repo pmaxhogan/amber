@@ -178,7 +178,7 @@ describe("Accounts page forge management", () => {
     const api = buildApi({ listAccounts: vi.fn().mockResolvedValue([]) });
     const { wrapper } = await mountPage(api);
 
-    expect(wrapper.text()).toContain("Amber fetches its repositories anonymously");
+    expect(wrapper.text()).toContain("all repos will be fetched anonymously");
   });
 
   it("creates a forge from the dialog", async () => {

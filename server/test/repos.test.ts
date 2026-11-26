@@ -426,6 +426,78 @@ describe("listRepos", () => {
   });
 });
 
+describe("fork parent in listings", () => {
+  const setFork = (id: number, parent: string | null): void => {
+    db.run("UPDATE repos SET fork_parent = ?, fork_known = 1 WHERE id = ?", parent, id);
+  };
+  const byPath = (rows: Repo[], path: string): Repo => {
+    const found = rows.find((row) => row.path === path);
+    if (found === undefined) {
+      throw new Error(`no row for ${path}`);
+    }
+    return found;
+  };
+
+  it("resolves a tracked upstream to its repo id, in one listing, ignoring case", () => {
+    const upstream = make("Torvalds/Linux");
+    const fork = make("me/linux");
+    setFork(fork.id, "torvalds/linux");
+
+    const rows = listRepos(db, query()).rows;
+
+    expect(byPath(rows, "me/linux").forkParentRepoId).toBe(upstream.id);
+    expect(byPath(rows, "me/linux").forkParent).toBe("torvalds/linux");
+  });
+
+  it("is null for an untracked upstream, and absent for a repo that is not a fork", () => {
+    const fork = make("me/orphan");
+    setFork(fork.id, "gone/upstream");
+    const plain = make("me/plain");
+    setFork(plain.id, null);
+    make("me/unknown");
+
+    const rows = listRepos(db, query()).rows;
+
+    expect(byPath(rows, "me/orphan").forkParentRepoId).toBeNull();
+    expect(byPath(rows, "me/plain").forkParentRepoId).toBeUndefined();
+    expect(byPath(rows, "me/unknown").forkParentRepoId).toBeUndefined();
+  });
+
+  it("does not match the same path on another forge", () => {
+    createRepo(db, { forgeId: otherForgeId, path: "torvalds/linux" });
+    const fork = make("me/linux");
+    setFork(fork.id, "torvalds/linux");
+
+    expect(byPath(listRepos(db, query()).rows, "me/linux").forkParentRepoId).toBeNull();
+  });
+
+  it("carries the same field on a single read", () => {
+    const upstream = make("a/up");
+    const fork = make("me/fork");
+    setFork(fork.id, "a/up");
+    const plain = make("me/plain");
+
+    expect(getRepo(db, fork.id)?.forkParentRepoId).toBe(upstream.id);
+    expect(getRepo(db, plain.id)?.forkParentRepoId).toBeUndefined();
+  });
+
+  it("sorts by upstream with non-forks last in both directions", () => {
+    const b = make("me/b");
+    const a = make("me/a");
+    const c = make("me/c");
+    make("me/none");
+    setFork(b.id, "zed/z");
+    setFork(a.id, "Alpha/a");
+    setFork(c.id, "mid/m");
+
+    const asc = listRepos(db, query({ sort: "fork_parent", dir: "asc" })).rows;
+    const desc = listRepos(db, query({ sort: "fork_parent", dir: "desc" })).rows;
+
+    expect(asc.map((row) => row.path)).toEqual(["me/a", "me/c", "me/b", "me/none"]);
+    expect(desc.map((row) => row.path)).toEqual(["me/b", "me/c", "me/a", "me/none"]);
+  });
+});
+
 describe("counts and totals", () => {
   it("counts repos and sums disk usage, coalescing an empty table to zero", () => {
     expect(countRepos(db)).toBe(0);

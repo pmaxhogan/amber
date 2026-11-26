@@ -2,7 +2,9 @@ import type { AccountSyncRunResult } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "./db/db.ts";
 import type { RepoFileRemover } from "./domain/repos.ts";
+import type { EventBus } from "./events.ts";
 import { runDueAccountSyncs, type DiscoveryDeps } from "./providers/discovery.ts";
+import { resolvePendingForks, type ForkResolverDeps } from "./providers/forks.ts";
 
 /**
  * Account sync runs on its own cadence rather than through the repo
@@ -26,9 +28,13 @@ export interface AccountSyncTimerOptions {
    * files without it, so omitting it silently retains every removal forever.
    */
   removeFiles: RepoFileRemover;
+  /** When given, a resolved fork parent publishes repo.updated so an open table refreshes. */
+  events?: Pick<EventBus, "publish">;
   intervalMs?: number;
   /** Test seam. */
   run?: (db: Db, deps: DiscoveryDeps) => Promise<AccountSyncRunResult[]>;
+  /** Test seam for the fork parent resolver that follows each account sync pass. */
+  resolveForks?: (db: Db, deps: ForkResolverDeps) => Promise<unknown>;
 }
 
 export interface AccountSyncTimer {
@@ -40,6 +46,16 @@ export interface AccountSyncTimer {
 export function startAccountSyncTimer(options: AccountSyncTimerOptions): AccountSyncTimer {
   const log = options.log.child({ mod: "accountSync" });
   const run = options.run ?? runDueAccountSyncs;
+  const resolveForks = options.resolveForks ?? resolvePendingForks;
+  const forkDeps: ForkResolverDeps = {
+    log,
+    secretKey: options.secretKey,
+    // Lives as long as the timer so a rate limit cooldown outlasts its pass.
+    cooldowns: new Map<number, number>(),
+    onResolved: (repoId) => {
+      options.events?.publish("repo.updated", { repoId });
+    },
+  };
   const deps: DiscoveryDeps = {
     log,
     secretKey: options.secretKey,
@@ -69,6 +85,11 @@ export function startAccountSyncTimer(options: AccountSyncTimerOptions): Account
     } catch (error) {
       // One bad pass must never take the process down; the next tick retries.
       log.error({ err: error }, "account sync tick failed");
+    }
+    try {
+      await resolveForks(options.db, forkDeps);
+    } catch (error) {
+      log.error({ err: error }, "fork parent pass failed");
     } finally {
       inFlight = false;
     }

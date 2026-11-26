@@ -52,6 +52,8 @@ function repo(path: string, overrides: Partial<DiscoveredRepo> = {}): Discovered
     isPrivate: false,
     archived: false,
     description: null,
+    isFork: null,
+    forkParent: null,
     ...overrides,
   };
 }
@@ -1063,5 +1065,87 @@ describe("runAccountSync, trending", () => {
     }
     expect(supportsTrendingSync("github")).toBe(true);
     expect(supportsTrendingSync("gitlab")).toBe(false);
+  });
+});
+
+describe("fork knowledge from a listing", () => {
+  function forkRow(path: string): {
+    fork_parent: string | null;
+    fork_known: number;
+    fork_checked_at: number | null;
+  } {
+    return db.get(
+      "SELECT fork_parent, fork_known, fork_checked_at FROM repos WHERE path = ?",
+      path,
+    )!;
+  }
+
+  async function run(repos: DiscoveredRepo[], now: number): Promise<void> {
+    const existing = db.get<{ id: number }>("SELECT id FROM account_syncs");
+    const syncId = existing?.id ?? createSync(seed().accountId);
+    await runAccountSyncDetailed(
+      db,
+      syncId,
+      baseDeps(fakeProvider({ repos: [repos] }), { now: () => now }),
+    );
+  }
+
+  it("records a named parent and a definite not-a-fork on new rows", async () => {
+    await run(
+      [
+        repo("octocat/forked", { isFork: true, forkParent: "up/stream" }),
+        repo("octocat/plain", { isFork: false }),
+      ],
+      5_000,
+    );
+
+    expect(forkRow("octocat/forked")).toEqual({
+      fork_parent: "up/stream",
+      fork_known: 1,
+      fork_checked_at: 5_000,
+    });
+    expect(forkRow("octocat/plain")).toEqual({
+      fork_parent: null,
+      fork_known: 1,
+      fork_checked_at: 5_000,
+    });
+  });
+
+  it("leaves the columns alone for a fork with no named parent, and for a silent listing", async () => {
+    await run(
+      [repo("octocat/blind", { isFork: true }), repo("octocat/silent", { isFork: null })],
+      5_000,
+    );
+
+    for (const path of ["octocat/blind", "octocat/silent"]) {
+      expect(forkRow(path)).toEqual({ fork_parent: null, fork_known: 0, fork_checked_at: null });
+    }
+  });
+
+  it("writes what a listing proves onto a row that already existed", async () => {
+    await run([repo("octocat/late")], 1_000);
+    expect(forkRow("octocat/late").fork_known).toBe(0);
+
+    await run([repo("octocat/late", { isFork: true, forkParent: "up/stream" })], 2_000);
+
+    expect(forkRow("octocat/late")).toEqual({
+      fork_parent: "up/stream",
+      fork_known: 1,
+      fork_checked_at: 2_000,
+    });
+  });
+
+  it("never downgrades a known answer to unknown", async () => {
+    await run([repo("octocat/kept", { isFork: true, forkParent: "up/stream" })], 1_000);
+
+    await run([repo("octocat/kept", { isFork: true }), repo("octocat/other")], 2_000);
+    expect(forkRow("octocat/kept")).toEqual({
+      fork_parent: "up/stream",
+      fork_known: 1,
+      fork_checked_at: 1_000,
+    });
+
+    await run([repo("octocat/kept", { isFork: null })], 3_000);
+    expect(forkRow("octocat/kept").fork_parent).toBe("up/stream");
   });
 });

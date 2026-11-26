@@ -1,13 +1,16 @@
 import {
   assertSameOrigin,
+  encodeRepoPath,
   expectArray,
+  forkLookupFailure,
   getJson,
   MAX_PAGES,
   matchesVisibility,
   normalizeRepoPath,
+  parentPathOrNull,
   ProviderError,
 } from "./http.ts";
-import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext } from "./types.ts";
+import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext, ForkLookup } from "./types.ts";
 
 /**
  * Bitbucket Cloud REST 2.0 client. Verified against the live OpenAPI spec
@@ -43,6 +46,7 @@ interface BitbucketRepo {
   is_private?: unknown;
   mainbranch?: { name?: unknown } | null;
   description?: unknown;
+  parent?: { full_name?: unknown } | null;
 }
 
 interface BitbucketPage {
@@ -81,6 +85,7 @@ function toDiscovered(raw: BitbucketRepo): DiscoveredRepo {
     });
   }
   const branch = raw.mainbranch?.name;
+  const parent = parentPathOrNull(raw.parent?.full_name);
   return {
     path: normalizeRepoPath(raw.full_name),
     // mainbranch is absent on an empty repository: Bitbucket has no empty flag.
@@ -90,6 +95,10 @@ function toDiscovered(raw: BitbucketRepo): DiscoveredRepo {
     archived: false,
     description:
       typeof raw.description === "string" && raw.description !== "" ? raw.description : null,
+    // The repository object carries `parent` only for forks; its absence in a
+    // listing is not proof of "not a fork", so only a present parent is taken.
+    isFork: parent === null ? null : true,
+    forkParent: parent,
   };
 }
 
@@ -188,6 +197,27 @@ export const bitbucketProvider: AccountSyncProvider = {
           yield repo;
         }
       }
+    }
+  },
+
+  async getForkParent(context: DiscoveryContext, path: string): Promise<ForkLookup> {
+    const encoded = encodeRepoPath(path);
+    if (encoded.split("/").length !== 2) {
+      return { status: "unknown", rateLimited: false };
+    }
+    try {
+      const response = await getJson<BitbucketRepo>(
+        context,
+        `${apiBase(context.baseUrl)}/repositories/${encoded}`,
+        { headers: headers(context), notFoundHint: path },
+      );
+      if (typeof response.data.full_name !== "string") {
+        return { status: "unknown", rateLimited: false };
+      }
+      const parent = parentPathOrNull(response.data.parent?.full_name);
+      return parent === null ? { status: "not_fork" } : { status: "fork", parent };
+    } catch (cause) {
+      return forkLookupFailure(cause);
     }
   },
 };

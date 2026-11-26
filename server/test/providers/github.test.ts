@@ -78,6 +78,8 @@ describe("githubProvider.listRepos", () => {
       isPrivate: false,
       archived: false,
       description: "second",
+      isFork: null,
+      forkParent: null,
     });
     expect(repos[2]?.archived).toBe(true);
     http.agent.assertNoPendingInterceptors();
@@ -166,6 +168,8 @@ describe("githubProvider.listRepos", () => {
       isPrivate: false,
       archived: false,
       description: null,
+      isFork: null,
+      forkParent: null,
     });
   });
 

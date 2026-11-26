@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import Select from "primevue/select";
 import Tabs from "primevue/tabs";
 import RepoDetailDrawer from "../src/components/RepoDetailDrawer.vue";
+import RepoBrowser from "../src/components/browse/RepoBrowser.vue";
 import ConfirmDialog from "../src/components/ConfirmDialog.vue";
 import SettingsScopeEditor from "../src/components/SettingsScopeEditor.vue";
 import { mountGlobals } from "./helpers/mount.ts";
@@ -15,6 +16,7 @@ import {
   makeRun,
   stubApi,
 } from "./helpers/stubApi.ts";
+import { makeBrowseApi } from "./helpers/browseStubs.ts";
 import type { SettingsScopeRef } from "../src/api/types.ts";
 
 const FORGE = makeForge({ id: 1, host: "github.com", kind: "github" });
@@ -359,5 +361,168 @@ describe("drawer clone tab", () => {
     await openTab(wrapper, "clone");
 
     expect(wrapper.text()).toContain("Turn it on from the Git Remote page");
+  });
+});
+
+// -- Browse tab, maximize and fork parent -------------------------------------
+
+/** Replaces window.matchMedia so a test controls how wide the viewport "is". */
+function stubViewport(wide: boolean) {
+  const listeners = new Set<(event: { matches: boolean }) => void>();
+  const query = {
+    matches: wide,
+    addEventListener: (_name: string, listener: (event: { matches: boolean }) => void) =>
+      listeners.add(listener),
+    removeEventListener: (_name: string, listener: (event: { matches: boolean }) => void) =>
+      listeners.delete(listener),
+  };
+  const matchMedia = vi.fn().mockReturnValue(query);
+  vi.stubGlobal("matchMedia", matchMedia);
+  return {
+    matchMedia,
+    resize(matches: boolean) {
+      query.matches = matches;
+      for (const listener of listeners) listener({ matches });
+    },
+  };
+}
+
+function drawerWidth(wrapper: Awaited<ReturnType<typeof mountDrawer>>["wrapper"]): string {
+  const style = wrapper.findComponent({ name: "Drawer" }).vm.$attrs.style as { width?: string };
+  return style.width ?? "";
+}
+
+function maximizeButton(wrapper: Awaited<ReturnType<typeof mountDrawer>>["wrapper"]) {
+  return wrapper.find("button.repo-drawer__maximize");
+}
+
+describe("drawer browse tab", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("is the last tab and mounts the browser only once it is opened", async () => {
+    const api = makeBrowseApi();
+    const { wrapper } = await mountDrawer(api as never);
+
+    const labels = wrapper.findAll("[role=tab]").map((tab) => tab.text());
+    expect(labels.at(-1)).toBe("Browse");
+    expect(wrapper.findComponent(RepoBrowser).exists()).toBe(false);
+    expect(api.browseRefs).not.toHaveBeenCalled();
+
+    await openTab(wrapper, "browse");
+    await flush();
+
+    expect(wrapper.findComponent(RepoBrowser).props("repo")).toMatchObject({ id: 42 });
+    expect(api.browseRefs).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the browser mounted while other tabs are visited", async () => {
+    const api = makeBrowseApi();
+    const { wrapper } = await mountDrawer(api as never);
+    await openTab(wrapper, "browse");
+    await flush();
+    await openTab(wrapper, "overview");
+    await openTab(wrapper, "browse");
+    expect(api.browseRefs).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("drawer maximize", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("toggles between the normal width and the whole viewport", async () => {
+    stubViewport(true);
+    const { wrapper } = await mountDrawer();
+    expect(drawerWidth(wrapper)).toBe("min(48rem, 100vw)");
+    expect(maximizeButton(wrapper).attributes("aria-label")).toBe("Maximize");
+
+    await maximizeButton(wrapper).trigger("click");
+    expect(drawerWidth(wrapper)).toBe("100vw");
+    expect(maximizeButton(wrapper).attributes("aria-label")).toBe("Restore");
+    expect(maximizeButton(wrapper).attributes("title")).toBe("Restore");
+
+    await maximizeButton(wrapper).trigger("click");
+    expect(drawerWidth(wrapper)).toBe("min(48rem, 100vw)");
+  });
+
+  it("is not offered on a narrow viewport", async () => {
+    stubViewport(false);
+    const { wrapper } = await mountDrawer();
+    expect(maximizeButton(wrapper).exists()).toBe(false);
+  });
+
+  it("follows the viewport as it is resized", async () => {
+    const viewport = stubViewport(true);
+    const { wrapper } = await mountDrawer();
+    expect(viewport.matchMedia).toHaveBeenCalledWith("(min-width: 60rem)");
+    expect(maximizeButton(wrapper).exists()).toBe(true);
+
+    viewport.resize(false);
+    await flush();
+    expect(maximizeButton(wrapper).exists()).toBe(false);
+
+    viewport.resize(true);
+    await flush();
+    expect(maximizeButton(wrapper).exists()).toBe(true);
+  });
+
+  it("restores when the drawer closes", async () => {
+    stubViewport(true);
+    const { wrapper } = await mountDrawer();
+    await maximizeButton(wrapper).trigger("click");
+    expect(drawerWidth(wrapper)).toBe("100vw");
+
+    await wrapper.setProps({ visible: false });
+    await wrapper.setProps({ visible: true });
+    await flush();
+
+    expect(drawerWidth(wrapper)).toBe("min(48rem, 100vw)");
+  });
+
+  it("still routes the close button through the unsaved-settings guard", async () => {
+    stubViewport(true);
+    const { wrapper } = await mountDrawer();
+    expect(wrapper.find("[data-pc-name=pcclosebutton], .p-drawer-close-button").exists()).toBe(
+      true,
+    );
+    await wrapper.findComponent({ name: "Drawer" }).vm.$emit("update:visible", false);
+    expect(wrapper.emitted("update:visible")).toEqual([[false]]);
+  });
+});
+
+describe("drawer fork parent", () => {
+  it("links to the parent on the forge, opening in a new tab", async () => {
+    const { wrapper } = await mountDrawer(
+      buildApi(),
+      makeRepo({ id: 42, forkParent: "nodejs/some repo/é" }),
+    );
+    const link = wrapper.findAll("dl a").find((anchor) => anchor.text().includes("nodejs"));
+    expect(link?.attributes("href")).toBe("https://github.com/nodejs/some%20repo/%C3%A9");
+    expect(link?.attributes("target")).toBe("_blank");
+    expect(link?.attributes("rel")).toBe("noopener noreferrer");
+    expect(wrapper.text()).toContain("Fork of");
+  });
+
+  it("omits the row for a repository that is not a fork", async () => {
+    const { wrapper } = await mountDrawer();
+    expect(wrapper.text()).not.toContain("Fork of");
+  });
+
+  it("shows the parent as plain text when the forge is unknown", async () => {
+    const wrapper = mount(RepoDetailDrawer, {
+      props: {
+        repo: makeRepo({ id: 42, forgeId: 99, forkParent: "a/b" }),
+        visible: true,
+        forges: [FORGE],
+        accounts: ACCOUNTS,
+      },
+      global: mountGlobals({ api: buildApi() }),
+    });
+    await flush();
+    expect(wrapper.text()).toContain("Fork of");
+    expect(wrapper.findAll("dl a")).toHaveLength(0);
   });
 });

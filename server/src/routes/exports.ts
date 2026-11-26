@@ -96,6 +96,9 @@ export const exportRoutes: FastifyPluginAsync = async (app) => {
 
   function fail(reply: FastifyReply, error: unknown): FastifyReply {
     if (error instanceof ExportError) {
+      if (error.detail !== undefined) {
+        log.warn({ detail: error.detail, statusCode: error.statusCode }, "export tool failed");
+      }
       return reply.code(error.statusCode).send({ error: "export_failed", message: error.message });
     }
     log.error({ err: error }, "export failed");

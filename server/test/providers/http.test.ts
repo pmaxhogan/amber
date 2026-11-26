@@ -5,6 +5,7 @@ import {
   matchesVisibility,
   normalizeRepoPath,
   pagesByLink,
+  parentPathOrNull,
   parseLinkHeader,
   ProviderError,
   retryAfterMsFromHeaders,
@@ -89,6 +90,36 @@ describe("normalizeRepoPath and matchesVisibility", () => {
     expect(matchesVisibility(false, "private")).toBe(false);
     expect(matchesVisibility(true, "all")).toBe(true);
     expect(matchesVisibility(false, "all")).toBe(true);
+  });
+});
+
+describe("parentPathOrNull", () => {
+  it("normalizes a plain path", () => {
+    expect(parentPathOrNull("/torvalds/linux.git")).toBe("torvalds/linux");
+    expect(parentPathOrNull("group/sub group")).toBeNull();
+    expect(parentPathOrNull("group/sub/project")).toBe("group/sub/project");
+  });
+
+  it("treats anything that is not a plain path as no answer", () => {
+    // The forge is not trusted: the value is stored and becomes a link.
+    for (const hostile of [
+      undefined,
+      null,
+      42,
+      "",
+      "   ",
+      "a/../b",
+      "../../settings",
+      "a/./b",
+      "a//b",
+      "a\\b",
+      "a/b\nc",
+      "a/b\u0000",
+      "a/\u007fb",
+      `owner/${"x".repeat(600)}`,
+    ]) {
+      expect(parentPathOrNull(hostile)).toBeNull();
+    }
   });
 });
 

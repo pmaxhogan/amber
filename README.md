@@ -26,6 +26,12 @@ out as a read-only git remote.
   stays unfetchable for hours, or that GitHub takes down over a DMCA notice,
   lands on the Removed page, keeps its backup, and sends a push notification
   to every browser you turned notifications on in.
+- **Browse a backup.** Read what a backup holds without cloning it: files at
+  any branch, tag or commit, rendered READMEs and images, history and diffs.
+  Repository content is treated as hostile: markdown is sanitized and shown in
+  a sandboxed frame, and nothing a repository contains can run in the app.
+- **Fork of.** Each fork shows the repository it came from, linking to that
+  repository's own backup when Amber has one.
 - **Paranoid mode.** Never lose history. Pruning and garbage collection are
   disabled and every ref tip that upstream rewrites or deletes is archived under
   `refs/amber/archive/<timestamp>/` before the update lands.

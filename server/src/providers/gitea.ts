@@ -1,14 +1,17 @@
 import {
   assertSameOrigin,
+  encodeRepoPath,
   expectArray,
+  forkLookupFailure,
   getJson,
   MAX_PAGES,
   matchesVisibility,
   normalizeRepoPath,
+  parentPathOrNull,
   parseLinkHeader,
   ProviderError,
 } from "./http.ts";
-import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext } from "./types.ts";
+import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext, ForkLookup } from "./types.ts";
 
 /**
  * Gitea REST client (gitea.com and self-hosted). Verified against the live
@@ -40,6 +43,8 @@ interface GiteaRepo {
   archived?: unknown;
   description?: unknown;
   empty?: unknown;
+  fork?: unknown;
+  parent?: { full_name?: unknown } | null;
 }
 
 function apiBase(baseUrl: string): string {
@@ -72,6 +77,10 @@ function toDiscovered(raw: GiteaRepo): DiscoveredRepo {
     archived: raw.archived === true,
     description:
       typeof raw.description === "string" && raw.description !== "" ? raw.description : null,
+    isFork: typeof raw.fork === "boolean" ? raw.fork : null,
+    // Swagger: parent is a full Repository, set for forks. A fork whose upstream
+    // we cannot see comes back without it, which stays "unknown" upstream.
+    forkParent: raw.fork === true ? parentPathOrNull(raw.parent?.full_name) : null,
   };
 }
 
@@ -157,5 +166,30 @@ export const giteaProvider: AccountSyncProvider = {
     throw new ProviderError(`Gitea kept paginating past ${String(MAX_PAGES)} pages`, {
       kind: "invalid_response",
     });
+  },
+
+  async getForkParent(context: DiscoveryContext, path: string): Promise<ForkLookup> {
+    const encoded = encodeRepoPath(path);
+    if (encoded.split("/").length < 2) {
+      return { status: "unknown", rateLimited: false };
+    }
+    try {
+      const response = await getJson<GiteaRepo>(
+        context,
+        `${apiBase(context.baseUrl)}/repos/${encoded}`,
+        { headers: headers(context), notFoundHint: path },
+      );
+      if (response.data.fork === true) {
+        const parent = parentPathOrNull(response.data.parent?.full_name);
+        return parent === null
+          ? { status: "unknown", rateLimited: false }
+          : { status: "fork", parent };
+      }
+      return response.data.fork === false
+        ? { status: "not_fork" }
+        : { status: "unknown", rateLimited: false };
+    } catch (cause) {
+      return forkLookupFailure(cause);
+    }
   },
 };

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Button from "primevue/button";
 import Checkbox from "primevue/checkbox";
 import Column from "primevue/column";
@@ -68,12 +68,54 @@ const toast = useToaster();
 
 const activeTab = ref("overview");
 
+// -- Maximize ---------------------------------------------------------------
+
+// The drawer is 48rem wide; the button only means something on a viewport with
+// room to spare beyond that.
+const WIDE_QUERY = "(min-width: 60rem)";
+const wideViewport = ref(false);
+const maximized = ref(false);
+let wideQuery: MediaQueryList | null = null;
+
+function onWideChange(event: { matches: boolean }): void {
+  wideViewport.value = event.matches;
+}
+
+onMounted(() => {
+  wideQuery = typeof window.matchMedia === "function" ? window.matchMedia(WIDE_QUERY) : null;
+  if (wideQuery === null) return;
+  wideViewport.value = wideQuery.matches;
+  wideQuery.addEventListener("change", onWideChange);
+});
+
+onBeforeUnmount(() => wideQuery?.removeEventListener("change", onWideChange));
+
+watch(
+  () => props.visible,
+  (visible) => {
+    if (!visible) maximized.value = false;
+  },
+);
+
+// The browser brings the markdown renderer and its sanitizer with it, so it
+// loads the first time the tab is opened and then stays mounted, keeping its
+// place while other tabs are visited.
+const RepoBrowser = defineAsyncComponent(() => import("./browse/RepoBrowser.vue"));
+const browseOpened = ref(false);
+
 // -- Overview ---------------------------------------------------------------
 
 const forge = computed(
   () => props.forges.find((entry) => entry.id === props.repo?.forgeId) ?? null,
 );
 const origin = computed(() => (forge.value === null ? "" : forgeOrigin(forge.value)));
+
+/** Where the repo this one was forked from lives on the forge, when known. */
+const forkParentUrl = computed(() => {
+  const parent = props.repo?.forkParent ?? null;
+  if (parent === null || origin.value === "") return null;
+  return `${origin.value}/${parent.split("/").map(encodeURIComponent).join("/")}`;
+});
 const forgeAccounts = computed(() =>
   props.accounts.filter((account) => account.forgeId === props.repo?.forgeId),
 );
@@ -395,6 +437,7 @@ watch(
   ([visible]) => {
     if (!visible || props.repo === null) return;
     activeTab.value = "overview";
+    browseOpened.value = false;
     runsPage.value = 1;
     void loadEffective();
   },
@@ -406,6 +449,7 @@ watch(activeTab, (tab) => {
   if (tab === "history") void loadRuns();
   if (tab === "settings") void loadSettings();
   if (tab === "clone") void loadGitRemote();
+  if (tab === "browse") browseOpened.value = true;
 });
 </script>
 
@@ -414,10 +458,30 @@ watch(activeTab, (tab) => {
     :visible="visible"
     position="right"
     class="repo-drawer"
-    :style="{ width: 'min(48rem, 100vw)' }"
-    :header="repo?.displayName ?? 'Repository'"
+    :style="{ width: maximized ? '100vw' : 'min(48rem, 100vw)' }"
     @update:visible="requestClose($event)"
   >
+    <!-- The built-in close button stays (and still goes through requestClose);
+         the maximize toggle sits in front of it. -->
+    <template #header="slotProps">
+      <div class="repo-drawer__head">
+        <span :class="slotProps.class">{{ repo?.displayName ?? "Repository" }}</span>
+        <Button
+          v-if="wideViewport"
+          type="button"
+          class="repo-drawer__maximize"
+          severity="secondary"
+          text
+          rounded
+          :aria-label="maximized ? 'Restore' : 'Maximize'"
+          :title="maximized ? 'Restore' : 'Maximize'"
+          :aria-pressed="maximized"
+          @click="maximized = !maximized"
+        >
+          <AppIcon :name="maximized ? 'restore' : 'maximize'" :size="16" />
+        </Button>
+      </div>
+    </template>
     <div v-if="repo" class="repo-drawer__body">
       <p class="repo-drawer__path mono">{{ origin }}/{{ repo.path }}</p>
 
@@ -447,6 +511,7 @@ watch(activeTab, (tab) => {
           <Tab value="settings">Settings</Tab>
           <Tab value="export">Export</Tab>
           <Tab value="clone">Clone</Tab>
+          <Tab value="browse">Browse</Tab>
         </TabList>
 
         <TabPanels>
@@ -460,6 +525,20 @@ watch(activeTab, (tab) => {
               <div>
                 <dt>Path</dt>
                 <dd class="mono">{{ repo.path }}</dd>
+              </div>
+              <div v-if="repo.forkParent !== null">
+                <dt>Fork of</dt>
+                <dd>
+                  <a
+                    v-if="forkParentUrl !== null"
+                    :href="forkParentUrl"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="mono"
+                    >{{ repo.forkParent }}</a
+                  >
+                  <span v-else class="mono">{{ repo.forkParent }}</span>
+                </dd>
               </div>
               <div>
                 <dt>Forge</dt>
@@ -686,10 +765,7 @@ watch(activeTab, (tab) => {
 
               <div v-if="folderSupported" class="repo-drawer__section">
                 <h3>Download to a folder</h3>
-                <p class="amber-note">
-                  Writes the working files straight into a folder you pick, without an archive step.
-                  Your browser will ask for permission to that folder.
-                </p>
+                <p class="amber-note">Writes the working clone directly into the chosen folder.</p>
                 <Button
                   label="Choose folder and download"
                   severity="secondary"
@@ -727,6 +803,10 @@ watch(activeTab, (tab) => {
               </template>
             </div>
           </TabPanel>
+          <!-- Browse -->
+          <TabPanel value="browse">
+            <RepoBrowser v-if="browseOpened" :key="repo.id" :repo="repo" />
+          </TabPanel>
         </TabPanels>
       </Tabs>
     </div>
@@ -762,6 +842,23 @@ watch(activeTab, (tab) => {
 </template>
 
 <style scoped>
+.repo-drawer__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.repo-drawer__head > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.repo-drawer__maximize {
+  margin-left: auto;
+}
+
 .repo-drawer__body {
   display: flex;
   flex-direction: column;

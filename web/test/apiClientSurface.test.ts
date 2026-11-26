@@ -383,6 +383,18 @@ describe("export and file streaming", () => {
     expect(calls[0]).toBe("/api/repos/5/export/source.zip");
   });
 
+  it("passes a revision to a source export", async () => {
+    const calls: string[] = [];
+    const fetchImpl = vi.fn(async (url: string) => {
+      calls.push(url);
+      return new Response(new Blob(["zip-bytes"]), { status: 200 });
+    });
+    const api = createApiClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+
+    await api.downloadExport(5, "source", "zip", "a".repeat(40));
+    expect(calls[0]).toBe(`/api/repos/5/export/source.zip?ref=${"a".repeat(40)}`);
+  });
+
   it("pages the file manifest and streams one blob", async () => {
     const tree = harness({
       ref: "abc123",
@@ -424,5 +436,153 @@ describe("base url", () => {
     await api.status();
     expect(calls[0]).toBe("http://amber.test/api/status");
     expect(api.eventsUrl()).toBe("http://amber.test/api/events");
+  });
+});
+
+describe("browse", () => {
+  const OID = "a".repeat(40);
+
+  it("lists refs, defaulting to nothing in the query", async () => {
+    const body = {
+      head: { oid: OID, kind: "branch", name: "main" },
+      branchCount: 1,
+      tagCount: 0,
+      rows: [{ kind: "branch", name: "main", oid: OID }],
+      truncated: false,
+      shallow: true,
+    };
+    const plain = harness(body);
+    await expect(plain.api.browseRefs(5)).resolves.toMatchObject({ shallow: true, branchCount: 1 });
+    expect(plain.calls[0]).toMatchObject({ url: "/api/repos/5/browse/refs", method: "GET" });
+
+    const filtered = harness(body);
+    await filtered.api.browseRefs(5, { kind: "tag", q: "v1", limit: 20 });
+    expect(filtered.calls[0]?.url).toBe("/api/repos/5/browse/refs?kind=tag&q=v1&limit=20");
+  });
+
+  it("resolves free text, encoding it", async () => {
+    const { api, calls } = harness({ oid: OID, kind: "branch", name: "feat/x y" });
+    await expect(api.browseResolve(5, "feat/x y")).resolves.toMatchObject({ oid: OID });
+    expect(calls[0]?.url).toBe("/api/repos/5/browse/resolve?rev=feat%2Fx+y");
+  });
+
+  it("reads a directory and a file from the same endpoint", async () => {
+    const tree = harness({
+      type: "tree",
+      commit: OID,
+      path: "src",
+      entries: [
+        { name: "a.ts", path: "src/a.ts", type: "blob", mode: "100644", oid: "b1", size: 3 },
+      ],
+      truncated: false,
+    });
+    await expect(tree.api.browseContents(5, OID, "src")).resolves.toMatchObject({ type: "tree" });
+    expect(tree.calls[0]?.url).toBe(`/api/repos/5/browse/contents?rev=${OID}&path=src`);
+
+    const root = harness({ type: "tree", commit: OID, path: "", entries: [], truncated: false });
+    await root.api.browseContents(5, OID);
+    expect(root.calls[0]?.url).toBe(`/api/repos/5/browse/contents?rev=${OID}`);
+
+    const blob = harness({
+      type: "blob",
+      commit: OID,
+      path: "a.md",
+      name: "a.md",
+      oid: "b2",
+      mode: "100644",
+      size: 4,
+      view: "markdown",
+      text: "# hi",
+      tooLarge: false,
+      symlink: false,
+      lfsPointer: false,
+    });
+    await expect(blob.api.browseContents(5, OID, "a.md")).resolves.toMatchObject({
+      type: "blob",
+      view: "markdown",
+    });
+  });
+
+  it("pages commits, optionally for one path", async () => {
+    const commit = {
+      oid: OID,
+      parents: [],
+      authorName: "A",
+      authorEmail: "a@example.com",
+      authorDate: 1,
+      committerName: "A",
+      committerEmail: "a@example.com",
+      committerDate: 1,
+      subject: "init",
+    };
+    const { api, calls } = harness({ rows: [commit], next: null });
+    await expect(api.browseCommits(5, { rev: OID })).resolves.toMatchObject({ next: null });
+    await api.browseCommits(5, { rev: OID, path: "src/a.ts", limit: 10, skip: 30 });
+    expect(calls[0]?.url).toBe(`/api/repos/5/browse/commits?rev=${OID}`);
+    expect(calls[1]?.url).toBe(
+      `/api/repos/5/browse/commits?rev=${OID}&path=src%2Fa.ts&limit=10&skip=30`,
+    );
+  });
+
+  it("reads the offset of the next page as a number", async () => {
+    const { api } = harness({ rows: [], next: 30 });
+    await expect(api.browseCommits(5, { rev: OID })).resolves.toMatchObject({ next: 30 });
+  });
+
+  it("reads one commit with its diff", async () => {
+    const { api, calls } = harness({
+      oid: OID,
+      parents: [],
+      authorName: "A",
+      authorEmail: "a@example.com",
+      authorDate: 1,
+      committerName: "A",
+      committerEmail: "a@example.com",
+      committerDate: 1,
+      subject: "init",
+      body: "",
+      files: [
+        {
+          path: "a.ts",
+          oldPath: null,
+          status: "added",
+          additions: 1,
+          deletions: 0,
+          binary: false,
+          patch: "@@ -0,0 +1 @@\n+x\n",
+          truncated: false,
+        },
+      ],
+      filesChanged: 1,
+      additions: 1,
+      deletions: 0,
+      filesTruncated: false,
+      missingParents: false,
+    });
+    await expect(api.browseCommit(5, OID)).resolves.toMatchObject({ filesChanged: 1 });
+    expect(calls[0]?.url).toBe(`/api/repos/5/browse/commit?rev=${OID}`);
+  });
+
+  it("builds raw urls for download and for inline images", () => {
+    const { api } = harness({});
+    expect(api.browseRawUrl(5, OID, "dir/a b.png")).toBe(
+      `/api/repos/5/browse/raw?rev=${OID}&path=dir%2Fa+b.png`,
+    );
+    expect(api.browseRawUrl(5, OID, "a.png", true)).toBe(
+      `/api/repos/5/browse/raw?rev=${OID}&path=a.png&inline=1`,
+    );
+  });
+
+  it("surfaces a 404 and a 409 with their status", async () => {
+    const missing = harness({ error: "not_found", message: "No such ref" }, 404);
+    await expect(missing.api.browseResolve(5, "nope")).rejects.toMatchObject({
+      status: 404,
+      problem: "not_found",
+    });
+    const cold = harness({ error: "not_backed_up", message: "Not backed up yet" }, 409);
+    await expect(cold.api.browseRefs(5)).rejects.toMatchObject({
+      status: 409,
+      problem: "not_backed_up",
+    });
   });
 });

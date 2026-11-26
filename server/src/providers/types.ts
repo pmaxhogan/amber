@@ -16,7 +16,27 @@ export interface DiscoveredRepo {
   archived: boolean;
   /** Carried for logging and future use; the repos table has no column for it. */
   description: string | null;
+  /**
+   * Whether the listing says this repository is a fork. Null when the listing
+   * does not carry the flag at all, which is not the same as "not a fork".
+   */
+  isFork: boolean | null;
+  /**
+   * Normalized path of the upstream on the same forge, only when the listing
+   * itself names it. GitHub and GitLab list endpoints never do.
+   */
+  forkParent: string | null;
 }
+
+/**
+ * Answer to "is this repository a fork, and of what". Only "fork" and
+ * "not_fork" are confirmed; every failure is "unknown" so a 404 or a flaky
+ * network can never be recorded as "not a fork".
+ */
+export type ForkLookup =
+  | { status: "fork"; parent: string }
+  | { status: "not_fork" }
+  | { status: "unknown"; rateLimited: boolean };
 
 /**
  * The subset of fetch the providers use. Injectable so tests can hand in an
@@ -85,4 +105,10 @@ export interface AccountSyncProvider {
    * proves the star was dropped deliberately rather than the repo vanishing.
    */
   checkRepoAccess?(context: DiscoveryContext, path: string): Promise<RepoAccess>;
+  /**
+   * Ask the forge about one repository's upstream. Optional: needed because
+   * some listings (GitHub, GitLab) say nothing about the parent. One GET, never
+   * throws on a forge failure.
+   */
+  getForkParent?(context: DiscoveryContext, path: string): Promise<ForkLookup>;
 }

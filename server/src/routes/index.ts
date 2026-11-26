@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import { accountRoutes } from "./accounts.ts";
 import { accountSyncRoutes } from "./accountSyncs.ts";
+import { browseRoutes } from "./browse.ts";
 import { eventRoutes } from "./events.ts";
 import { exportRoutes } from "./exports.ts";
 import { forgeRoutes } from "./forges.ts";
@@ -43,6 +44,7 @@ export const apiRoutes: FastifyPluginAsync = async (app) => {
   await app.register(accountSyncRoutes);
   await app.register(gitRemoteConfigRoutes);
   await app.register(exportRoutes);
+  await app.register(browseRoutes);
   await app.register(statusRoutes);
   await app.register(pushRoutes);
   await app.register(eventRoutes, {});

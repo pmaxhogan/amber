@@ -5,6 +5,11 @@ import {
   accountSyncSchema,
   amberEventSchema,
   apiErrorSchema,
+  browseCommitDetailSchema,
+  browseCommitsSchema,
+  browseContentsSchema,
+  browseRefsSchema,
+  browseResolvedSchema,
   bulkRepoResponseSchema,
   effectiveSettingsResponseSchema,
   forgeSchema,
@@ -19,6 +24,12 @@ import {
   statusSchema,
   treePageSchema,
   type Account,
+  type BrowseCommitDetail,
+  type BrowseCommits,
+  type BrowseContents,
+  type BrowseRefKind,
+  type BrowseRefs,
+  type BrowseResolved,
   type BulkRepoResponse,
   type UpsertAccountSyncInput,
   type AmberEvent,
@@ -455,13 +466,21 @@ export function createApiClient(options: ApiClientOptions = {}) {
     return url(`/api/repos/${repoId}/export/${kind}.${format}`);
   }
 
-  /** Authed download: fetch to a blob so the CF Access cookie is carried. */
+  /**
+   * Authed download: fetch to a blob so the CF Access cookie is carried.
+   * `ref` picks the revision of a source export (the browser passes a commit
+   * id); without it the server uses the default branch.
+   */
   async function downloadExport(
     repoId: number,
     kind: ExportKind,
     format: ExportFormatValue,
+    ref?: string,
   ): Promise<Blob> {
-    const response = await raw(`/api/repos/${repoId}/export/${kind}.${format}`, { method: "GET" });
+    const response = await raw(
+      `/api/repos/${repoId}/export/${kind}.${format}${buildQuery({ ref })}`,
+      { method: "GET" },
+    );
     try {
       return await response.blob();
     } catch (cause) {
@@ -495,6 +514,75 @@ export function createApiClient(options: ApiClientOptions = {}) {
       throw normalizeError(cause);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Browse (read-only repository browser; contract in shared/browseTypes.ts)
+  // -------------------------------------------------------------------------
+
+  /** Branches or tags of a backup, plus what a fresh browser opens on. */
+  const browseRefs = (
+    repoId: number,
+    query: { kind?: BrowseRefKind; q?: string; limit?: number } = {},
+    signal?: AbortSignal,
+  ): Promise<BrowseRefs> =>
+    request(`/api/repos/${repoId}/browse/refs${buildQuery({ ...query })}`, {
+      schema: browseRefsSchema,
+      signal,
+    });
+
+  /** Free text (branch, tag, short or full sha) to a commit. 404 when not stored. */
+  const browseResolve = (
+    repoId: number,
+    rev: string,
+    signal?: AbortSignal,
+  ): Promise<BrowseResolved> =>
+    request(`/api/repos/${repoId}/browse/resolve${buildQuery({ rev })}`, {
+      schema: browseResolvedSchema,
+      signal,
+    });
+
+  /** A directory listing or a file at `path`, at the commit `rev` (a full oid). */
+  const browseContents = (
+    repoId: number,
+    rev: string,
+    path = "",
+    signal?: AbortSignal,
+  ): Promise<BrowseContents> =>
+    request(`/api/repos/${repoId}/browse/contents${buildQuery({ rev, path })}`, {
+      schema: browseContentsSchema,
+      signal,
+    });
+
+  /** One page of history from `rev`, optionally only what touched `path`. Page on with `skip`. */
+  const browseCommits = (
+    repoId: number,
+    params: { rev: string; path?: string; limit?: number; skip?: number },
+    signal?: AbortSignal,
+  ): Promise<BrowseCommits> =>
+    request(`/api/repos/${repoId}/browse/commits${buildQuery({ ...params })}`, {
+      schema: browseCommitsSchema,
+      signal,
+    });
+
+  /** One commit with its diff against the first parent. */
+  const browseCommit = (
+    repoId: number,
+    rev: string,
+    signal?: AbortSignal,
+  ): Promise<BrowseCommitDetail> =>
+    request(`/api/repos/${repoId}/browse/commit${buildQuery({ rev })}`, {
+      schema: browseCommitDetailSchema,
+      signal,
+    });
+
+  /**
+   * The bytes of one file. A download link by default; `inline` is for the
+   * `src` of an `<img>` and only ever answers with an image type.
+   */
+  const browseRawUrl = (repoId: number, rev: string, path: string, inline = false): string =>
+    url(
+      `/api/repos/${repoId}/browse/raw${buildQuery({ rev, path, inline: inline ? "1" : undefined })}`,
+    );
 
   // -------------------------------------------------------------------------
   // Events
@@ -542,6 +630,12 @@ export function createApiClient(options: ApiClientOptions = {}) {
     downloadExport,
     listTree,
     getBlob,
+    browseRefs,
+    browseResolve,
+    browseContents,
+    browseCommits,
+    browseCommit,
+    browseRawUrl,
     eventsUrl,
     getPush,
     subscribePush,

@@ -78,6 +78,9 @@ export function buildGitEnv(extra: Record<string, string> = {}): NodeJS.ProcessE
   env.GIT_TERMINAL_PROMPT = "0";
   env.GIT_ASKPASS = "";
   env.GIT_LFS_SKIP_SMUDGE = "1";
+  // A backup mirrors every ref, refs/replace/* included. Serving must return the
+  // object an id names, not whatever a hostile ref says should stand in for it.
+  env.GIT_NO_REPLACE_OBJECTS = "1";
   // Nothing on these paths talks to a network, but if a repository config ever
   // tried to, only http(s) would be permitted.
   env.GIT_ALLOW_PROTOCOL = "https:http";

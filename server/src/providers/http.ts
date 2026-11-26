@@ -334,3 +334,51 @@ export function matchesVisibility(isPrivate: boolean, visibility: string): boole
   }
   return true;
 }
+
+/**
+ * Turn a failed fork lookup into the "unknown" answer. A 404 or 403 can mean a
+ * private or deleted repository, so none of these may be read as "not a fork";
+ * only rate limiting is told apart so the resolver can back off the forge.
+ */
+export function forkLookupFailure(cause: unknown): { status: "unknown"; rateLimited: boolean } {
+  return {
+    status: "unknown",
+    rateLimited: cause instanceof ProviderError && cause.kind === "rate_limited",
+  };
+}
+
+/** Percent-encode each segment of a repo path while keeping the slashes. */
+export function encodeRepoPath(path: string): string {
+  return path
+    .split("/")
+    .filter((segment) => segment !== "")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+/** Longest fork parent path worth storing; real ones are a few dozen characters. */
+const MAX_PARENT_PATH_CHARS = 512;
+/** Printable, no whitespace, no backslash: what a repository path is made of. */
+const PLAIN_PATH = /^[^\s\\\p{Cc}]+$/u;
+
+/**
+ * A forge-supplied path field as a normalized path, or null when absent or
+ * blank. The forge is not trusted: this value is stored, sent to every
+ * browser and turned into a link, so anything that is not a plain path (dot
+ * segments that would climb out of it, whitespace, control characters, a
+ * backslash, or something absurdly long) is treated as no answer.
+ */
+export function parentPathOrNull(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw.length > MAX_PARENT_PATH_CHARS) {
+    return null;
+  }
+  const normalized = normalizeRepoPath(raw);
+  if (normalized === "" || !PLAIN_PATH.test(normalized)) {
+    return null;
+  }
+  const segments = normalized.split("/");
+  if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    return null;
+  }
+  return normalized;
+}

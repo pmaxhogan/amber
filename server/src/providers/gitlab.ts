@@ -1,11 +1,13 @@
 import {
+  forkLookupFailure,
   getJson,
   matchesVisibility,
   normalizeRepoPath,
   pagesByLink,
+  parentPathOrNull,
   ProviderError,
 } from "./http.ts";
-import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext } from "./types.ts";
+import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext, ForkLookup } from "./types.ts";
 
 /**
  * GitLab REST v4 client (gitlab.com and self-hosted, base <origin>/api/v4).
@@ -42,6 +44,7 @@ interface GitLabProject {
   archived?: unknown;
   description?: unknown;
   empty_repo?: unknown;
+  forked_from_project?: { path_with_namespace?: unknown } | null;
 }
 
 function apiBase(baseUrl: string): string {
@@ -63,6 +66,7 @@ function toDiscovered(raw: GitLabProject): DiscoveredRepo {
     });
   }
   const emptyRepo = raw.empty_repo === true;
+  const parent = parentPathOrNull(raw.forked_from_project?.path_with_namespace);
   return {
     path: normalizeRepoPath(raw.path_with_namespace),
     defaultBranch:
@@ -75,6 +79,11 @@ function toDiscovered(raw: GitLabProject): DiscoveredRepo {
     archived: raw.archived === true,
     description:
       typeof raw.description === "string" && raw.description !== "" ? raw.description : null,
+    // Checked live 2026-11-26: the list endpoints omit forked_from_project even for
+    // forks, so a missing key proves nothing and stays null. Only the single-project
+    // GET (getForkParent) is authoritative; if a list ever names a parent, take it.
+    isFork: parent === null ? null : true,
+    forkParent: parent,
   };
 }
 
@@ -131,6 +140,30 @@ export const gitlabProvider: AccountSyncProvider = {
           yield repo;
         }
       }
+    }
+  },
+
+  async getForkParent(context: DiscoveryContext, path: string): Promise<ForkLookup> {
+    const normalized = path.replace(/^\/+|\/+$/g, "");
+    if (normalized === "") {
+      return { status: "unknown", rateLimited: false };
+    }
+    try {
+      // The project id slot takes the whole path with its slashes encoded.
+      const response = await getJson<GitLabProject>(
+        context,
+        `${apiBase(context.baseUrl)}/projects/${encodeURIComponent(normalized)}`,
+        { headers: headers(context), notFoundHint: path },
+      );
+      if (typeof response.data.path_with_namespace !== "string") {
+        return { status: "unknown", rateLimited: false };
+      }
+      const parent = parentPathOrNull(response.data.forked_from_project?.path_with_namespace);
+      // A fork whose upstream was deleted or is private to us loses the key,
+      // which GitLab cannot tell apart from "never a fork", so it reads as not a fork.
+      return parent === null ? { status: "not_fork" } : { status: "fork", parent };
+    } catch (cause) {
+      return forkLookupFailure(cause);
     }
   },
 };

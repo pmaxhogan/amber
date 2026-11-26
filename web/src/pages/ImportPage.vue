@@ -127,10 +127,7 @@ function statusIcon(status: string): string {
 
 <template>
   <section>
-    <PageHeader
-      title="Import"
-      description="Paste one repository URL per line. Amber parses every line before anything is written, so you can see exactly what it will do."
-    />
+    <PageHeader title="Import" description="One repository URL per line." />
 
     <div class="import-grid">
       <div class="amber-field">
@@ -146,11 +143,10 @@ function statusIcon(status: string): string {
           @input="reset"
         />
         <p class="amber-note">
-          {{ pluralize(lineCount, "line", "lines") }} to parse. Blank lines and lines starting with
-          a hash are ignored. A "user@" prefix picks an existing account on that forge as the
-          override; it never creates an account. A GitHub user or organization on its own, like
-          https://github.com/nodejs, imports every repository it owns and keeps adding new ones. SSH
-          remotes are not supported.
+          {{ pluralize(lineCount, "line", "lines") }} to parse. Lines starting with a # are ignored.
+          Add a user@domain.com to pick an existing account on that forge. A GitHub user or
+          organization on its own, like https://github.com/nodejs, will import their repos, adding
+          new ones that appear. SSH remotes are not supported.
         </p>
       </div>
 

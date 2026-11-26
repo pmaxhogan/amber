@@ -279,7 +279,7 @@ onMounted(() => void load());
   <section>
     <PageHeader
       title="Forges &amp; Accounts"
-      description="Forges amber knows about, and the credentials it uses against each one. Secrets are write-only: amber stores them encrypted and never gives them back."
+      description="Forges are the web sites that host repos, add them and configure their accounts here. Some common providers (GitHub, etc) support additional features."
     >
       <template #actions>
         <Button label="Add forge" size="small" @click="openForgeDialog" />
@@ -393,7 +393,7 @@ onMounted(() => void load());
           </tbody>
         </table>
         <p v-else class="amber-muted">
-          No accounts on this forge. Amber fetches its repositories anonymously.
+          No accounts provided, all repos will be fetched anonymously.
         </p>
       </article>
     </div>

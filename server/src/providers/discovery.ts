@@ -533,13 +533,13 @@ function listingFor(
   return provider.listRepos(context);
 }
 
-function buildBaseUrl(forge: ForgeRow): string {
+export function buildBaseUrl(forge: Pick<ForgeRow, "protocol" | "host" | "port">): string {
   const port = forge.port === null ? "" : `:${String(forge.port)}`;
   return `${forge.protocol}://${forge.host}${port}`;
 }
 
-function resolveToken(
-  account: AccountRow,
+export function resolveToken(
+  account: Pick<AccountRow, "username" | "secret_enc">,
   secretKey: Buffer | null,
   decrypt: (key: Buffer, blob: Buffer) => string,
 ): string | null {
@@ -631,6 +631,7 @@ export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
           args.now,
           found.id,
         );
+        writeListedForkKnowledge(db, found.id, repo, args.now);
         if (found.managed === null) {
           linked += 1;
         }
@@ -689,6 +690,14 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
         args.now,
         args.now,
       );
+      const inserted = db.get<{ id: number }>(
+        "SELECT id FROM repos WHERE forge_id = ? AND path = ?",
+        args.forgeId,
+        args.repo.path,
+      );
+      if (inserted !== undefined) {
+        writeListedForkKnowledge(db, inserted.id, args.repo, args.now);
+      }
       return;
     } catch (cause) {
       lastError = cause;
@@ -700,6 +709,24 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
   throw new Error(`Could not allocate a unique short id for ${args.repo.path}`, {
     cause: lastError,
   });
+}
+
+/**
+ * Record what a listing proved about forkness. A listing that says "not a
+ * fork" or names the parent is an answer; one that says "fork" without naming
+ * the parent, or says nothing, is not, and must not wipe an answer the
+ * resolver already got.
+ */
+function writeListedForkKnowledge(db: Db, repoId: number, repo: DiscoveredRepo, now: number): void {
+  if (repo.forkParent === null && repo.isFork !== false) {
+    return;
+  }
+  db.run(
+    "UPDATE repos SET fork_parent = ?, fork_known = 1, fork_checked_at = ? WHERE id = ?",
+    repo.forkParent,
+    now,
+    repoId,
+  );
 }
 
 function isShortIdCollision(cause: unknown): boolean {

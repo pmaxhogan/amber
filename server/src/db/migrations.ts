@@ -433,6 +433,29 @@ CREATE TABLE push_subscriptions (
 );
 `;
 
+/**
+ * 008: where a fork came from.
+ *
+ * repos.fork_parent is the path, on the same forge, of the repository this one
+ * was forked from. It only means something once fork_known is 1: then NULL is
+ * "not a fork". While fork_known is 0 nobody has an answer yet: a manual
+ * import says nothing about forks, and GitHub's listings carry only a boolean,
+ * so the parent takes one more API call per fork (providers/forks.ts drips
+ * those out in the background).
+ *
+ * fork_checked_at is the last time the forge was asked, whatever it said. A
+ * repository the forge will not show us right now (taken down, hidden, rate
+ * limited) stays unknown and is asked again later rather than being written
+ * down as "not a fork".
+ */
+const forkParent = `
+ALTER TABLE repos ADD COLUMN fork_parent TEXT NULL;
+ALTER TABLE repos ADD COLUMN fork_known INTEGER NOT NULL DEFAULT 0 CHECK (fork_known IN (0, 1));
+ALTER TABLE repos ADD COLUMN fork_checked_at INTEGER NULL;
+
+CREATE INDEX idx_repos_fork_unknown ON repos (fork_checked_at) WHERE fork_known = 0;
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
@@ -441,4 +464,5 @@ export const migrations: readonly Migration[] = [
   { name: "005_last_seen", sql: lastSeen },
   { name: "006_trending_sync", sql: trendingSync },
   { name: "007_gone_and_push", sql: goneAndPush },
+  { name: "008_fork_parent", sql: forkParent },
 ];

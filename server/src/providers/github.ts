@@ -1,12 +1,21 @@
 import {
+  encodeRepoPath,
   expectArray,
+  forkLookupFailure,
   getJson,
   matchesVisibility,
   normalizeRepoPath,
   pagesByLink,
+  parentPathOrNull,
   ProviderError,
 } from "./http.ts";
-import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext, RepoAccess } from "./types.ts";
+import type {
+  AccountSyncProvider,
+  DiscoveredRepo,
+  DiscoveryContext,
+  ForkLookup,
+  RepoAccess,
+} from "./types.ts";
 
 /**
  * GitHub REST client. Endpoints and behaviour verified against the live docs on
@@ -52,6 +61,8 @@ interface GitHubRepo {
   default_branch?: unknown;
   archived?: unknown;
   description?: unknown;
+  fork?: unknown;
+  parent?: { full_name?: unknown } | null;
 }
 
 /** Cached per run: one GET /user answers "is this the account's own token". */
@@ -118,6 +129,9 @@ function toDiscovered(raw: GitHubRepo): DiscoveredRepo {
       raw.private === true || raw.visibility === "private" || raw.visibility === "internal",
     archived: raw.archived === true,
     description: typeof raw.description === "string" ? raw.description : null,
+    // List endpoints say `fork` but never `parent`; only GET /repos/{o}/{r} names it.
+    isFork: typeof raw.fork === "boolean" ? raw.fork : null,
+    forkParent: null,
   };
 }
 
@@ -286,6 +300,31 @@ export const githubProvider: AccountSyncProvider = {
         return "missing";
       }
       return "unknown";
+    }
+  },
+
+  async getForkParent(context: DiscoveryContext, path: string): Promise<ForkLookup> {
+    const encoded = encodeRepoPath(path);
+    if (encoded.split("/").length < 2) {
+      return { status: "unknown", rateLimited: false };
+    }
+    try {
+      const response = await getJson<GitHubRepo>(
+        context,
+        `${apiBase(context.baseUrl)}/repos/${encoded}`,
+        { headers: headers(context), notFoundHint: path },
+      );
+      if (response.data.fork === true) {
+        const parent = parentPathOrNull(response.data.parent?.full_name);
+        return parent === null
+          ? { status: "unknown", rateLimited: false }
+          : { status: "fork", parent };
+      }
+      return response.data.fork === false
+        ? { status: "not_fork" }
+        : { status: "unknown", rateLimited: false };
+    } catch (cause) {
+      return forkLookupFailure(cause);
     }
   },
 };

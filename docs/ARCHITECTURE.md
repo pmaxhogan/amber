@@ -74,14 +74,18 @@ server/src/
                           #   listNamespaceRepos?, listTrending?, checkRepoAccess?)
   providers/github.ts     # + gitlab.ts, bitbucket.ts, gitea.ts
   providers/discovery.ts  # account-sync run: enumerate -> upsert repos
+  providers/forks.ts      # background resolver: which repository a fork came from
   gitremote/routes.ts     # smart HTTP read-only remote (/git/*)
   web.ts                  # serves the built SPA + client-route fallback
   notify/push.ts          # web push: VAPID keys, subscriptions, gone notifications
   export/archive.ts       # zip/tar.gz/7z streaming of source, git-archive, file listing
+  browse/*.ts             # read-only repository browser: refs, contents, raw, history, diffs
   routes/*.ts             # REST routes per resource (thin; call domain/*)
   events.ts               # SSE broadcaster for live UI updates
 web/src/
   main.ts, App.vue, router/, stores/, pages/, components/, theme/
+  components/browse/      # the Browse tab of the repo drawer
+  lib/markdown/           # hostile markdown -> sanitized, sandboxed frame document
   theme/amber-preset.ts   # PrimeVue theme preset, dark-first amber palette
   assets/logo.svg         # inclusion-in-amber mark
 e2e/                      # playwright smoke (built server + a docker image check)
@@ -134,6 +138,11 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   `gone_at` INTEGER NULL (when a repository that had synced at least once was
   judged gone upstream; see "Gone repositories" under Sync engine. Migration
   007 backfilled it, silently, for repositories already gone at upgrade time).
+  `fork_parent` TEXT NULL, `fork_known` INTEGER 0/1, `fork_checked_at` INTEGER
+  NULL (migration 008; see "Fork parents" under Sync engine). `fork_parent` is
+  the path, on the same forge, of the repository this one was forked from. It
+  only means something once `fork_known` is 1: then NULL is "not a fork".
+  `fork_checked_at` is the last time the forge was asked, whatever it said.
   UNIQUE(forge_id, path). Re-importing an existing forge+path updates the account
   override instead of erroring (idempotent import).
 - `sync_runs`: `id` PK, `repo_id` FK CASCADE, `started_at`, `finished_at`,
@@ -395,6 +404,23 @@ directory names never collide regardless of sanitization overlaps.
   it is a typo. Why it is gone is not stored: the Removed page derives it from
   `last_error` and the newest run's kind, so it always says what the forge
   says now.
+- Fork parents (`providers/forks.ts`, `resolvePendingForks`): the Repos page
+  shows what each fork was forked from. A listing proves what it can for free
+  (GitHub and Gitea listings say whether a repository is a fork, Gitea's also
+  says of what; GitLab's and Bitbucket's say neither), and discovery writes
+  that down, never replacing a known answer with an unknown one. Everything
+  else - every manual import, and every GitHub fork, whose parent is only on
+  `GET /repos/{owner}/{repo}` - is asked for in the background: on the
+  account-sync tick, 20 repositories with `fork_known = 0` at a time,
+  never-asked first, one single-repository GET each, with the credential the
+  repository's own fetches would use and never an account of another forge.
+  A definite answer sets `fork_known`; a 404, 403, 5xx or network failure only
+  stamps `fork_checked_at`, so a repository the forge will not show right now
+  (taken down, hidden) is asked again a day later rather than being recorded
+  as "not a fork". A rate limit stops that forge for an hour. Generic forges
+  have no provider and stay unknown. Known gap: on GitLab and Bitbucket a fork
+  whose upstream is private or deleted reads as "not a fork", because the
+  forge's answer cannot tell the two apart.
 - Every sync records a `sync_runs` row + updates repo denormalized fields +
   `disk_usage_bytes` (recursive du, after the fetch) and emits an SSE event.
 
@@ -467,6 +493,79 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   never touching the filesystem via user paths). Web UI walks the manifest writing
   into a user-picked local directory (Chromium only; feature-detected).
 
+## Repository browser (browse/*.ts, routes/browse.ts)
+
+A read-only view of what a backup holds: files, history and diffs, served from
+the backup directory with git plumbing. The contract (queries, answers, caps)
+is pinned in `shared/src/browseTypes.ts`. Repositories are HOSTILE INPUT here:
+amber backs up arbitrary repositories, including ones taken down for cause, and
+names, paths, messages and file contents are all attacker-controlled.
+
+- `GET /api/repos/:id/browse/refs?kind=branch|tag&q=&limit=` - refs of one
+  kind, newest first with the default branch pinned on top, each with the
+  commit it points at (annotated tags peeled). Also `head` (tip of the default
+  branch, else HEAD), the total branch and tag counts, and `shallow`.
+- `GET .../browse/resolve?rev=<free text>` - a branch, tag, full ref name, or
+  short or full sha, to a commit id; 404 when the backup does not hold it.
+- `GET .../browse/contents?rev=&path=` - a directory listing (one level,
+  directories first) or a file. A file says how to show it (`text`,
+  `markdown`, `image`, `binary`) and carries its text when it is UTF-8 and at
+  most 1 MiB. Symlinks show their target, submodules are listed but not
+  followed, LFS pointers are flagged.
+- `GET .../browse/raw?rev=&path=&inline=1` - the bytes of one file.
+- `GET .../browse/commits?rev=&path=&limit=&skip=` - history from a commit,
+  optionally only what touched a path. Paged by OFFSET into one walk (`next`
+  is the next `skip`): a commit id never changes what it names, so the walk is
+  the same every time, whereas restarting the walk at a cursor commit drops
+  whatever was still queued on the other side of a merge.
+- `GET .../browse/commit?rev=` - one commit with its diff against the first
+  parent, per file, with caps and `truncated` flags. At the edge of a shallow
+  backup there is no parent to compare with, and it says so (`missingParents`)
+  instead of showing the whole tree as added.
+
+Rules that make it safe:
+
+- No caller-supplied NAME ever becomes a git argument. `refs` and `resolve`
+  are the only endpoints that see names, and they only compare them, as
+  strings, against git's own `for-each-ref` listing. Every other endpoint
+  takes `rev`, accepts nothing but a full hex commit id, and checks that it
+  names a commit in this backup.
+- No caller-supplied PATH touches the filesystem. A path is a literal pathspec
+  after `--` (`GIT_LITERAL_PATHSPECS=1`), accepted only on exact equality with
+  what `ls-tree -z` printed, and the object is then read by id.
+- `GIT_NO_REPLACE_OBJECTS=1`, so a `refs/replace/*` ref cannot change what an
+  id names. Diffs run with `--no-ext-diff --no-textconv`, so a repository's
+  `.gitattributes` can never make git run anything, and with an empty
+  attribute source (`GIT_ATTR_SOURCE`, git 2.41 and later) so it decides
+  nothing at all. The image's Debian ships git 2.39, which ignores that
+  variable: there, a `full` mode backup's own `.gitattributes` can still mark
+  a file as binary in a diff. Bare backups have no working tree to read
+  attributes from.
+- Every git process has a byte cap that truncates with a flag rather than
+  failing, a 30 second timeout (answered as 504), and is killed when the
+  client disconnects. At most 4 run at once across all browse requests; the
+  rest queue inside the same 30 second budget. Diffs run with
+  `core.bigFileThreshold` at 1 MiB, so a larger file is reported as binary
+  instead of being loaded to diff: a 4 MB repository holding a 200 MB text
+  file once cost 1.3 GB of memory for one commit view.
+- Commit times are clamped to what a JS Date can hold. A commit dated in the
+  year 318857 passes `git fsck` and must not break the history it is in.
+- A full-length object id typed into `resolve` wins over a ref of the same
+  name, so a branch named like another commit's id cannot stand in for it.
+- Known limits: a file name that is not valid UTF-8 is listed with
+  replacement characters and cannot be opened; and "Download zip" is `git
+  archive`, which honors the archived tree's own `export-ignore` and
+  `export-subst` attributes (as GitHub's zip download does), so it can omit
+  or rewrite files the browser shows. The full-backup export is exact.
+- `raw` is never a script host. Every answer carries `nosniff`,
+  `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline';
+  sandbox` and `Cross-Origin-Resource-Policy: same-origin`, so a file opened
+  in its own tab gets a unique origin and no script. It is an attachment
+  (`application/octet-stream`) unless `inline=1` names one of a short list of
+  image types AND the bytes really are that type (magic bytes for raster
+  images; an SVG must be UTF-8 text); the content type is the server's choice
+  from the extension, never sniffed and never the caller's.
+
 ## REST API (all JSON under /api, zod-validated bodies/queries)
 
 - Unauthenticated: `GET /healthz` (also used by docker healthcheck).
@@ -482,7 +581,7 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   - `GET /api/repos` - server-side pagination
     (`page`, `perPage<=200`, `sort`, `dir`, `q`, `forgeId`, `state`, `outcome`,
     `gone` - true for only the repositories gone upstream, false for the rest),
-    returns rows + total. `q` is a case-insensitive substring of the path or
+    returns rows + total. `sort` includes `fork_parent`, non-forks last. `q` is a case-insensitive substring of the path or
     display name; when it is a pasted repository URL (any scheme, scp syntax,
     a `user@` prefix, `.git`, a trailing slash, a query string, or a deeper
     page such as `/tree/main`) it also matches by forge host plus path, so
@@ -491,7 +590,11 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
     `syncEnabled` (layered settings, batch-resolved for the whole page in one
     pass per scope) plus `lastOutcome` and `lastErrorKind` (from the newest
     `sync_runs` row). They are optional on the shared schema because only this
-    endpoint populates them; the single-repo reads return the row as stored. `GET /api/repos/:id`, `PATCH /api/repos/:id`
+    endpoint populates them; the single-repo reads return the row as stored.
+    A row with a `forkParent` also carries `forkParentRepoId`: the id of the
+    repo row backing up that upstream on the same forge (path matched without
+    regard to case), or null when amber does not track it. `GET
+    /api/repos/:id` carries it too, so a row refreshed in place keeps it. `GET /api/repos/:id`, `PATCH /api/repos/:id`
     (pause/resume, override account, force_anonymous), `DELETE /api/repos/:id`
     (`?files=true` also removes the backup dir),
     `POST /api/repos/:id/sync` (sync now), `GET /api/repos/:id/runs` (paged).
@@ -520,6 +623,7 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
     (in the body, since the endpoint is a capability that does not belong in a
     URL), `POST /api/push/test` (sends a test notification; answers
     `{ sent, failed }`).
+  - `GET /api/repos/:id/browse/*` - see "Repository browser".
   - `GET /api/status` - version, queue depth, active syncs, totals (repos, gone
     repos, disk), breaker state, insecure-mode flag.
   - `GET /api/events` - SSE stream. Frames are `{ type, at, payload }`, framed
@@ -639,6 +743,45 @@ configure.
     host in env and refuses (returns empty) when git's prompt names any other
     host. Defense in depth against a malicious forge redirecting to a
     credential-phishing host.
+- Hostile repository content. The browser shows what is inside backups, so a
+  repository's author is an attacker against whoever views it. The layers,
+  each assumed to fail:
+  - Everything that came out of a repository (names, paths, messages, file
+    and patch text) reaches the page as text through Vue interpolation. There
+    is no `v-html` and no `innerHTML` in the web app, and every `href` or
+    `src` bound from repository data is a URL amber built from an id, a commit
+    id and a path.
+  - Markdown (`web/src/lib/markdown/`) goes through markdown-it (no plugins),
+    then DOMPurify with a short explicit tag and attribute allowlist (no
+    `style`, `class`, `id`, forms, media, SVG or MathML), then a rewrite pass
+    over the sanitized DOM that replaces every link and image URL with one it
+    built: an image must resolve to an image file inside the same tree and is
+    pointed at the `raw` endpoint for that repo and commit; a link is http,
+    https or mailto, or a path inside the tree. Remote images are never
+    loaded (their alt text is shown instead): a backup viewer should not tell
+    third parties what is being read, and a repository must not be able to
+    make the viewer's browser request arbitrary URLs.
+  - The result never enters the app's document. It is shown in `<iframe
+    sandbox="allow-same-origin" srcdoc>`: no `allow-scripts`, so nothing in
+    the frame can run, and `allow-same-origin` only lets the parent measure
+    the content and handle clicks, and lets the frame's images carry the
+    session cookie. The frame document carries its own policy, `default-src
+    'none'` with `img-src` pinned to that repository's `raw` endpoint. The
+    parent cancels every click in the frame and acts on it itself: a tree
+    link navigates the browser, an external link opens in a new tab with no
+    opener. Where a browser will not run the parent's listener inside a
+    script-less frame (WebKit), the links are listed under the frame instead.
+  - Rendering is budgeted before the browser parses anything, because the
+    HTML parser itself can be made to do minutes of work: a file over 256 KiB,
+    or whose markup has more than 10,000 start tags, is shown as source. The
+    formatting elements (`b`, `i`, `a`, `code`, ...) reach the parser under
+    stand-in names and are renamed back in the sanitized DOM, since an
+    unclosed formatting element is re-created by the parser after every later
+    block, which is cubic in the hands of an attacker. Images are capped per
+    document, their dimensions bounded, and the frame's height clamped.
+  - Any failure in that pipeline shows the markdown source as plain text.
+  - The `raw` endpoint cannot serve active content (see "Repository
+    browser").
 - SSRF note: amber's whole job is fetching user-supplied URLs, so outbound requests
   are inherently arbitrary; mitigations: only http(s) protocols allowed
   (GIT_ALLOW_PROTOCOL), no redirects followed by provider API clients beyond same
@@ -670,7 +813,14 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   inclusion (dots+edges) inside; also exported as favicon.svg/png and used in
   README and the CF Access app icon.
 - Pages: Repos (default; dense DataTable, lazy server-side mode, multi-select +
-  bulk bar, detail drawer with runs/errors/settings/export/clone), Removed
+  bulk bar, a sortable "Fork of" column that opens the upstream's own drawer
+  when amber backs it up and its page on the forge when it does not, detail
+  drawer with runs/errors/settings/export/clone and a Browse tab: a ref picker
+  with branch and tag tabs plus a jump box that takes a branch, tag or sha,
+  the file tree with the directory's README rendered under it, a file view
+  with line numbers, markdown and common images rendered, history, and
+  per-commit diffs; the drawer can be maximized to the full viewport on wide
+  screens), Removed
   (repositories gone upstream, newest first, with when each was last checked
   and what the forge answered, a GitHub DMCA takedown named as such with a link
   to the published notice, the same detail drawer for exporting the backup, and the per-device notification
@@ -737,6 +887,18 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
     directory record, enable the git remote and read the one-time password,
     then a real `git clone` with the real binary, a rejected wrong password,
     and a rejected push.
+  - `tests/browse.spec.ts` drives the Browse tab against repositories the
+    suite builds itself and serves over dumb HTTP from a throwaway local
+    server (`tests/localGitServer.ts`), so it needs no network: the README in
+    its sandboxed frame, in-frame links, file views, history, diffs, the ref
+    picker and jump box, the single-ref case, the maximize button, and the
+    headers of the `raw` endpoint.
+  - `tests/hostile.spec.ts` is the regression suite for hostile repository
+    content, in a real browser: a repository full of script-bearing markdown,
+    file names, ref names, commit text, an SVG and a mislabelled HTML file.
+    Its detectors (dialogs, a canary function, off-origin requests, frame
+    navigations, popups) are proven with a positive control first, then every
+    view is walked and nothing may fire.
   - `tests/dockerImage.spec.ts` smoke tests the built image from INSIDE the
     container (`docker exec`): git, git-lfs and 7z present, healthz ok, and the
     root serving the SPA. Skipped unless `AMBER_E2E_IMAGE` names an image.

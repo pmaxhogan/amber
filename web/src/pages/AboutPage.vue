@@ -53,9 +53,8 @@ onMounted(reload);
       <div>
         <h2>Amber - git history, preserved.</h2>
         <p class="amber-muted">
-          A self-hosted git backup service. It keeps up-to-date local mirrors of any repository
-          reachable over HTTPS, on a schedule, and can serve those mirrors back out as a read-only
-          git remote.
+          A self-hosted robust and smart git backup service. It maintains up-to-date local mirrors
+          of configured HTTPS repositories.
         </p>
         <p class="about-hero__links">
           <a href="https://github.com/pmaxhogan/amber" target="_blank" rel="noopener noreferrer">

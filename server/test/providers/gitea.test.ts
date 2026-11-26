@@ -142,6 +142,8 @@ describe("giteaProvider.listRepos", () => {
       isPrivate: false,
       archived: false,
       description: null,
+      isFork: null,
+      forkParent: null,
     });
   });
 

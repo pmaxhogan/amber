@@ -6,6 +6,7 @@ import { migrate } from "../src/db/migrate.ts";
 import type { RepoFileRemover } from "../src/domain/repos.ts";
 import { createConsoleLogger } from "../src/logging.ts";
 import type { DiscoveryDeps } from "../src/providers/discovery.ts";
+import type { ForkResolverDeps } from "../src/providers/forks.ts";
 
 let db: Db;
 let timer: AccountSyncTimer | undefined;
@@ -124,5 +125,72 @@ describe("account sync timer", () => {
     // stop() clears the interval; an explicit tick is still the caller's call.
     await handle.tick();
     expect(calls).toBe(1);
+  });
+  it("runs the fork resolver after the account syncs, under the same guard", async () => {
+    const order: string[] = [];
+    let seenDeps: ForkResolverDeps | undefined;
+    timer = startAccountSyncTimer({
+      db,
+      log,
+      secretKey: null,
+      removeFiles: noopRemover,
+      intervalMs: 60_000,
+      run: () => {
+        order.push("sync");
+        return Promise.resolve([]);
+      },
+      resolveForks: (_database, forkDeps) => {
+        order.push("forks");
+        seenDeps = forkDeps;
+        return Promise.resolve();
+      },
+    });
+
+    await timer.tick();
+
+    expect(order).toEqual(["sync", "forks"]);
+    expect(seenDeps?.cooldowns).toBeInstanceOf(Map);
+  });
+
+  it("still resolves forks when the account sync pass throws, and survives a resolver that throws", async () => {
+    let forkPasses = 0;
+    timer = startAccountSyncTimer({
+      db,
+      log,
+      secretKey: null,
+      removeFiles: noopRemover,
+      intervalMs: 60_000,
+      run: () => Promise.reject(new Error("sync broke")),
+      resolveForks: () => {
+        forkPasses += 1;
+        return Promise.reject(new Error("forks broke"));
+      },
+    });
+
+    await timer.tick();
+    await timer.tick();
+
+    expect(forkPasses).toBe(2);
+  });
+
+  it("publishes repo.updated for a repo whose fork parent was written", async () => {
+    const published: unknown[] = [];
+    timer = startAccountSyncTimer({
+      db,
+      log,
+      secretKey: null,
+      removeFiles: noopRemover,
+      intervalMs: 60_000,
+      events: { publish: (type, payload) => published.push([type, payload]) },
+      run: () => Promise.resolve([]),
+      resolveForks: (_database, forkDeps) => {
+        forkDeps.onResolved?.(7);
+        return Promise.resolve();
+      },
+    });
+
+    await timer.tick();
+
+    expect(published).toEqual([["repo.updated", { repoId: 7 }]]);
   });
 });
