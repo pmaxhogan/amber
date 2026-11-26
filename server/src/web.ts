@@ -37,6 +37,41 @@ function isServerPath(url: string): boolean {
   return isPublicPath(pathname, SERVER_PREFIXES);
 }
 
+/**
+ * The policy the app's own document is served with.
+ *
+ * The app renders what is inside backed-up repositories, which is hostile
+ * input, so this is the last line behind the escaping and the sandboxed
+ * markdown frame: script only from our own files, no plugins, no base tag, and
+ * nobody may frame us. Notes on the looser parts:
+ *
+ * - style-src needs 'unsafe-inline': PrimeVue's styled mode injects style
+ *   elements at runtime. Inline style cannot run script.
+ * - The two cloudflareinsights.com sources are Cloudflare Web Analytics, which
+ *   the edge injects into pages when a zone turns it on. The reference
+ *   deployment sits behind Cloudflare, which already terminates TLS for every
+ *   byte of the app, so allowing its beacon grants it nothing it lacks.
+ * - img-src allows blob: and data: for the app's own icons and previews.
+ *   Repository images come from /api on this origin.
+ * - A srcdoc frame inherits this policy and then adds a stricter one of its
+ *   own (see the markdown frame in the web app).
+ */
+export const APP_CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' https://static.cloudflareinsights.com",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob:",
+  "font-src 'self' data:",
+  "connect-src 'self' https://cloudflareinsights.com",
+  "worker-src 'self'",
+  "manifest-src 'self'",
+  "frame-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join("; ");
+
 export const webPlugin: FastifyPluginAsync<WebPluginOptions> = async (app, options) => {
   const root = options.config.webDistDir;
   const log = app.log.child({ mod: "web" });
@@ -85,6 +120,9 @@ export const webPlugin: FastifyPluginAsync<WebPluginOptions> = async (app, optio
      */
     return reply
       .header("cache-control", "no-store")
+      .header("content-security-policy", APP_CONTENT_SECURITY_POLICY)
+      .header("x-content-type-options", "nosniff")
+      .header("referrer-policy", "same-origin")
       .sendFile("index.html", { cacheControl: false });
   });
 

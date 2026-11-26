@@ -7,6 +7,7 @@ import { loadConfig } from "../src/config.ts";
 import { openDb, type Db } from "../src/db/db.ts";
 import { migrate } from "../src/db/migrate.ts";
 import { createConsoleLogger } from "../src/logging.ts";
+import { APP_CONTENT_SECURITY_POLICY } from "../src/web.ts";
 import { TEST_SECRET_KEY } from "./helpers.ts";
 
 /**
@@ -63,6 +64,34 @@ describe("with a built frontend on disk", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["content-type"]).toContain("text/html");
     expect(response.body).toContain("<title>Amber</title>");
+  });
+
+  it("serves the app document with a policy that only runs our own script", async () => {
+    const instance = await build(true);
+
+    for (const url of ["/", "/settings", "/git-remote"]) {
+      const response = await instance.inject({ method: "GET", url });
+      const policy = String(response.headers["content-security-policy"]);
+
+      expect(policy).toBe(APP_CONTENT_SECURITY_POLICY);
+      expect(response.headers["x-content-type-options"]).toBe("nosniff");
+      expect(response.headers["referrer-policy"]).toBe("same-origin");
+    }
+
+    const directives = new Map(
+      APP_CONTENT_SECURITY_POLICY.split("; ").map((directive) => {
+        const [name, ...sources] = directive.split(" ");
+        return [name, sources] as const;
+      }),
+    );
+    // The backstop for hostile repository content: no inline or evaluated
+    // script, no plugins, no base tag, and no framing by another site.
+    expect(directives.get("script-src")).not.toContain("'unsafe-inline'");
+    expect(directives.get("script-src")).not.toContain("'unsafe-eval'");
+    expect(directives.get("default-src")).toEqual(["'self'"]);
+    expect(directives.get("object-src")).toEqual(["'none'"]);
+    expect(directives.get("base-uri")).toEqual(["'none'"]);
+    expect(directives.get("frame-ancestors")).toEqual(["'none'"]);
   });
 
   it("serves a fingerprinted asset with a long lived cache header", async () => {

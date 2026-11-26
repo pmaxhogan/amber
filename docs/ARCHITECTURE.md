@@ -780,6 +780,12 @@ configure.
     block, which is cubic in the hands of an attacker. Images are capped per
     document, their dimensions bounded, and the frame's height clamped.
   - Any failure in that pipeline shows the markdown source as plain text.
+  - The app document itself is served with a Content-Security-Policy
+    (`APP_CONTENT_SECURITY_POLICY` in `web.ts`): script only from our own
+    files (plus the Cloudflare Web Analytics beacon the reference deployment's
+    edge injects), no inline or evaluated script, no plugins, no base tag, no
+    framing. `style-src` allows inline styles because PrimeVue's styled mode
+    injects them.
   - The `raw` endpoint cannot serve active content (see "Repository
     browser").
 - SSRF note: amber's whole job is fetching user-supplied URLs, so outbound requests
@@ -893,6 +899,9 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
     its sandboxed frame, in-frame links, file views, history, diffs, the ref
     picker and jump box, the single-ref case, the maximize button, and the
     headers of the `raw` endpoint.
+  - `tests/hygiene.spec.ts` visits every route and every drawer tab and fails
+    on any console error, page error or Content-Security-Policy violation, so
+    a change that needs a looser policy fails here instead of in production.
   - `tests/hostile.spec.ts` is the regression suite for hostile repository
     content, in a real browser: a repository full of script-bearing markdown,
     file names, ref names, commit text, an SVG and a mislabelled HTML file.

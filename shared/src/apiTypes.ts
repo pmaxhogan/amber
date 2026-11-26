@@ -1,3 +1,4 @@
+import "./zodSetup.ts";
 import { z } from "zod";
 import {
   cloneModeSchema,
