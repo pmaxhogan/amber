@@ -48,7 +48,9 @@ export function startAccountSyncTimer(options: AccountSyncTimerOptions): Account
   const run = options.run ?? runDueAccountSyncs;
   const resolveForks = options.resolveForks ?? resolvePendingForks;
   const forkDeps: ForkResolverDeps = {
-    log,
+    // The resolver names its own module; handing it the accountSync child
+    // would put two "mod" keys on every line it logs.
+    log: options.log,
     secretKey: options.secretKey,
     // Lives as long as the timer so a rate limit cooldown outlasts its pass.
     cooldowns: new Map<number, number>(),

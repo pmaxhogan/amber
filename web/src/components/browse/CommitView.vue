@@ -122,7 +122,10 @@ onBeforeUnmount(() => inflight?.abort());
         <div>
           <dt>{{ detail.parents.length === 1 ? "Parent" : "Parents" }}</dt>
           <dd>
-            <span v-if="detail.parents.length === 0" class="amber-muted">none (root commit)</span>
+            <span v-if="detail.missingParents" class="amber-muted">not in this backup</span>
+            <span v-else-if="detail.parents.length === 0" class="amber-muted"
+              >none (root commit)</span
+            >
             <button
               v-for="parent in detail.parents"
               :key="parent"

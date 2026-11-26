@@ -387,11 +387,20 @@ describe("commit view", () => {
 
   it("explains a commit at the edge of a shallow backup", async () => {
     const { wrapper } = await openCommit(
-      makeCommitDetail({ subject: "the commit", missingParents: true, files: [], filesChanged: 0 }),
+      makeCommitDetail({
+        subject: "the commit",
+        parents: [],
+        missingParents: true,
+        files: [],
+        filesChanged: 0,
+      }),
     );
     expect(wrapper.text()).toContain(
       "This commit is the edge of a shallow backup, so there is nothing earlier to compare it with.",
     );
+    // It has parents; the backup just does not hold them. Not a root commit.
+    expect(wrapper.text()).toContain("not in this backup");
+    expect(wrapper.text()).not.toContain("root commit");
   });
 
   it("collapses a very long patch behind a button", async () => {
