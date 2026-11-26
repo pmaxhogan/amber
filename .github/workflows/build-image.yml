@@ -88,6 +88,14 @@ jobs:
             sleep 2
           done
           docker exec amber-smoke git --version
+          # The repository browser relies on git options an older git ignores
+          # without a word (GIT_ATTR_SOURCE, 2.41). The tests never run against
+          # the image's git, so a base image that goes backwards stops here.
+          have="$(docker exec amber-smoke git --version | awk '{print $3}')"
+          if [ "$(printf '%s\n%s\n' "2.41" "$have" | sort -V | head -n 1)" != "2.41" ]; then
+            echo "git ${have} in the image is older than 2.41"
+            exit 1
+          fi
           docker exec amber-smoke git lfs version
           docker exec amber-smoke sh -c 'command -v 7z || command -v 7za'
           docker logs amber-smoke

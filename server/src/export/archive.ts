@@ -460,7 +460,7 @@ let sevenZipCache: string | null | undefined;
 
 /**
  * The 7z binary name, or null when the image or host does not have one. The
- * Dockerfile installs p7zip-full; a developer machine may not have it, and the
+ * Dockerfile installs 7zip; a developer machine may not have it, and the
  * 7z routes answer 501 rather than failing obscurely.
  */
 export async function findSevenZip(): Promise<string | null> {

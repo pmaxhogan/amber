@@ -63,11 +63,11 @@ beforeAll(async () => {
   repoId = insertRepoRow(server.db, { slug: SLUG, displayName: DISPLAY_NAME });
   sevenZip = await findSevenZip();
   if (sevenZip === null) {
-    // Loud on purpose. The Docker image installs p7zip-full; a developer box
+    // Loud on purpose. The Docker image installs 7zip; a developer box
     // may not have it, and a silently skipped format is how a broken export
     // ships.
     server.app.log.warn(
-      "NO 7z BINARY ON PATH: the 7z export tests are SKIPPED. Install p7zip-full to run them.",
+      "NO 7z BINARY ON PATH: the 7z export tests are SKIPPED. Install 7zip (or p7zip) to run them.",
     );
   }
 });

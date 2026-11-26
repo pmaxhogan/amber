@@ -56,7 +56,7 @@ test.describe("docker image", () => {
 
     expect(await exec("git", "--version")).toContain("git version");
     expect(await exec("git", "lfs", "version")).toContain("git-lfs");
-    // p7zip prints its banner on a bare invocation, so ask for something.
+    // 7z prints its banner on a bare invocation, so ask for something.
     expect(await exec("sh", "-c", "7z i >/dev/null && echo ok")).toBe("ok");
 
     // The server needs a moment to migrate and bind before healthz answers.

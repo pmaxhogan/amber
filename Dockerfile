@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---------------------------------------------------------------- builder
-FROM node:26-bookworm-slim AS builder
+FROM node:26-trixie-slim AS builder
 
 WORKDIR /app
 
@@ -30,17 +30,23 @@ RUN npm run build -w shared \
 RUN npm prune --omit=dev
 
 # ---------------------------------------------------------------- runtime
-FROM node:26-bookworm-slim AS runtime
+FROM node:26-trixie-slim AS runtime
 
-# git and git-lfs do the backups, p7zip-full backs the 7z export, curl is the
+# git and git-lfs do the backups, 7zip backs the 7z export, curl is the
 # healthcheck.
+#
+# The Debian release is what decides the git version, and that matters: the
+# tests run against whatever git the developer or CI machine has, which is
+# always newer than a stable Debian's. bookworm shipped 2.39, which silently
+# ignores options the repository browser relies on (GIT_ATTR_SOURCE needs
+# 2.41). trixie ships 2.47.
 RUN apt-get update \
   && apt-get install --no-install-recommends -y \
     ca-certificates \
     curl \
     git \
     git-lfs \
-    p7zip-full \
+    7zip \
   && git lfs install --system \
   && rm -rf /var/lib/apt/lists/*
 

@@ -476,7 +476,7 @@ describe("tricky diffs", () => {
   });
 });
 
-/** GIT_ATTR_SOURCE arrived in git 2.41; the Debian the image is built on ships 2.39. */
+/** GIT_ATTR_SOURCE arrived in git 2.41; an older git ignores it without a word. */
 function gitHasAttrSource(): boolean {
   const match = /(\d+)\.(\d+)/.exec(execFileSync("git", ["--version"]).toString());
   const major = Number(match?.[1] ?? 0);

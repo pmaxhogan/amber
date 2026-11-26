@@ -500,7 +500,7 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   (default: default branch): `fmt` in `zip`, `tar.gz`, `7z`.
   zip/tar.gz streamed with `archiver` from a `git archive`-extracted temp view or
   directly via `git archive --format` for tar/zip (preferred: git archive does
-  zip and tar natively; gzip via zlib stream). 7z: temp dir + `7z a` (p7zip-full in
+  zip and tar natively; gzip via zlib stream). 7z: temp dir + `7z a` (the 7zip package in
   the image), streamed back, temp cleaned in `finally`.
 - `GET /api/repos/:id/export/gitdir.<fmt>` - the FULL backup (bare repo dir as-is,
   including refs/amber archives) as zip/tar.gz/7z. This is the "restore everything"
@@ -554,11 +554,14 @@ Rules that make it safe:
 - `GIT_NO_REPLACE_OBJECTS=1`, so a `refs/replace/*` ref cannot change what an
   id names. Diffs run with `--no-ext-diff --no-textconv`, so a repository's
   `.gitattributes` can never make git run anything, and with an empty
-  attribute source (`GIT_ATTR_SOURCE`, git 2.41 and later) so it decides
-  nothing at all. The image's Debian ships git 2.39, which ignores that
-  variable: there, a `full` mode backup's own `.gitattributes` can still mark
-  a file as binary in a diff. Bare backups have no working tree to read
-  attributes from.
+  attribute source (`GIT_ATTR_SOURCE`) so it decides nothing at all. That
+  variable needs git 2.41: an older git ignores it without a word, and a
+  `full` mode backup's own `.gitattributes` could then mark a file as binary
+  in a diff. The image is built on Debian trixie (git 2.47) for that reason,
+  and the image build fails if its git is ever older than 2.41. The first
+  images were on bookworm, whose git 2.39 no test had ever run against: tests
+  use whatever git the developer or CI machine has, which is always newer
+  than a stable Debian's.
 - Every git process has a byte cap that truncates with a flag rather than
   failing, a 30 second timeout (answered as 504), and is killed when the
   client disconnects. At most 4 run at once across all browse requests; the
