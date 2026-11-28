@@ -11,12 +11,12 @@ import { parseBody } from "./validate.ts";
 export const importRoutes: FastifyPluginAsync = async (app) => {
   const { db, events } = app.amber;
 
-  app.post("/import/preview", (request): ImportPreviewResponse => {
+  app.post("/import/preview", { config: { authz: "import" } }, (request): ImportPreviewResponse => {
     const { text } = parseBody(importRequestSchema, request);
     return previewImport(db, text);
   });
 
-  app.post("/import", (request): ImportCommitResponse => {
+  app.post("/import", { config: { authz: "import" } }, (request): ImportCommitResponse => {
     const { text } = parseBody(importRequestSchema, request);
     const result = commitImport(db, text);
     for (const line of result.results) {

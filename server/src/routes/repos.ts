@@ -51,44 +51,48 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
   const { db, config, events, scheduler } = app.amber;
   const removeFiles = createBackupFileRemover(config);
 
-  app.get("/repos", (request): Page<Repo> =>
+  app.get("/repos", { config: { authz: "user" } }, (request): Page<Repo> =>
     listRepos(db, parseQuery(repoListQuerySchema, request)),
   );
 
   // Registered before /repos/:id so the static segment wins the match.
-  app.post("/repos/bulk", async (request): Promise<BulkRepoResponse> => {
-    const body = parseBody(bulkRepoRequestSchema, request);
-    const result = await bulkRepoAction(db, body.ids, body.action, {
-      withFiles: body.files,
-      removeFiles,
-    });
-
-    if (body.action === "sync" && scheduler !== undefined) {
-      for (const id of result.ids) {
-        scheduler.enqueueNow(id);
-      }
-    }
-    for (const id of result.ids) {
-      events.publish(body.action === "delete" ? "repo.deleted" : "repo.updated", {
-        repoId: id,
+  app.post(
+    "/repos/bulk",
+    { config: { authz: "user" } },
+    async (request): Promise<BulkRepoResponse> => {
+      const body = parseBody(bulkRepoRequestSchema, request);
+      const result = await bulkRepoAction(db, body.ids, body.action, {
+        withFiles: body.files,
+        removeFiles,
       });
-    }
-    return result;
-  });
 
-  app.get("/repos/:id", (request): Repo => {
+      if (body.action === "sync" && scheduler !== undefined) {
+        for (const id of result.ids) {
+          scheduler.enqueueNow(id);
+        }
+      }
+      for (const id of result.ids) {
+        events.publish(body.action === "delete" ? "repo.deleted" : "repo.updated", {
+          repoId: id,
+        });
+      }
+      return result;
+    },
+  );
+
+  app.get("/repos/:id", { config: { authz: "user" } }, (request): Repo => {
     const { id } = parseParams(idParamsSchema, request);
     return requireRepo(db, id);
   });
 
-  app.patch("/repos/:id", (request): Repo => {
+  app.patch("/repos/:id", { config: { authz: "user" } }, (request): Repo => {
     const { id } = parseParams(idParamsSchema, request);
     const repo = updateRepo(db, id, parseBody(updateRepoSchema, request));
     events.publish("repo.updated", { repoId: repo.id });
     return repo;
   });
 
-  app.delete("/repos/:id", async (request, reply): Promise<null> => {
+  app.delete("/repos/:id", { config: { authz: "user" } }, async (request, reply): Promise<null> => {
     const { id } = parseParams(idParamsSchema, request);
     const { files } = parseQuery(deleteRepoQuerySchema, request);
     await deleteRepo(db, id, { withFiles: files, removeFiles });
@@ -102,7 +106,7 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
    * is what makes this work with no scheduler attached yet: the request is
    * simply picked up on the next wake rather than lost.
    */
-  app.post("/repos/:id/sync", (request): Repo => {
+  app.post("/repos/:id/sync", { config: { authz: "user" } }, (request): Repo => {
     const { id } = parseParams(idParamsSchema, request);
     const repo = requestSyncNow(db, id);
     scheduler?.enqueueNow(id);
@@ -110,7 +114,7 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
     return repo;
   });
 
-  app.get("/repos/:id/runs", (request): Page<SyncRun> => {
+  app.get("/repos/:id/runs", { config: { authz: "user" } }, (request): Page<SyncRun> => {
     const { id } = parseParams(idParamsSchema, request);
     return listSyncRuns(db, id, parseQuery(paginationQuerySchema, request));
   });

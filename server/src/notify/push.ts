@@ -2,6 +2,7 @@ import type { AmberEvent, PushDevice, PushPayload, PushSendResult } from "@amber
 import type { Logger } from "pino";
 import { generateVAPIDKeys, sendNotification } from "web-push";
 import type { Db } from "../db/db.ts";
+import { OWNER_OR_ADMIN_SQL } from "../domain/users.ts";
 
 /**
  * Web push: tells subscribed browsers when a repository goes gone upstream.
@@ -132,12 +133,20 @@ export function listPushDevices(db: Db): PushDevice[] {
 /** Idempotent: a browser re-announcing itself refreshes its keys. */
 export function savePushSubscription(
   db: Db,
-  input: { endpoint: string; p256dh: string; auth: string; userAgent: string | null },
+  input: {
+    endpoint: string;
+    p256dh: string;
+    auth: string;
+    userAgent: string | null;
+    /** The user whose browser this is. Absent, the admin row: never NULL. */
+    userId?: number | null;
+  },
   now: number = Date.now(),
 ): void {
   db.run(
-    `INSERT INTO push_subscriptions (endpoint, p256dh, auth, user_agent, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO push_subscriptions
+       (endpoint, p256dh, auth, user_agent, user_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ${OWNER_OR_ADMIN_SQL}, ?, ?)
      ON CONFLICT (endpoint) DO UPDATE SET
        p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent,
        last_error = NULL, updated_at = excluded.updated_at`,
@@ -145,6 +154,7 @@ export function savePushSubscription(
     input.p256dh,
     input.auth,
     input.userAgent,
+    input.userId ?? null,
     now,
     now,
   );

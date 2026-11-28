@@ -23,9 +23,17 @@ import {
   supportsTrendingSync,
   type DiscoveryDeps,
 } from "../providers/discovery.ts";
+import { hasPermission, requireRequestUser } from "../security/authz.ts";
 import { createBackupFileRemover } from "./repos.ts";
 
-/** /api/account-syncs CRUD and manual run. */
+/**
+ * /api/account-syncs CRUD and manual run.
+ *
+ * Authorization: creating a sync needs `import`, and a trending sync, being
+ * instance-level, needs `manage_settings` to create, edit, delete or run.
+ * Which other syncs a caller may see and touch (their own; the admin all) is
+ * an ownership check made per object in the enforcement wave.
+ */
 
 /** What the create schema used to default to, before trending brought its own. */
 const DEFAULT_INTERVAL_MINUTES = 360;
@@ -58,6 +66,14 @@ function fail(reply: FastifyReply, status: number, error: string, message: strin
   return reply.code(status).send({ error, message });
 }
 
+function trendingForbidden(reply: FastifyReply): FastifyReply {
+  return reply.code(403).send({
+    error: "forbidden",
+    message: 'Trending syncs need the "manage_settings" permission.',
+    details: { permission: "manage_settings" },
+  });
+}
+
 function listAccountSyncs(db: Db, accountId?: number): AccountSync[] {
   const rows =
     accountId === undefined
@@ -80,7 +96,7 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     removeFiles: createBackupFileRemover(config),
   };
 
-  app.get("/account-syncs", (request, reply) => {
+  app.get("/account-syncs", { config: { authz: "user" } }, (request, reply) => {
     const query = listQuerySchema.safeParse(request.query);
     if (!query.success) {
       return fail(reply, 400, "invalid_query", z.prettifyError(query.error));
@@ -88,12 +104,18 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     return { rows: listAccountSyncs(db, query.data.accountId) };
   });
 
-  app.post("/account-syncs", (request, reply) => {
+  app.post("/account-syncs", { config: { authz: "import" } }, (request, reply) => {
     const body = upsertAccountSyncSchema.safeParse(request.body);
     if (!body.success) {
       return fail(reply, 400, "invalid_body", z.prettifyError(body.error));
     }
     const input = body.data;
+    if (
+      input.source === "trending" &&
+      !hasPermission(requireRequestUser(request), "manage_settings")
+    ) {
+      return trendingForbidden(reply);
+    }
 
     let accountForgeId: number | undefined;
     if (input.accountId !== undefined) {
@@ -235,7 +257,7 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(201).send(created);
   });
 
-  app.patch("/account-syncs/:id", (request, reply) => {
+  app.patch("/account-syncs/:id", { config: { authz: "user" } }, (request, reply) => {
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) {
       return fail(reply, 400, "invalid_params", z.prettifyError(params.error));
@@ -248,6 +270,12 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     const existing = getAccountSyncRow(db, params.data.id);
     if (existing === undefined) {
       return fail(reply, 404, "not_found", `Account sync ${String(params.data.id)} does not exist`);
+    }
+    if (
+      existing.source === "trending" &&
+      !hasPermission(requireRequestUser(request), "manage_settings")
+    ) {
+      return trendingForbidden(reply);
     }
     const patch = body.data;
     if (existing.source === "starred" && patch.visibility !== undefined) {
@@ -296,10 +324,16 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     return row === undefined ? null : mapAccountSync(row);
   });
 
-  app.delete("/account-syncs/:id", (request, reply) => {
+  app.delete("/account-syncs/:id", { config: { authz: "user" } }, (request, reply) => {
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) {
       return fail(reply, 400, "invalid_params", z.prettifyError(params.error));
+    }
+    if (
+      getAccountSyncRow(db, params.data.id)?.source === "trending" &&
+      !hasPermission(requireRequestUser(request), "manage_settings")
+    ) {
+      return trendingForbidden(reply);
     }
     const deleted = db.run("DELETE FROM account_syncs WHERE id = ?", params.data.id);
     if (deleted.changes === 0) {
@@ -310,13 +344,20 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(204).send();
   });
 
-  app.post("/account-syncs/:id/run", async (request, reply) => {
+  app.post("/account-syncs/:id/run", { config: { authz: "user" } }, async (request, reply) => {
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) {
       return fail(reply, 400, "invalid_params", z.prettifyError(params.error));
     }
-    if (getAccountSyncRow(db, params.data.id) === undefined) {
+    const target = getAccountSyncRow(db, params.data.id);
+    if (target === undefined) {
       return fail(reply, 404, "not_found", `Account sync ${String(params.data.id)} does not exist`);
+    }
+    if (
+      target.source === "trending" &&
+      !hasPermission(requireRequestUser(request), "manage_settings")
+    ) {
+      return trendingForbidden(reply);
     }
 
     const result: AccountSyncRunResult = await runAccountSyncDetailed(db, params.data.id, deps);

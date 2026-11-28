@@ -6,6 +6,7 @@ import {
   type ResolvedSettings,
   type SettingsExplanation,
 } from "./settingsRegistry.ts";
+import { permissionsPatchSchema, permissionsSchema } from "./permissions.ts";
 
 /**
  * Core wire shapes shared by the Fastify routes and the Vue client. Server
@@ -83,6 +84,13 @@ export const forgeSchema = z.object({
   host: z.string().min(1),
   port: z.number().int().min(1).max(65535).nullable(),
   kind: forgeKindSchema,
+  /**
+   * Whether requests to this forge may reach a non-public address. A forge
+   * without it is RESTRICTED: every request resolves the host and refuses
+   * unless every answer is public. Only the admin can set it. Optional so a
+   * payload from before it existed still parses.
+   */
+  allowPrivateNetwork: z.boolean().optional(),
   createdAt: epochMsSchema,
   updatedAt: epochMsSchema,
 });
@@ -93,11 +101,15 @@ export const createForgeSchema = z.object({
   host: z.string().min(1),
   port: z.number().int().min(1).max(65535).nullable().default(null),
   kind: forgeKindSchema.optional(),
+  /** Admin only; anyone else asking for it is refused rather than ignored. */
+  allowPrivateNetwork: z.boolean().optional(),
 });
 export type CreateForge = z.infer<typeof createForgeSchema>;
 
 export const updateForgeSchema = z.object({
   kind: forgeKindSchema.optional(),
+  /** Admin only, like on create. */
+  allowPrivateNetwork: z.boolean().optional(),
 });
 export type UpdateForge = z.infer<typeof updateForgeSchema>;
 
@@ -113,6 +125,14 @@ export const accountSchema = z.object({
   hasSecret: z.boolean(),
   isDefault: z.boolean(),
   lastUsedAt: epochMsSchema.nullable(),
+  /**
+   * The Amber user this account belongs to. Its token is only ever used for
+   * repositories that user owns. Optional so a payload from before multi-user
+   * still parses.
+   */
+  ownerUserId: idSchema.optional(),
+  /** Only for callers allowed to see other users' accounts (admin, manage_forges). */
+  ownerEmail: z.string().optional(),
   createdAt: epochMsSchema,
   updatedAt: epochMsSchema,
 });
@@ -236,8 +256,28 @@ export const repoSchema = z.object({
    * upstream's own backup instead of the forge.
    */
   forkParentRepoId: idSchema.nullable().optional(),
+
+  /**
+   * Multi-user additions. Optional so a payload from before they existed
+   * still parses.
+   *
+   * `mine`: the caller owns this repository. `isPrivate`: the forge's own
+   * answer about visibility, and true whenever that is not known. `owner` is
+   * only sent to the admin.
+   */
+  mine: z.boolean().optional(),
+  isPrivate: z.boolean().optional(),
+  owner: z
+    .object({
+      id: idSchema,
+      email: z.string(),
+      /** The owner left the access policy. Their repositories stay and can be adopted. */
+      removed: z.boolean(),
+    })
+    .optional(),
 });
 export type Repo = z.infer<typeof repoSchema>;
+export type RepoOwner = NonNullable<Repo["owner"]>;
 
 /** The extras `GET /api/repos` adds on top of the stored row. */
 export interface RepoListExtras {
@@ -319,6 +359,12 @@ export const repoListQuerySchema = paginationQuerySchema.extend({
   outcome: syncOutcomeSchema.optional(),
   /** true: only repositories that went gone upstream. false: only the rest. */
   gone: queryFlagSchema.optional(),
+  /** Admin only: repositories owned by this user. */
+  ownerId: z.coerce.number().int().positive().optional(),
+  /** Admin only. true: only repositories whose owner left the access policy. */
+  ownerRemoved: queryFlagSchema.optional(),
+  /** true: only repositories the caller owns. */
+  mine: queryFlagSchema.optional(),
 });
 export type RepoListQuery = z.infer<typeof repoListQuerySchema>;
 
@@ -618,6 +664,14 @@ export const accountSyncSchema = z.object({
   lastRunAt: epochMsSchema.nullable(),
   lastError: z.string().nullable(),
   reposDiscovered: z.number().int().nonnegative().nullable(),
+  /**
+   * The Amber user the sync belongs to: repositories it creates are theirs.
+   * A trending sync is instance-level and belongs to whoever created it.
+   * Optional so a payload from before multi-user still parses.
+   */
+  ownerUserId: idSchema.optional(),
+  /** Only for the admin. */
+  ownerEmail: z.string().optional(),
   createdAt: epochMsSchema,
   updatedAt: epochMsSchema,
 });
@@ -772,6 +826,12 @@ export type AccountSyncRunResult = z.infer<typeof accountSyncRunResultSchema>;
 // Git remote and status
 // ---------------------------------------------------------------------------
 
+/**
+ * LEGACY: the instance-wide git remote shapes, one shared credential for the
+ * whole instance. Migration 010 deletes that credential and the per-user
+ * shapes below replace these. Kept only until the git remote and the web UI
+ * have moved over; nothing new should use them.
+ */
 export const gitRemoteConfigSchema = z.object({
   enabled: z.boolean(),
   username: z.string().min(1),
@@ -796,6 +856,39 @@ export const updateGitRemoteSchema = z.object({
   username: z.string().trim().min(1).max(64),
 });
 export type UpdateGitRemote = z.infer<typeof updateGitRemoteSchema>;
+
+/**
+ * GET /api/git-remote in the multi-user model: the CALLER'S own credential.
+ * `enabled` is the instance-wide kill switch (`manage_settings`). `username`
+ * is null until the caller first mints a password; once minted it is stable
+ * across rotations. `cloneUrlTemplate` carries `{password}` and `{slug}`
+ * placeholders and is null while there is no username.
+ */
+export const gitRemoteMeSchema = z.object({
+  enabled: z.boolean(),
+  username: z.string().nullable(),
+  hasPassword: z.boolean(),
+  rotatedAt: epochMsSchema.nullable(),
+  cloneUrlTemplate: z.string().nullable(),
+});
+export type GitRemoteMe = z.infer<typeof gitRemoteMeSchema>;
+
+/**
+ * POST /api/git-remote/rotate: mint or rotate the caller's password. The only
+ * response anywhere that carries one, and only this once.
+ */
+export const gitRemoteCredentialSchema = gitRemoteMeSchema.extend({
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+export type GitRemoteCredential = z.infer<typeof gitRemoteCredentialSchema>;
+
+/**
+ * POST /api/git-remote/revoke (delete mine) and POST /api/git-remote/enable or
+ * /disable (the kill switch) answer with the caller's state, like GET.
+ */
+export const gitRemoteRevokeResponseSchema = gitRemoteMeSchema;
+export const gitRemoteSwitchResponseSchema = gitRemoteMeSchema;
 
 export const statusSchema = z.object({
   version: z.string(),
@@ -874,6 +967,44 @@ export type Health = z.infer<typeof healthSchema>;
 // ---------------------------------------------------------------------------
 // Errors and events
 // ---------------------------------------------------------------------------
+
+/**
+ * Error codes the API answers with. `error` on the wire stays a plain string
+ * so an older client keeps parsing, but these are the ones a client may
+ * branch on.
+ *
+ * - `unauthorized` (401): no valid Cloudflare Access token.
+ * - `not_a_user` (403): a valid token, but the email is neither the admin nor
+ *   an explicit email entry of the access policy.
+ * - `policy_unavailable` (503): the access policy could not be read and the
+ *   last good copy is too old to trust. Fail closed; retry shortly.
+ * - `forbidden` (403): an accepted user without the permission the route
+ *   needs. `details.permission` names the missing key, or `details.requires`
+ *   is "admin".
+ * - `host_not_enabled` (403): an import or forge creation would introduce a
+ *   host Amber does not have, and the caller may not add one.
+ * - `storage_cap_reached` (403): the caller is at or over their storage cap,
+ *   so a new repository is refused. Existing ones keep syncing.
+ */
+export const API_ERROR_CODES = [
+  "unauthorized",
+  "not_a_user",
+  "policy_unavailable",
+  "forbidden",
+  "host_not_enabled",
+  "storage_cap_reached",
+  "not_found",
+  "conflict",
+  "invalid",
+  "invalid_body",
+  "immutable",
+  "unsupported",
+  "precondition_failed",
+  "git_remote_disabled",
+  "internal",
+] as const;
+export const apiErrorCodeSchema = z.enum(API_ERROR_CODES);
+export type ApiErrorCode = z.infer<typeof apiErrorCodeSchema>;
 
 export const apiErrorSchema = z.object({
   error: z.string(),
@@ -967,3 +1098,118 @@ export const treePageSchema = pageSchema(treeEntrySchema).extend({
   ref: z.string().min(1),
 });
 export type TreePage = z.infer<typeof treePageSchema>;
+
+// ---------------------------------------------------------------------------
+// Users and identity
+// ---------------------------------------------------------------------------
+
+/** A user's storage: usage is the sum of disk usage over the repositories they own. */
+export const storageUsageSchema = z.object({
+  usedBytes: z.number().int().nonnegative(),
+  /** The effective cap: the user's own, else the global default. Null for the admin. */
+  capBytes: z.number().int().nonnegative().nullable(),
+  overCap: z.boolean(),
+});
+export type StorageUsage = z.infer<typeof storageUsageSchema>;
+
+/** The access policy as Amber last read it. Admin only. */
+export const policyStatusSchema = z.object({
+  /** CF_API_TOKEN, CF_ACCOUNT_ID and CF_ACCESS_POLICY_ID are set. Without them Amber is admin-only. */
+  configured: z.boolean(),
+  /** When the copy in use was fetched. Null when there has never been a good read. */
+  fetchedAt: epochMsSchema.nullable(),
+  /** The last refresh failed, or there is no good copy. */
+  stale: z.boolean(),
+  /** The Cloudflare dashboard page for the policy. Null when not configured. */
+  editUrl: z.string().nullable(),
+  /** Why the last refresh failed, when it did. Never carries the API token. */
+  lastError: z.string().nullable().optional(),
+});
+export type PolicyStatus = z.infer<typeof policyStatusSchema>;
+
+/** GET /api/me: who the caller is and what they may do. */
+export const meSchema = z.object({
+  id: idSchema,
+  email: z.string(),
+  isAdmin: z.boolean(),
+  /** Effective: every key is true for the admin. */
+  permissions: permissionsSchema,
+  storage: storageUsageSchema,
+  /** Null for everyone but the admin. */
+  policy: policyStatusSchema.nullable(),
+});
+export type Me = z.infer<typeof meSchema>;
+
+/** One row of GET /api/users (admin). */
+export const userRowSchema = z.object({
+  id: idSchema,
+  email: z.string(),
+  isAdmin: z.boolean(),
+  /** Effective: every key is true for the admin. */
+  permissions: permissionsSchema,
+  /** The user's own cap. Null means the global default applies. */
+  storageCapBytes: z.number().int().nonnegative().nullable(),
+  /** The cap in force: storageCapBytes, else the global default. Null for the admin. */
+  capBytes: z.number().int().nonnegative().nullable(),
+  usedBytes: z.number().int().nonnegative(),
+  overCap: z.boolean(),
+  repoCount: z.number().int().nonnegative(),
+  /** Set when the email left the access policy. Such a user is refused everywhere. */
+  removedAt: epochMsSchema.nullable(),
+  lastSeenAt: epochMsSchema.nullable(),
+  hasGitPassword: z.boolean(),
+  /** When the user went over their cap; null while under it. */
+  capNotifiedAt: epochMsSchema.nullable(),
+  createdAt: epochMsSchema,
+});
+export type UserRow = z.infer<typeof userRowSchema>;
+
+export const userListResponseSchema = z.object({
+  rows: z.array(userRowSchema),
+});
+export type UserListResponse = z.infer<typeof userListResponseSchema>;
+
+/**
+ * PATCH /api/users/:id. `permissions` is merged key by key onto the stored
+ * set. `storageCapBytes: null` returns the user to the global default. Strict:
+ * an unknown field (an attempt at `isAdmin` or `email`) is a 400, not ignored.
+ * The admin row cannot be patched at all.
+ */
+export const updateUserSchema = z.strictObject({
+  permissions: permissionsPatchSchema.optional(),
+  storageCapBytes: z.number().int().min(0).nullable().optional(),
+});
+export type UpdateUser = z.infer<typeof updateUserSchema>;
+
+/** POST /api/users/refresh: re-read the access policy now and reconcile. */
+export const userRefreshResponseSchema = z.object({
+  ok: z.boolean(),
+  /** Why the read failed. Null on success. */
+  error: z.string().nullable(),
+  policy: policyStatusSchema,
+  /** What reconciliation changed. All zero when the read failed. */
+  changes: z.object({
+    created: z.number().int().nonnegative(),
+    removed: z.number().int().nonnegative(),
+    restored: z.number().int().nonnegative(),
+  }),
+});
+export type UserRefreshResponse = z.infer<typeof userRefreshResponseSchema>;
+
+/**
+ * POST /api/users/:id/adopt-repos: the admin becomes the owner of every
+ * repository that user owns, and each one's account override is cleared.
+ */
+export const adoptReposResponseSchema = z.object({
+  userId: idSchema,
+  adopted: z.number().int().nonnegative(),
+});
+export type AdoptReposResponse = z.infer<typeof adoptReposResponseSchema>;
+
+/** POST /api/users/:id/revoke-git answers with the updated row. */
+export const revokeGitResponseSchema = userRowSchema;
+
+/** The Cloudflare dashboard page that edits the access policy. */
+export function accessPolicyEditUrl(accountId: string, policyId: string): string {
+  return `https://dash.cloudflare.com/${encodeURIComponent(accountId)}/one/access-controls/policies/${encodeURIComponent(policyId)}/edit`;
+}

@@ -113,6 +113,7 @@ describe("migrate", () => {
         "repos",
         "settings",
         "sync_runs",
+        "users",
       ].sort(),
     );
   });

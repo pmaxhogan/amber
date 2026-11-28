@@ -1,18 +1,29 @@
+import { inspect } from "node:util";
 import { describe, expect, it } from "vitest";
-import { ConfigError, loadConfig } from "../src/config.ts";
+import { ConfigError, loadConfig, RedactedSecret } from "../src/config.ts";
 
 const cfEnv = {
   CF_ACCESS_TEAM_DOMAIN: "example.cloudflareaccess.com",
   CF_ACCESS_AUD: "a".repeat(64),
-  CF_ACCESS_ALLOWED_EMAILS: "owner@example.com",
+  AMBER_ADMIN_EMAIL: "owner@example.com",
+};
+
+const policyEnv = {
+  CF_API_TOKEN: "cf-token-0123456789",
+  CF_ACCOUNT_ID: "acct-0123",
+  CF_ACCESS_POLICY_ID: "policy-4567",
 };
 
 describe("loadConfig - authentication gate", () => {
   it("boots when Cloudflare Access is fully configured", () => {
     const config = loadConfig({ ...cfEnv, DATA_DIR: "/data" });
     expect(config.insecureMode).toBe(false);
-    expect(config.cfAccess?.teamDomain).toBe("example.cloudflareaccess.com");
-    expect(config.cfAccess?.allowedEmails).toEqual(["owner@example.com"]);
+    expect(config.cfAccess).toEqual({
+      teamDomain: "example.cloudflareaccess.com",
+      aud: "a".repeat(64),
+    });
+    expect(config.adminEmail).toBe("owner@example.com");
+    expect(config.adminEmailSource).toBe("env");
   });
 
   it("refuses to boot with no auth and no insecure flag", () => {
@@ -23,18 +34,130 @@ describe("loadConfig - authentication gate", () => {
     expect(() =>
       loadConfig({ DATA_DIR: "/data", CF_ACCESS_TEAM_DOMAIN: "team.cloudflareaccess.com" }),
     ).toThrow(ConfigError);
-    expect(() => loadConfig({ ...cfEnv, CF_ACCESS_ALLOWED_EMAILS: "", DATA_DIR: "/data" })).toThrow(
-      ConfigError,
+    // No admin at all: nobody could ever be let in.
+    expect(() => loadConfig({ ...cfEnv, AMBER_ADMIN_EMAIL: "", DATA_DIR: "/data" })).toThrow(
+      /AMBER_ADMIN_EMAIL/,
     );
   });
 
-  it("lowercases and trims the allowed email list", () => {
+  it("lowercases and trims the admin email", () => {
     const config = loadConfig({
       ...cfEnv,
-      CF_ACCESS_ALLOWED_EMAILS: " Alice@Example.com , bob@example.com ,",
-      DATA_DIR: "/data",
+      AMBER_ADMIN_EMAIL: "  Owner@Example.COM ",
+      DATA_DIR: "/d",
     });
-    expect(config.cfAccess?.allowedEmails).toEqual(["alice@example.com", "bob@example.com"]);
+    expect(config.adminEmail).toBe("owner@example.com");
+  });
+
+  it("rejects an admin email that is not an address", () => {
+    expect(() => loadConfig({ ...cfEnv, AMBER_ADMIN_EMAIL: "nobody", DATA_DIR: "/d" })).toThrow(
+      ConfigError,
+    );
+  });
+});
+
+describe("loadConfig - legacy CF_ACCESS_ALLOWED_EMAILS", () => {
+  const legacy = {
+    CF_ACCESS_TEAM_DOMAIN: "example.cloudflareaccess.com",
+    CF_ACCESS_AUD: "aud",
+    DATA_DIR: "/d",
+  };
+
+  it("makes the FIRST entry the admin when AMBER_ADMIN_EMAIL is unset", () => {
+    const config = loadConfig({
+      ...legacy,
+      CF_ACCESS_ALLOWED_EMAILS: " Alice@Example.com , bob@example.com ,",
+    });
+    expect(config.adminEmail).toBe("alice@example.com");
+    expect(config.adminEmailSource).toBe("legacy");
+  });
+
+  it("is ignored entirely once AMBER_ADMIN_EMAIL is set", () => {
+    const config = loadConfig({
+      ...legacy,
+      AMBER_ADMIN_EMAIL: "carol@example.com",
+      CF_ACCESS_ALLOWED_EMAILS: "alice@example.com",
+    });
+    expect(config.adminEmail).toBe("carol@example.com");
+    expect(config.adminEmailSource).toBe("env");
+  });
+
+  it("does not satisfy the gate when it is empty", () => {
+    expect(() => loadConfig({ ...legacy, CF_ACCESS_ALLOWED_EMAILS: "" })).toThrow(ConfigError);
+  });
+});
+
+describe("loadConfig - access policy trio", () => {
+  it("is admin-only when none of the three is set", () => {
+    expect(loadConfig({ ...cfEnv, DATA_DIR: "/d" }).accessPolicy).toBeNull();
+  });
+
+  it("reads all three together", () => {
+    const config = loadConfig({ ...cfEnv, ...policyEnv, DATA_DIR: "/d" });
+    expect(config.accessPolicy?.accountId).toBe("acct-0123");
+    expect(config.accessPolicy?.policyId).toBe("policy-4567");
+    expect(config.accessPolicy?.apiToken.reveal()).toBe("cf-token-0123456789");
+  });
+
+  it("refuses to start on any partial set, naming what is missing", () => {
+    const names = Object.keys(policyEnv) as (keyof typeof policyEnv)[];
+    for (const omitted of names) {
+      const env: Record<string, string> = { ...cfEnv, ...policyEnv, DATA_DIR: "/d" };
+      delete env[omitted];
+      expect(() => loadConfig(env), omitted).toThrow(new RegExp(`Missing: .*${omitted}`));
+    }
+    for (const only of names) {
+      expect(() => loadConfig({ ...cfEnv, DATA_DIR: "/d", [only]: policyEnv[only] }), only).toThrow(
+        ConfigError,
+      );
+    }
+  });
+
+  it("treats blank values as unset", () => {
+    const config = loadConfig({
+      ...cfEnv,
+      CF_API_TOKEN: " ",
+      CF_ACCOUNT_ID: "",
+      CF_ACCESS_POLICY_ID: "",
+      DATA_DIR: "/d",
+    });
+    expect(config.accessPolicy).toBeNull();
+  });
+
+  it("never lets the token reach a log line, a JSON body or inspect output", () => {
+    const config = loadConfig({ ...cfEnv, ...policyEnv, DATA_DIR: "/d" });
+    expect(JSON.stringify(config)).not.toContain("cf-token-0123456789");
+    expect(inspect(config, { depth: 10 })).not.toContain("cf-token-0123456789");
+    expect(`${String(config.accessPolicy?.apiToken)}`).toBe("[redacted]");
+    expect(new RedactedSecret("x").toJSON()).toBe("[redacted]");
+  });
+
+  it("is never used in insecure mode", () => {
+    const config = loadConfig({
+      ...cfEnv,
+      ...policyEnv,
+      INSECURE_ALLOW_PUBLIC_ACCESS: "1",
+      DATA_DIR: "/d",
+    });
+    expect(config.accessPolicy).toBeNull();
+  });
+});
+
+describe("loadConfig - INSECURE_USER_EMAILS", () => {
+  it("is honoured in insecure mode only", () => {
+    const insecure = loadConfig({
+      INSECURE_ALLOW_PUBLIC_ACCESS: "1",
+      DATA_DIR: "/d",
+      INSECURE_USER_EMAILS: "Friend@Example.com, other@example.com",
+    });
+    expect(insecure.insecureUserEmails).toEqual(["friend@example.com", "other@example.com"]);
+
+    const secure = loadConfig({
+      ...cfEnv,
+      DATA_DIR: "/d",
+      INSECURE_USER_EMAILS: "friend@example.com",
+    });
+    expect(secure.insecureUserEmails).toEqual([]);
   });
 });
 

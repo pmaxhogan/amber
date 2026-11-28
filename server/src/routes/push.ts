@@ -19,12 +19,12 @@ import { deletePushSubscription, listPushDevices, savePushSubscription } from ".
 export const pushRoutes: FastifyPluginAsync = async (app) => {
   const { db, push } = app.amber;
 
-  app.get("/push", (): PushConfig => ({
+  app.get("/push", { config: { authz: "user" } }, (): PushConfig => ({
     publicKey: push.publicKey(),
     devices: listPushDevices(db),
   }));
 
-  app.post("/push/subscriptions", (request, reply) => {
+  app.post("/push/subscriptions", { config: { authz: "user" } }, (request, reply) => {
     const body = pushSubscribeSchema.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ error: "invalid_body", message: z.prettifyError(body.error) });
@@ -41,7 +41,7 @@ export const pushRoutes: FastifyPluginAsync = async (app) => {
 
   // The endpoint travels in the body, not the path: it is a long URL and a
   // capability, and neither belongs in an access log.
-  app.post("/push/unsubscribe", (request, reply) => {
+  app.post("/push/unsubscribe", { config: { authz: "user" } }, (request, reply) => {
     const body = pushUnsubscribeSchema.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ error: "invalid_body", message: z.prettifyError(body.error) });
@@ -51,7 +51,7 @@ export const pushRoutes: FastifyPluginAsync = async (app) => {
     return reply.code(204).send();
   });
 
-  app.post("/push/test", (): Promise<PushSendResult> =>
+  app.post("/push/test", { config: { authz: "user" } }, (): Promise<PushSendResult> =>
     push.send({
       title: "Amber notifications are on",
       body: "This is what you will get when a repository goes gone upstream.",

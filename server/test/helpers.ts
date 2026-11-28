@@ -49,13 +49,19 @@ export interface TempApp {
 
 /**
  * A full app in insecure mode (no Cloudflare Access), which is how the route
- * tests drive app.inject without minting a JWT for every call.
+ * tests drive app.inject without minting a JWT for every call. Every request
+ * is the admin unless it carries `asUser(email)` (helpers/accessFixtures.ts)
+ * for an address listed in INSECURE_USER_EMAILS.
  */
 export async function createTempApp(
   env: Record<string, string> = {},
   extra: {
     scheduler?: Parameters<typeof buildApp>[0]["scheduler"];
     pushSender?: Parameters<typeof buildApp>[0]["pushSender"];
+    /** The identity seams: a local JWKS, a scripted policy endpoint, a clock. */
+    cfAccessGetKey?: Parameters<typeof buildApp>[0]["cfAccessGetKey"];
+    accessPolicyFetch?: Parameters<typeof buildApp>[0]["accessPolicyFetch"];
+    now?: () => number;
   } = {},
 ): Promise<TempApp> {
   const dir = mkdtempSync(join(tmpdir(), "amber-app-"));
@@ -89,6 +95,11 @@ export async function createTempApp(
     version: "9.9.9-test",
     ...(extra.scheduler === undefined ? {} : { scheduler: extra.scheduler }),
     ...(extra.pushSender === undefined ? {} : { pushSender: extra.pushSender }),
+    ...(extra.cfAccessGetKey === undefined ? {} : { cfAccessGetKey: extra.cfAccessGetKey }),
+    ...(extra.accessPolicyFetch === undefined
+      ? {}
+      : { accessPolicyFetch: extra.accessPolicyFetch }),
+    ...(extra.now === undefined ? {} : { now: extra.now }),
   });
 
   return {

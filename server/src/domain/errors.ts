@@ -6,7 +6,18 @@
  * Messages are user facing, so they must never contain credential material.
  */
 export type DomainErrorCode =
-  "not_found" | "conflict" | "invalid" | "immutable" | "unsupported" | "precondition_failed";
+  | "not_found"
+  | "conflict"
+  | "invalid"
+  | "immutable"
+  | "unsupported"
+  | "precondition_failed"
+  | "unauthorized"
+  | "forbidden"
+  | "not_a_user"
+  | "policy_unavailable"
+  | "host_not_enabled"
+  | "storage_cap_reached";
 
 const STATUS_BY_CODE: Record<DomainErrorCode, number> = {
   not_found: 404,
@@ -15,6 +26,12 @@ const STATUS_BY_CODE: Record<DomainErrorCode, number> = {
   immutable: 409,
   unsupported: 400,
   precondition_failed: 412,
+  unauthorized: 401,
+  forbidden: 403,
+  not_a_user: 403,
+  policy_unavailable: 503,
+  host_not_enabled: 403,
+  storage_cap_reached: 403,
 };
 
 export class DomainError extends Error {
@@ -41,6 +58,10 @@ export function conflict(message: string, details?: Record<string, unknown>): Do
 
 export function invalid(message: string, details?: Record<string, unknown>): DomainError {
   return new DomainError("invalid", message, details);
+}
+
+export function forbidden(message: string, details?: Record<string, unknown>): DomainError {
+  return new DomainError("forbidden", message, details);
 }
 
 /** True for a sqlite UNIQUE or PRIMARY KEY violation. */

@@ -882,7 +882,7 @@ describe("GET /api/status", () => {
       INSECURE_ALLOW_PUBLIC_ACCESS: "0",
       CF_ACCESS_TEAM_DOMAIN: "amber.cloudflareaccess.com",
       CF_ACCESS_AUD: "aud-value",
-      CF_ACCESS_ALLOWED_EMAILS: "max@unbroker.com",
+      AMBER_ADMIN_EMAIL: "admin@example.com",
     });
     // Guarded now, so the request is rejected before it reaches the handler.
     const response = await secure.app.inject({ method: "GET", url: "/api/status" });

@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspect } from "node:util";
 import { z } from "zod";
 
 /**
@@ -17,6 +18,19 @@ const csvEmails = z
       .filter((part) => part !== ""),
   )
   .pipe(z.array(z.string().min(3)));
+
+/** One address, normalized the way the email claim is. */
+const singleEmail = z
+  .string()
+  .transform((raw) => raw.trim().toLowerCase())
+  .pipe(z.string().min(3).includes("@"));
+
+/** Empty means "not set", so a blank line in a .env file is not a value. */
+const optionalString = z
+  .string()
+  .transform((raw) => raw.trim())
+  .transform((raw) => (raw === "" ? undefined : raw))
+  .optional();
 
 const booleanFlag = z
   .string()
@@ -39,7 +53,28 @@ export const envSchema = z.object({
     .optional(),
   CF_ACCESS_TEAM_DOMAIN: z.string().min(1).optional(),
   CF_ACCESS_AUD: z.string().min(1).optional(),
+  /**
+   * LEGACY. Replaced by AMBER_ADMIN_EMAIL plus the Cloudflare Access policy.
+   * Read only so an upgrade keeps booting: when AMBER_ADMIN_EMAIL is unset,
+   * the FIRST entry becomes the admin and the rest are ignored.
+   */
   CF_ACCESS_ALLOWED_EMAILS: csvEmails.optional(),
+  /** The one admin. Cannot be changed from the UI or the API. */
+  AMBER_ADMIN_EMAIL: z
+    .string()
+    .transform((raw) => raw.trim())
+    .pipe(z.union([z.literal(""), singleEmail]))
+    .transform((raw) => (raw === "" ? undefined : raw))
+    .optional(),
+  /**
+   * The reusable Access policy whose explicit email entries are the users.
+   * All three or none: without them Amber is admin-only.
+   */
+  CF_API_TOKEN: optionalString,
+  CF_ACCOUNT_ID: optionalString,
+  CF_ACCESS_POLICY_ID: optionalString,
+  /** Insecure mode only: stands in for the access policy in tests and local development. */
+  INSECURE_USER_EMAILS: csvEmails.optional(),
   INSECURE_ALLOW_PUBLIC_ACCESS: booleanFlag.default(false),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   // Used to build the clone URLs shown in the UI. Deployments must set this;
@@ -54,6 +89,39 @@ export const envSchema = z.object({
 });
 
 export type Env = z.infer<typeof envSchema>;
+
+/**
+ * Wraps a credential so it cannot reach a log or a response by accident.
+ * pino serializes with JSON.stringify, which calls toJSON; util.inspect and
+ * template strings get the same placeholder. The only way to the value is
+ * reveal(), which is greppable.
+ */
+export class RedactedSecret {
+  readonly #value: string;
+
+  constructor(value: string) {
+    this.#value = value;
+  }
+
+  reveal(): string {
+    return this.#value;
+  }
+
+  toJSON(): string {
+    return "[redacted]";
+  }
+
+  toString(): string {
+    return "[redacted]";
+  }
+
+  [inspect.custom](): string {
+    return "[redacted]";
+  }
+}
+
+/** Where the admin email came from, so boot can warn about the legacy variable. */
+export type AdminEmailSource = "env" | "legacy" | null;
 
 export interface Config {
   nodeEnv: Env["NODE_ENV"];
@@ -74,8 +142,21 @@ export interface Config {
   cfAccess: {
     teamDomain: string;
     aud: string;
-    allowedEmails: readonly string[];
   } | null;
+  /**
+   * The one admin, lower case. Always set outside insecure mode. In insecure
+   * mode it may be null, and the admin row keeps its placeholder address.
+   */
+  adminEmail: string | null;
+  adminEmailSource: AdminEmailSource;
+  /** The reusable Access policy that lists the users, or null for admin-only. */
+  accessPolicy: {
+    accountId: string;
+    policyId: string;
+    apiToken: RedactedSecret;
+  } | null;
+  /** Insecure mode only, and empty otherwise: the stand-in user list. */
+  insecureUserEmails: readonly string[];
 }
 
 export class ConfigError extends Error {
@@ -105,19 +186,51 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
   const logsDir = resolve(env.LOGS_DIR ?? `${dataDir}/logs`);
 
   const insecureMode = env.INSECURE_ALLOW_PUBLIC_ACCESS;
+
+  const legacyAdmin = env.CF_ACCESS_ALLOWED_EMAILS?.[0];
+  const adminEmail = env.AMBER_ADMIN_EMAIL ?? legacyAdmin ?? null;
+  const adminEmailSource: AdminEmailSource =
+    env.AMBER_ADMIN_EMAIL !== undefined ? "env" : legacyAdmin !== undefined ? "legacy" : null;
+
   const hasCfAccess =
     env.CF_ACCESS_TEAM_DOMAIN !== undefined &&
     env.CF_ACCESS_AUD !== undefined &&
-    env.CF_ACCESS_ALLOWED_EMAILS !== undefined &&
-    env.CF_ACCESS_ALLOWED_EMAILS.length > 0;
+    adminEmail !== null;
 
   if (!insecureMode && !hasCfAccess) {
     throw new ConfigError(
       "Cloudflare Access is not configured. Set CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD and " +
-        "CF_ACCESS_ALLOWED_EMAILS, or set INSECURE_ALLOW_PUBLIC_ACCESS=1 to run without " +
+        "AMBER_ADMIN_EMAIL, or set INSECURE_ALLOW_PUBLIC_ACCESS=1 to run without " +
         "authentication bound to 127.0.0.1 only.",
     );
   }
+
+  // All three or none: a partial set would be an admin-only instance that
+  // looks configured, and the missing piece only shows up as everyone else
+  // being refused.
+  const policyParts = {
+    CF_API_TOKEN: env.CF_API_TOKEN,
+    CF_ACCOUNT_ID: env.CF_ACCOUNT_ID,
+    CF_ACCESS_POLICY_ID: env.CF_ACCESS_POLICY_ID,
+  };
+  const policySet = Object.entries(policyParts).filter(([, value]) => value !== undefined);
+  if (policySet.length !== 0 && policySet.length !== 3) {
+    const missing = Object.entries(policyParts)
+      .filter(([, value]) => value === undefined)
+      .map(([name]) => name);
+    throw new ConfigError(
+      "CF_API_TOKEN, CF_ACCOUNT_ID and CF_ACCESS_POLICY_ID are set together or not at all. " +
+        `Missing: ${missing.join(", ")}.`,
+    );
+  }
+  const accessPolicy =
+    policySet.length === 3
+      ? {
+          accountId: env.CF_ACCOUNT_ID as string,
+          policyId: env.CF_ACCESS_POLICY_ID as string,
+          apiToken: new RedactedSecret(env.CF_API_TOKEN as string),
+        }
+      : null;
 
   return {
     nodeEnv: env.NODE_ENV,
@@ -142,7 +255,12 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
         : {
             teamDomain: env.CF_ACCESS_TEAM_DOMAIN as string,
             aud: env.CF_ACCESS_AUD as string,
-            allowedEmails: env.CF_ACCESS_ALLOWED_EMAILS as string[],
           },
+    adminEmail,
+    adminEmailSource,
+    // The stand-in list never applies with real authentication: it would be a
+    // second, unaudited allow list sitting next to the policy.
+    accessPolicy: insecureMode ? null : accessPolicy,
+    insecureUserEmails: insecureMode ? (env.INSECURE_USER_EMAILS ?? []) : [],
   };
 }

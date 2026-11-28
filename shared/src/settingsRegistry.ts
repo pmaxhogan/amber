@@ -177,6 +177,20 @@ export const settingsRegistry = {
       unit: "workers",
     },
   }),
+  default_user_storage_cap_gb: defineSetting({
+    schema: z.number().min(0),
+    default: 5,
+    scopes: GLOBAL_ONLY,
+    ui: {
+      label: "Default storage cap per user",
+      description:
+        "How much backup storage a user may own before new repositories are refused. Existing repositories keep syncing. A cap set on a user replaces this, and the admin is never capped.",
+      group: "Users",
+      control: "number",
+      min: 0,
+      unit: "GB",
+    },
+  }),
 } as const;
 
 export type SettingsRegistry = typeof settingsRegistry;

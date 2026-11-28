@@ -150,7 +150,12 @@ describe("006_trending_sync", () => {
   it("carries every existing sync over unchanged, with no trending fields", () => {
     const seeded = seedBefore006();
     const before = db.all<Record<string, unknown>>("SELECT * FROM account_syncs ORDER BY id");
-    migrate(db, log);
+    // Up to 006 only: the row shape is 006's, and later migrations add columns.
+    migrate(
+      db,
+      log,
+      migrations.filter((migration) => migration.name < "007"),
+    );
 
     const after = db.all<Record<string, unknown>>("SELECT * FROM account_syncs ORDER BY id");
     expect(after).toHaveLength(3);
@@ -176,7 +181,12 @@ describe("006_trending_sync", () => {
 
   it("leaves no scratch tables behind and keeps the foreign keys consistent", () => {
     seedBefore006();
-    migrate(db, log);
+    // Up to 006 only: the index list is 006's, and 010 adds an owner index.
+    migrate(
+      db,
+      log,
+      migrations.filter((migration) => migration.name < "007"),
+    );
 
     const tables = db
       .all<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'")

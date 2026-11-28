@@ -13,9 +13,9 @@ import { parseBody, parseParams } from "./validate.ts";
 export const forgeRoutes: FastifyPluginAsync = async (app) => {
   const { db } = app.amber;
 
-  app.get("/forges", (): Forge[] => listForges(db));
+  app.get("/forges", { config: { authz: "user" } }, (): Forge[] => listForges(db));
 
-  app.post("/forges", (request, reply): Forge => {
+  app.post("/forges", { config: { authz: "manage_forges" } }, (request, reply): Forge => {
     const input = parseBody(createForgeSchema, request);
     const existed = findForge(db, input.protocol, input.host, input.port) !== undefined;
     const forge = upsertForge(db, input);
@@ -23,12 +23,12 @@ export const forgeRoutes: FastifyPluginAsync = async (app) => {
     return forge;
   });
 
-  app.patch("/forges/:id", (request): Forge => {
+  app.patch("/forges/:id", { config: { authz: "manage_forges" } }, (request): Forge => {
     const { id } = parseParams(idParamsSchema, request);
     return updateForge(db, id, parseBody(updateForgeSchema, request));
   });
 
-  app.delete("/forges/:id", (request, reply): null => {
+  app.delete("/forges/:id", { config: { authz: "manage_forges" } }, (request, reply): null => {
     const { id } = parseParams(idParamsSchema, request);
     deleteForge(db, id);
     void reply.code(204);

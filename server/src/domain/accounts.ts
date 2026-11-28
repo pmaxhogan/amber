@@ -3,6 +3,7 @@ import type { Db } from "../db/db.ts";
 import { assertSecretKey, decryptSecret, encryptSecret } from "../security/secrets.ts";
 import { conflict, invalid, isUniqueViolation, notFound } from "./errors.ts";
 import { requireForge } from "./forges.ts";
+import { OWNER_OR_ADMIN_SQL } from "./users.ts";
 
 /**
  * Accounts hold the credentials Amber presents to a forge, so two rules matter
@@ -143,7 +144,17 @@ function promoteOldest(db: Db, forgeId: number, now: number): void {
   db.run("UPDATE accounts SET is_default = 1, updated_at = ? WHERE id = ?", now, oldest.id);
 }
 
-export function createAccount(db: Db, key: Buffer | null, input: CreateAccount): Account {
+/**
+ * `ownerUserId` is the Amber user the account belongs to. Absent, it falls
+ * back to the admin row: the column is NOT NULL in effect, and a NULL owner
+ * would also slip past the per-owner default index.
+ */
+export function createAccount(
+  db: Db,
+  key: Buffer | null,
+  input: CreateAccount,
+  ownerUserId: number | null = null,
+): Account {
   const username = normalizeUsername(input.username);
   if (username === "") {
     throw invalid("An account needs a username.");
@@ -168,12 +179,14 @@ export function createAccount(db: Db, key: Buffer | null, input: CreateAccount):
     try {
       id = db.run(
         `INSERT INTO accounts
-           (forge_id, username, secret_enc, is_default, last_used_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, NULL, ?, ?)`,
+           (forge_id, username, secret_enc, is_default, last_used_at, owner_user_id,
+            created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, ${OWNER_OR_ADMIN_SQL}, ?, ?)`,
         input.forgeId,
         username,
         secretEnc,
         wantsDefault ? 1 : 0,
+        ownerUserId,
         now,
         now,
       ).lastInsertRowid;

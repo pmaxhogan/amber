@@ -15,7 +15,7 @@ import { countGoneRepos, countRepos, totalDiskUsageBytes } from "../domain/repos
 export const statusRoutes: FastifyPluginAsync = async (app) => {
   const { db, config, version, scheduler } = app.amber;
 
-  app.get("/status", (): Status => {
+  app.get("/status", { config: { authz: "user" } }, (): Status => {
     const queue = scheduler?.status() ?? { queueDepth: 0, activeSyncs: 0, breakerOpen: false };
     return {
       version,

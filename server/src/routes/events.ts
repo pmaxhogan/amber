@@ -23,7 +23,7 @@ export const eventRoutes: FastifyPluginAsync<EventRoutesOptions> = async (app, o
   const heartbeatMs = options.heartbeatMs ?? SSE_HEARTBEAT_MS;
   const log = app.log.child({ mod: "events" });
 
-  app.get("/events", (request, reply) => {
+  app.get("/events", { config: { authz: "user" } }, (request, reply) => {
     // Fastify must not try to serialize or finish this response.
     reply.hijack();
 

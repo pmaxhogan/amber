@@ -18,6 +18,7 @@ import type { Db } from "../db/db.ts";
 import { conflict, invalid, isUniqueViolation, notFound } from "./errors.ts";
 import { requireForge } from "./forges.ts";
 import { resolveSettingsForRepos } from "./settings.ts";
+import { OWNER_OR_ADMIN_SQL } from "./users.ts";
 
 /**
  * `forge_id` is IMMUTABLE. A repo cannot be re-pointed at another forge, which
@@ -472,6 +473,11 @@ export interface CreateRepoInput {
   /** New repos sync immediately by default; the importer staggers a bulk run. */
   nextSyncAt?: number | null;
   state?: RepoState;
+  /**
+   * The user who imported it. Every repo has exactly one owner, so an absent
+   * value falls back to the admin row rather than leaving the column NULL.
+   */
+  ownerUserId?: number | null;
 }
 
 /** Retries only guard against an astronomically unlikely short id collision. */
@@ -501,8 +507,8 @@ export function createRepo(db: Db, input: CreateRepoInput): Repo {
           `INSERT INTO repos
              (forge_id, path, display_name, slug, short_id, account_override_id,
               force_anonymous, managed_by_account_sync_id, state, next_sync_at,
-              consecutive_failures, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+              consecutive_failures, owner_user_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ${OWNER_OR_ADMIN_SQL}, ?, ?)`,
           input.forgeId,
           path,
           displayNameFor(path),
@@ -513,6 +519,7 @@ export function createRepo(db: Db, input: CreateRepoInput): Repo {
           input.managedByAccountSyncId ?? null,
           input.state ?? "active",
           nextSyncAt,
+          input.ownerUserId ?? null,
           now,
           now,
         ).lastInsertRowid;

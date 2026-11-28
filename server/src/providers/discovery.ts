@@ -14,6 +14,7 @@ import {
   type DeleteRepoOptions,
   type RepoFileRemover,
 } from "../domain/repos.ts";
+import { OWNER_OR_ADMIN_SQL } from "../domain/users.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
 import { bitbucketProvider } from "./bitbucket.ts";
@@ -214,6 +215,8 @@ export interface NewAccountSync {
   visibility: AccountSyncVisibility;
   enabled: boolean;
   intervalMinutes: number;
+  /** The user the sync belongs to. Absent, the admin row: never NULL. */
+  ownerUserId?: number | null;
 }
 
 /** Insert one sync. An enabled one is due at once, so the next timer tick runs it. */
@@ -225,8 +228,8 @@ export function insertAccountSync(
   const inserted = db.run(
     `INSERT INTO account_syncs (
        forge_id, account_id, source, namespace, top_n, window_days, visibility, enabled,
-       interval_minutes, next_run_at, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       interval_minutes, next_run_at, owner_user_id, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${OWNER_OR_ADMIN_SQL}, ?, ?)`,
     input.forgeId,
     input.accountId,
     input.source,
@@ -237,6 +240,7 @@ export function insertAccountSync(
     input.enabled ? 1 : 0,
     input.intervalMinutes,
     input.enabled ? now : null,
+    input.ownerUserId ?? null,
     now,
     now,
   );
@@ -675,8 +679,11 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
         `INSERT INTO repos (
            forge_id, path, display_name, slug, short_id, managed_by_account_sync_id,
            account_override_id, origin, state, next_sync_at, consecutive_failures,
-           default_branch, last_seen_at, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'account_sync', 'active', ?, 0, ?, ?, ?, ?)`,
+           default_branch, last_seen_at, owner_user_id, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'account_sync', 'active', ?, 0, ?, ?,
+                   COALESCE((SELECT owner_user_id FROM account_syncs WHERE id = ?),
+                            (SELECT id FROM users WHERE is_admin = 1)),
+                   ?, ?)`,
         args.forgeId,
         args.repo.path,
         displayName,
@@ -687,6 +694,8 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
         args.nextSyncAt,
         args.repo.defaultBranch,
         args.now,
+        // A discovered repo belongs to whoever owns the sync that found it.
+        args.accountSyncId,
         args.now,
         args.now,
       );

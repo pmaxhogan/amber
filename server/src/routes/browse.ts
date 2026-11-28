@@ -111,7 +111,7 @@ export const browseRoutes: FastifyPluginAsync = async (app) => {
     return { repo: located.repo, git: gitContext(located.dir, reply) };
   }
 
-  app.get("/repos/:id/browse/refs", async (request, reply) => {
+  app.get("/repos/:id/browse/refs", { config: { authz: "browse" } }, async (request, reply) => {
     const query = browseRefsQuerySchema.safeParse(request.query);
     if (!query.success) {
       return bad(reply, "Invalid refs request");
@@ -127,7 +127,7 @@ export const browseRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get("/repos/:id/browse/resolve", async (request, reply) => {
+  app.get("/repos/:id/browse/resolve", { config: { authz: "browse" } }, async (request, reply) => {
     const query = browseResolveQuerySchema.safeParse(request.query);
     if (!query.success) {
       return bad(reply, "Invalid revision");
@@ -149,7 +149,7 @@ export const browseRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get("/repos/:id/browse/contents", async (request, reply) => {
+  app.get("/repos/:id/browse/contents", { config: { authz: "browse" } }, async (request, reply) => {
     const query = browseContentsQuerySchema.safeParse(request.query);
     if (!query.success) {
       return bad(reply, "Invalid contents request");
@@ -173,6 +173,7 @@ export const browseRoutes: FastifyPluginAsync = async (app) => {
   app.get(
     "/repos/:id/browse/raw",
     {
+      config: { authz: "browse" },
       // On the way in, so a 400 or 404 below carries them too.
       onRequest: async (_request, reply) => {
         for (const [name, value] of Object.entries(RAW_SAFETY_HEADERS)) {
@@ -226,7 +227,7 @@ export const browseRoutes: FastifyPluginAsync = async (app) => {
     },
   );
 
-  app.get("/repos/:id/browse/commits", async (request, reply) => {
+  app.get("/repos/:id/browse/commits", { config: { authz: "browse" } }, async (request, reply) => {
     const query = browseCommitsQuerySchema.safeParse(request.query);
     if (!query.success) {
       return bad(reply, "Invalid commits request");
@@ -247,7 +248,7 @@ export const browseRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get("/repos/:id/browse/commit", async (request, reply) => {
+  app.get("/repos/:id/browse/commit", { config: { authz: "browse" } }, async (request, reply) => {
     const query = browseCommitQuerySchema.safeParse(request.query);
     if (!query.success) {
       return bad(reply, "Invalid commit request");

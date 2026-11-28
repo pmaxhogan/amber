@@ -109,7 +109,7 @@ export function extractToken(request: FastifyRequest): string | null {
   return null;
 }
 
-/** The email claim, normalized for a case-insensitive allow list comparison. */
+/** The email claim, normalized for a case-insensitive comparison. */
 function emailClaim(payload: JWTPayload): string | null {
   const email = payload["email"];
   if (typeof email !== "string") {
@@ -134,7 +134,12 @@ class CfAccessDenied extends Error {
 /**
  * Verifies the Cloudflare Access JWT with jose (createRemoteJWKSet against the
  * team domain cdn-cgi certs endpoint) on every route except /healthz and
- * /git/*, then checks the email claim against the allow list. Fails closed.
+ * /git/*, and records the verified email on the request. Fails closed.
+ *
+ * It decides only whether the token is genuine. WHO the email is (the admin,
+ * a user listed by the access policy, or nobody) is security/identity.ts,
+ * whose hook runs right after this one and refuses anyone this one let
+ * through who is not a user.
  *
  * In insecure mode the hook is not installed at all; the server is bound to
  * loopback and reports insecureMode in /api/status.
@@ -165,9 +170,8 @@ const plugin: FastifyPluginAsync<CfAccessOptions> = async (
     );
   }
 
-  const { teamDomain, aud, allowedEmails } = config.cfAccess;
+  const { teamDomain, aud } = config.cfAccess;
   const issuer = `https://${teamDomain}`;
-  const allowList = new Set(allowedEmails.map((email) => email.toLowerCase()));
   const publicPrefixes = options.publicPrefixes ?? DEFAULT_PUBLIC_PREFIXES;
 
   // Built once: createRemoteJWKSet owns the JWKS cache and the kid-miss
@@ -197,9 +201,6 @@ const plugin: FastifyPluginAsync<CfAccessOptions> = async (
       const email = emailClaim(payload);
       if (email === null) {
         throw new CfAccessDenied("token carries no email claim");
-      }
-      if (!allowList.has(email)) {
-        throw new CfAccessDenied("email is not in CF_ACCESS_ALLOWED_EMAILS");
       }
 
       request.cfAccess = { email, subject: payload.sub };

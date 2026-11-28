@@ -11,6 +11,8 @@ import { pushRoutes } from "./push.ts";
 import { repoRoutes } from "./repos.ts";
 import { settingsRoutes } from "./settings.ts";
 import { statusRoutes } from "./status.ts";
+import { meRoutes } from "./me.ts";
+import { userRoutes } from "./users.ts";
 import { toApiError } from "./validate.ts";
 
 /** Everything under /api. Each plugin is thin and calls into domain/*. */
@@ -48,4 +50,6 @@ export const apiRoutes: FastifyPluginAsync = async (app) => {
   await app.register(statusRoutes);
   await app.register(pushRoutes);
   await app.register(eventRoutes, {});
+  await app.register(meRoutes);
+  await app.register(userRoutes);
 };

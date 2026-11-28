@@ -121,45 +121,49 @@ export const exportRoutes: FastifyPluginAsync = async (app) => {
       .send(handle.stream);
   }
 
-  app.get("/repos/:id/export/:artifact", async (request, reply) => {
-    const params = artifactParamsSchema.safeParse(request.params);
-    if (!params.success) {
-      return reply.code(400).send({ error: "bad_request", message: "Invalid export request" });
-    }
-    const artifact = parseArtifact(params.data.artifact);
-    if (artifact === null) {
-      return reply.code(404).send({
-        error: "not_found",
-        message: "Unknown export. Use source or gitdir with zip, tar.gz or 7z.",
-      });
-    }
-    const query = refQuerySchema.safeParse(request.query);
-    if (!query.success) {
-      return reply.code(400).send({ error: "bad_request", message: "Invalid ref" });
-    }
-    const located = locate(params.data.id, reply);
-    if (located === null) {
-      return reply;
-    }
-
-    const extension = ARCHIVE_EXTENSIONS[artifact.format];
-    const name = sanitizeFilenamePart(located.repo.displayName) || "repository";
-
-    try {
-      if (artifact.kind === "gitdir") {
-        const handle = await streamGitDirArchive(located.dir, artifact.format);
-        return sendArchive(reply, handle, `${name}-gitdir.${extension}`);
+  app.get(
+    "/repos/:id/export/:artifact",
+    { config: { authz: "export" } },
+    async (request, reply) => {
+      const params = artifactParamsSchema.safeParse(request.params);
+      if (!params.success) {
+        return reply.code(400).send({ error: "bad_request", message: "Invalid export request" });
       }
-      const ref = await resolveRef(located.dir, query.data.ref, located.repo.defaultBranch);
-      const prefix = `${name}-${sanitizeFilenamePart(ref.label) || ref.oid.slice(0, 8)}`;
-      const handle = await streamSourceArchive(located.dir, ref.oid, artifact.format, prefix);
-      return sendArchive(reply, handle, `${prefix}.${extension}`);
-    } catch (error) {
-      return fail(reply, error);
-    }
-  });
+      const artifact = parseArtifact(params.data.artifact);
+      if (artifact === null) {
+        return reply.code(404).send({
+          error: "not_found",
+          message: "Unknown export. Use source or gitdir with zip, tar.gz or 7z.",
+        });
+      }
+      const query = refQuerySchema.safeParse(request.query);
+      if (!query.success) {
+        return reply.code(400).send({ error: "bad_request", message: "Invalid ref" });
+      }
+      const located = locate(params.data.id, reply);
+      if (located === null) {
+        return reply;
+      }
 
-  app.get("/repos/:id/tree", async (request, reply) => {
+      const extension = ARCHIVE_EXTENSIONS[artifact.format];
+      const name = sanitizeFilenamePart(located.repo.displayName) || "repository";
+
+      try {
+        if (artifact.kind === "gitdir") {
+          const handle = await streamGitDirArchive(located.dir, artifact.format);
+          return sendArchive(reply, handle, `${name}-gitdir.${extension}`);
+        }
+        const ref = await resolveRef(located.dir, query.data.ref, located.repo.defaultBranch);
+        const prefix = `${name}-${sanitizeFilenamePart(ref.label) || ref.oid.slice(0, 8)}`;
+        const handle = await streamSourceArchive(located.dir, ref.oid, artifact.format, prefix);
+        return sendArchive(reply, handle, `${prefix}.${extension}`);
+      } catch (error) {
+        return fail(reply, error);
+      }
+    },
+  );
+
+  app.get("/repos/:id/tree", { config: { authz: "export" } }, async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     const query = treeQuerySchema.safeParse(request.query);
     if (!params.success || !query.success) {
@@ -186,7 +190,7 @@ export const exportRoutes: FastifyPluginAsync = async (app) => {
     }
   });
 
-  app.get("/repos/:id/blob", async (request, reply) => {
+  app.get("/repos/:id/blob", { config: { authz: "export" } }, async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
     const query = blobQuerySchema.safeParse(request.query);
     if (!params.success || !query.success) {

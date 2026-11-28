@@ -17,6 +17,7 @@ describe("settingsRegistry shape", () => {
     expect([...SETTING_KEYS].sort()).toEqual(
       [
         "clone_mode",
+        "default_user_storage_cap_gb",
         "lfs_enabled",
         "max_concurrent_per_forge",
         "max_concurrent_syncs",
@@ -65,6 +66,7 @@ describe("defaults", () => {
       paranoid: false,
       max_concurrent_syncs: 8,
       max_concurrent_per_forge: 4,
+      default_user_storage_cap_gb: 5,
     });
   });
 
@@ -89,6 +91,13 @@ describe("scopes", () => {
     expect(isScopeAllowed("max_concurrent_syncs", "global")).toBe(true);
     expect(isScopeAllowed("max_concurrent_syncs", "repo")).toBe(false);
     expect(isScopeAllowed("max_concurrent_per_forge", "forge")).toBe(false);
+  });
+
+  it("keeps the default storage cap global only", () => {
+    expect(isScopeAllowed("default_user_storage_cap_gb", "global")).toBe(true);
+    for (const scope of ["forge", "account", "repo"] as const) {
+      expect(isScopeAllowed("default_user_storage_cap_gb", scope)).toBe(false);
+    }
   });
 
   it("lists keys per scope in registry order", () => {

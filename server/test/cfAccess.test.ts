@@ -85,7 +85,7 @@ function parseRegisteredRoutes(printed: string): RegisteredRoute[] {
 const TEAM_DOMAIN = "amber-test.cloudflareaccess.com";
 const ISSUER = `https://${TEAM_DOMAIN}`;
 const AUD = "aud-0123456789abcdef";
-const ALLOWED = "max@unbroker.com";
+const ALLOWED = "admin@example.com";
 
 let privateKey: CryptoKey;
 let getKey: CfAccessKeyGetter;
@@ -137,7 +137,7 @@ function secureConfig(): Config {
     DATA_DIR: "/tmp/amber-cfaccess-test",
     CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
     CF_ACCESS_AUD: AUD,
-    CF_ACCESS_ALLOWED_EMAILS: `${ALLOWED}, someone-else@unbroker.com`,
+    AMBER_ADMIN_EMAIL: ALLOWED,
   });
 }
 
@@ -323,14 +323,17 @@ describe("cfAccessPlugin request guarding", () => {
     await app.close();
   });
 
-  it("rejects an email that is not on the allow list", async () => {
+  it("accepts any genuine token and leaves who the email is to the identity hook", async () => {
+    // The token check proves the token, nothing more. Whether the address is
+    // the admin, a user or nobody is security/identity.ts, which the real app
+    // installs right after this plugin (see identity.test.ts).
     const app = await buildGuarded();
     const response = await app.inject({
       method: "GET",
       url: "/api/repos",
       headers: { [CF_ACCESS_HEADER]: await makeToken({ email: "intruder@example.com" }) },
     });
-    expect(response.statusCode).toBe(401);
+    expect(response.statusCode).toBe(200);
     await app.close();
   });
 
@@ -345,14 +348,17 @@ describe("cfAccessPlugin request guarding", () => {
     await app.close();
   });
 
-  it("compares the allow list case insensitively", async () => {
-    const app = await buildGuarded();
+  it("records the email claim lower cased", async () => {
+    const app = Fastify({ loggerInstance: createConsoleLogger("silent") });
+    await app.register(cfAccessPlugin, { config: secureConfig(), getKey });
+    app.get("/api/whoami", (request) => ({ email: request.cfAccess?.email }));
+    await app.ready();
     const response = await app.inject({
       method: "GET",
-      url: "/api/repos",
-      headers: { [CF_ACCESS_HEADER]: await makeToken({ email: "MAX@Unbroker.COM" }) },
+      url: "/api/whoami",
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ email: "Admin@Example.COM" }) },
     });
-    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ email: "admin@example.com" });
     await app.close();
   });
 
@@ -397,7 +403,7 @@ describe("cfAccessPlugin request guarding", () => {
 
   it("never echoes the rejected token in the response body", async () => {
     const app = await buildGuarded();
-    const token = await makeToken({ email: "intruder@example.com" });
+    const token = await makeToken({ email: "intruder@example.com", audience: "wrong-aud" });
     const response = await app.inject({
       method: "GET",
       url: "/api/repos",
@@ -510,7 +516,7 @@ describe("the real app guards every /api route", () => {
       AMBER_SECRET_KEY: "a".repeat(64),
       CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
       CF_ACCESS_AUD: AUD,
-      CF_ACCESS_ALLOWED_EMAILS: ALLOWED,
+      AMBER_ADMIN_EMAIL: ALLOWED,
     });
     const log = createConsoleLogger("silent");
     db = openDb(config.dbPath);
@@ -643,14 +649,20 @@ describe("the real app guards every /api route", () => {
   it("refuses the stream outright when the cookie carries a rejected token", async () => {
     await app.listen({ port: 0, host: "127.0.0.1" });
     const { port } = app.server.address() as AddressInfo;
-    const token = await makeToken({ email: "intruder@example.com" });
 
-    const response = await fetch(`http://127.0.0.1:${String(port)}/api/events`, {
-      headers: { cookie: `${CF_ACCESS_COOKIE}=${token}` },
-    });
-    expect(response.status).toBe(401);
-    // Rejected before the handler ran, so no stream was ever opened.
-    expect(response.headers.get("content-type")).toContain("application/json");
-    await response.body?.cancel();
+    // A forged token, and a genuine one for someone who is not a user: no
+    // access policy is configured here, so the instance is admin-only.
+    for (const [token, status] of [
+      [await makeToken({ key: foreignKey }), 401],
+      [await makeToken({ email: "intruder@example.com" }), 403],
+    ] as const) {
+      const response = await fetch(`http://127.0.0.1:${String(port)}/api/events`, {
+        headers: { cookie: `${CF_ACCESS_COOKIE}=${token}` },
+      });
+      expect(response.status).toBe(status);
+      // Rejected before the handler ran, so no stream was ever opened.
+      expect(response.headers.get("content-type")).toContain("application/json");
+      await response.body?.cancel();
+    }
   });
 });

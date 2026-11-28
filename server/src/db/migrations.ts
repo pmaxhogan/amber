@@ -473,6 +473,159 @@ ALTER TABLE repos ADD COLUMN owner_gone INTEGER NULL CHECK (owner_gone IN (0, 1)
 ALTER TABLE repos ADD COLUMN owner_checked_at INTEGER NULL;
 `;
 
+/**
+ * 010: users. Amber goes from one operator to one admin plus a few users, so
+ * everything that used to belong to "the operator" gets an owner.
+ *
+ * - `users` holds one row per identity Amber has ever admitted. Rows are
+ *   never deleted, so ownership history survives a removal. Exactly one row
+ *   is the admin (a partial unique index, not a convention). The migration
+ *   cannot know the admin's email, so it creates the admin row with a
+ *   placeholder address in the reserved .invalid TLD and boot fills in the
+ *   real one. The placeholder's `permissions` is a frozen literal: the
+ *   admin's effective permissions are computed, never read from the row.
+ * - repos, accounts, account syncs and push subscriptions gain an owner, and
+ *   every existing row is assigned to the admin. SQLite cannot add a NOT NULL
+ *   foreign key column without a default, and with foreign keys on an added
+ *   REFERENCES column must default to NULL, so the columns are nullable and
+ *   triggers make them NOT NULL in effect: an insert without an owner gets the
+ *   admin, and an update can never clear one. Domain inserts also name the
+ *   owner explicitly.
+ * - repos.is_private starts at 1 for everything: nothing is exposed by the
+ *   upgrade, and the visibility pass flips the confirmed-public ones.
+ * - forges.allow_private_network defaults to 0 (restricted), but the forges
+ *   that exist were all made by the admin, so they are backfilled to 1.
+ * - The instance-wide git credential is deleted. `git_remote.enabled` stays
+ *   as the admin's kill switch.
+ * - The default-account index and the owned/starred/namespace sync indexes
+ *   become per owner. The trending index stays per forge and window:
+ *   trending is instance-level.
+ *
+ * No table is rebuilt. Dropping accounts would cascade into account_syncs
+ * with foreign keys on (see 004), and every change here is expressible as
+ * ADD COLUMN, UPDATE and index swaps.
+ */
+const users = `
+CREATE TABLE users (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Stored lower case; NOCASE keeps a hand-edited row from duplicating one.
+  -- The check compares BINARY: under the column's NOCASE it would always pass.
+  email             TEXT    NOT NULL UNIQUE COLLATE NOCASE
+                      CHECK (email = lower(email) COLLATE BINARY),
+  is_admin          INTEGER NOT NULL DEFAULT 0 CHECK (is_admin IN (0, 1)),
+  -- JSON object of permission keys (shared/src/permissions.ts).
+  permissions       TEXT    NOT NULL DEFAULT '{}' CHECK (json_valid(permissions)),
+  -- NULL means the global default_user_storage_cap_gb applies.
+  storage_cap_bytes INTEGER NULL CHECK (storage_cap_bytes IS NULL OR storage_cap_bytes >= 0),
+  git_username      TEXT    NULL UNIQUE,
+  git_password_hash TEXT    NULL,
+  git_rotated_at    INTEGER NULL,
+  removed_at        INTEGER NULL,
+  last_seen_at      INTEGER NULL,
+  cap_notified_at   INTEGER NULL,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL,
+  -- The admin is accepted on any valid token and can never be removed.
+  CHECK (is_admin = 0 OR removed_at IS NULL)
+);
+
+CREATE UNIQUE INDEX idx_users_one_admin ON users (is_admin) WHERE is_admin = 1;
+
+INSERT INTO users (email, is_admin, permissions, created_at, updated_at)
+VALUES (
+  'admin@amber.invalid', 1, '{}',
+  CAST(strftime('%s', 'now') AS INTEGER) * 1000,
+  CAST(strftime('%s', 'now') AS INTEGER) * 1000
+);
+
+ALTER TABLE repos ADD COLUMN owner_user_id INTEGER NULL REFERENCES users (id) ON DELETE RESTRICT;
+ALTER TABLE repos ADD COLUMN is_private INTEGER NOT NULL DEFAULT 1 CHECK (is_private IN (0, 1));
+ALTER TABLE repos ADD COLUMN visibility_checked_at INTEGER NULL;
+UPDATE repos SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1);
+CREATE INDEX idx_repos_owner ON repos (owner_user_id);
+
+ALTER TABLE forges
+  ADD COLUMN allow_private_network INTEGER NOT NULL DEFAULT 0
+  CHECK (allow_private_network IN (0, 1));
+UPDATE forges SET allow_private_network = 1;
+
+ALTER TABLE accounts ADD COLUMN owner_user_id INTEGER NULL REFERENCES users (id) ON DELETE RESTRICT;
+UPDATE accounts SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1);
+DROP INDEX idx_accounts_one_default_per_forge;
+CREATE UNIQUE INDEX idx_accounts_one_default_per_owner_forge
+  ON accounts (owner_user_id, forge_id) WHERE is_default = 1;
+CREATE INDEX idx_accounts_owner ON accounts (owner_user_id);
+
+ALTER TABLE account_syncs
+  ADD COLUMN owner_user_id INTEGER NULL REFERENCES users (id) ON DELETE RESTRICT;
+UPDATE account_syncs SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1);
+DROP INDEX idx_account_syncs_account_source;
+CREATE UNIQUE INDEX idx_account_syncs_account_source
+  ON account_syncs (owner_user_id, account_id, source) WHERE source IN ('owned', 'starred');
+DROP INDEX idx_account_syncs_namespace;
+CREATE UNIQUE INDEX idx_account_syncs_namespace
+  ON account_syncs (owner_user_id, forge_id, namespace COLLATE NOCASE) WHERE source = 'namespace';
+CREATE INDEX idx_account_syncs_owner ON account_syncs (owner_user_id);
+
+ALTER TABLE push_subscriptions
+  ADD COLUMN user_id INTEGER NULL REFERENCES users (id) ON DELETE RESTRICT;
+UPDATE push_subscriptions SET user_id = (SELECT id FROM users WHERE is_admin = 1);
+CREATE INDEX idx_push_subscriptions_user ON push_subscriptions (user_id);
+
+DELETE FROM kv WHERE key IN ('git_remote.username', 'git_remote.password_hash', 'git_remote.rotated_at');
+
+-- NOT NULL in effect, enforced by the database rather than by every caller
+-- remembering to: an insert that leaves the owner NULL gets the admin, and an
+-- update can never clear it. The fill runs as an UPDATE, so the per-owner
+-- unique indexes above are checked against the real owner and still refuse a
+-- duplicate.
+CREATE TRIGGER trg_repos_owner_fill AFTER INSERT ON repos
+  WHEN NEW.owner_user_id IS NULL
+BEGIN
+  UPDATE repos SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1) WHERE id = NEW.id;
+END;
+CREATE TRIGGER trg_repos_owner_keep BEFORE UPDATE OF owner_user_id ON repos
+  WHEN NEW.owner_user_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'repos.owner_user_id cannot be NULL');
+END;
+
+CREATE TRIGGER trg_accounts_owner_fill AFTER INSERT ON accounts
+  WHEN NEW.owner_user_id IS NULL
+BEGIN
+  UPDATE accounts SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1) WHERE id = NEW.id;
+END;
+CREATE TRIGGER trg_accounts_owner_keep BEFORE UPDATE OF owner_user_id ON accounts
+  WHEN NEW.owner_user_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'accounts.owner_user_id cannot be NULL');
+END;
+
+CREATE TRIGGER trg_account_syncs_owner_fill AFTER INSERT ON account_syncs
+  WHEN NEW.owner_user_id IS NULL
+BEGIN
+  UPDATE account_syncs SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1)
+   WHERE id = NEW.id;
+END;
+CREATE TRIGGER trg_account_syncs_owner_keep BEFORE UPDATE OF owner_user_id ON account_syncs
+  WHEN NEW.owner_user_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'account_syncs.owner_user_id cannot be NULL');
+END;
+
+CREATE TRIGGER trg_push_subscriptions_user_fill AFTER INSERT ON push_subscriptions
+  WHEN NEW.user_id IS NULL
+BEGIN
+  UPDATE push_subscriptions SET user_id = (SELECT id FROM users WHERE is_admin = 1)
+   WHERE id = NEW.id;
+END;
+CREATE TRIGGER trg_push_subscriptions_user_keep BEFORE UPDATE OF user_id ON push_subscriptions
+  WHEN NEW.user_id IS NULL
+BEGIN
+  SELECT RAISE(ABORT, 'push_subscriptions.user_id cannot be NULL');
+END;
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
@@ -483,4 +636,5 @@ export const migrations: readonly Migration[] = [
   { name: "007_gone_and_push", sql: goneAndPush },
   { name: "008_fork_parent", sql: forkParent },
   { name: "009_owner_gone", sql: ownerGone },
+  { name: "010_users", sql: users },
 ];
