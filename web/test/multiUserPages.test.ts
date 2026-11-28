@@ -9,7 +9,13 @@ import AccountsPage from "../src/pages/AccountsPage.vue";
 import AccountSyncPage from "../src/pages/AccountSyncPage.vue";
 import ImportPage from "../src/pages/ImportPage.vue";
 import RepoDetailDrawer from "../src/components/RepoDetailDrawer.vue";
-import { importFailureKind } from "../src/lib/format.ts";
+import {
+  forgeFailureSummary,
+  hostNotAllowedLabel,
+  importFailureKind,
+  importFailureLabel,
+} from "../src/lib/format.ts";
+import { ApiClientError } from "../src/api/client.ts";
 import { routes } from "../src/router/index.ts";
 import { mountGlobals } from "./helpers/mount.ts";
 import { clickButton, findButton, flush } from "./helpers/dom.ts";
@@ -448,6 +454,33 @@ describe("import failures", () => {
     expect(importFailureKind(undefined, undefined)).toBe("not_imported");
     expect(importFailureKind(undefined, "Amber could not import this repository")).toBe(
       "not_imported",
+    );
+  });
+
+  it("names a host_not_allowed refusal and its egress reason", () => {
+    expect(importFailureKind("host_not_allowed", "x")).toBe("host_not_allowed");
+    expect(importFailureLabel({ code: "host_not_allowed", reason: "port" })).toBe(
+      "Host not allowed: non-standard port",
+    );
+    expect(importFailureLabel({ code: "host_not_allowed", reason: "not_public" })).toBe(
+      "Host not allowed: private network address",
+    );
+    for (const reason of ["scheme", "ip_literal", "invalid_host", "unresolvable"]) {
+      expect(hostNotAllowedLabel(reason)).toMatch(/^Host not allowed: \S/);
+    }
+    // An unknown or missing reason still gets the specific label, not the generic one.
+    expect(importFailureLabel({ code: "host_not_allowed", reason: "brand_new" })).toBe(
+      "Host not allowed",
+    );
+    expect(importFailureLabel({ code: "host_not_allowed" })).toBe("Host not allowed");
+    expect(importFailureLabel({ code: "storage_cap_reached" })).toBe("Storage limit reached");
+
+    const refused = new ApiClientError("host_not_allowed", "nope", 403, { reason: "ip_literal" });
+    expect(forgeFailureSummary("Could not add the forge", refused)).toBe(
+      "Host not allowed: IP address, not a host name",
+    );
+    expect(forgeFailureSummary("Could not add the forge", new Error("x"))).toBe(
+      "Could not add the forge",
     );
   });
 

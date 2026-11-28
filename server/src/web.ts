@@ -3,7 +3,7 @@ import { join, sep } from "node:path";
 import fastifyStatic from "@fastify/static";
 import type { FastifyPluginAsync } from "fastify";
 import type { Config } from "./config.ts";
-import { isPublicPath } from "./security/cfAccess.ts";
+import { isPublicPath, requestPathname } from "./security/cfAccess.ts";
 
 /**
  * Serves the built single page app.
@@ -32,9 +32,12 @@ export interface WebPluginOptions {
  */
 const SERVER_PREFIXES = ["/healthz", "/api", "/git"] as const;
 
+/**
+ * Cut the url exactly the way the auth hooks do (requestPathname), so the
+ * fallback and the token check can never disagree about which path this is.
+ */
 function isServerPath(url: string): boolean {
-  const pathname = url.split("?")[0] ?? url;
-  return isPublicPath(pathname, SERVER_PREFIXES);
+  return isPublicPath(requestPathname(url), SERVER_PREFIXES);
 }
 
 /**

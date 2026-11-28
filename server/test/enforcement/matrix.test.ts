@@ -15,9 +15,9 @@ import type { AccountSyncProvider, DiscoveryContext, RepoInfo } from "../../src/
 import { syncRepo } from "../../src/sync/syncRepo.ts";
 import { asUser } from "../helpers/accessFixtures.ts";
 import { createTempApp, seedForge, type TempApp } from "../helpers.ts";
-import { createOrigin, fixedSettings, silentLog, tempDir } from "../helpers/gitFixtures.ts";
+import { fixedSettings, silentLog, tempDir } from "../helpers/gitFixtures.ts";
 import { makeUser } from "../helpers/users.ts";
-import { usePublicDns } from "../helpers/egress.ts";
+import { createRecordingGit, fakeDns, PUBLIC_V4, usePublicDns } from "../helpers/egress.ts";
 
 // Forge creation vets the host (security/egress.ts); every name is public here.
 usePublicDns();
@@ -404,8 +404,6 @@ describe("fail-closed corners", () => {
   it("does not let a fetch that started before a rename mark the renamed row public", async () => {
     const root = tempDir("rename-race");
     try {
-      const origin = await createOrigin(join(root, "origin"));
-      await origin.commitFile("README.md", "hello\n", "initial commit");
       temp.db.run("UPDATE repos SET is_private = 1 WHERE id = ?", alicesPublicRepo);
       let renamed = false;
       const run = await syncRepo({
@@ -415,8 +413,10 @@ describe("fail-closed corners", () => {
         stateDir: join(root, "state"),
         logger: silentLog,
         settings: fixedSettings(),
-        remoteUrl: origin.url,
-        allowFileProtocol: true,
+        // github.com is a restricted forge: fetches go through the recording
+        // git (pinned, nothing fetched) against a public answer.
+        gitBinary: createRecordingGit(root).binary,
+        resolveHost: fakeDns({}, [PUBLIC_V4]),
         // Anonymous, and the rename lands while the fetch is in flight.
         credentials: () => {
           temp.db.run("UPDATE repos SET path = 'alice/renamed' WHERE id = ?", alicesPublicRepo);
@@ -437,8 +437,6 @@ describe("fail-closed corners", () => {
   it("does mark the row public when the anonymous fetch was of the same path", async () => {
     const root = tempDir("no-rename");
     try {
-      const origin = await createOrigin(join(root, "origin"));
-      await origin.commitFile("README.md", "hello\n", "initial commit");
       temp.db.run("UPDATE repos SET is_private = 1 WHERE id = ?", alicesPublicRepo);
       const run = await syncRepo({
         repoId: alicesPublicRepo,
@@ -447,8 +445,10 @@ describe("fail-closed corners", () => {
         stateDir: join(root, "state"),
         logger: silentLog,
         settings: fixedSettings(),
-        remoteUrl: origin.url,
-        allowFileProtocol: true,
+        // github.com is a restricted forge: fetches go through the recording
+        // git (pinned, nothing fetched) against a public answer.
+        gitBinary: createRecordingGit(root).binary,
+        resolveHost: fakeDns({}, [PUBLIC_V4]),
         credentials: () => undefined,
       });
       expect(run.outcome).toBe("success");

@@ -6,7 +6,12 @@ import {
 } from "@amber/shared";
 import type { FastifyPluginAsync } from "fastify";
 import { z } from "zod";
-import { deletePushSubscription, listPushDevices, savePushSubscription } from "../notify/push.ts";
+import {
+  assertPushEndpointAllowed,
+  deletePushSubscription,
+  listPushDevices,
+  savePushSubscription,
+} from "../notify/push.ts";
 import { requireRequestUser } from "../security/authz.ts";
 
 /**
@@ -14,8 +19,10 @@ import { requireRequestUser } from "../security/authz.ts";
  * subscribes with its own push service, and hands the subscription here.
  *
  * The endpoint a browser supplies is a URL amber will later POST to, so it is
- * https only (shared schema) and never echoed back: responses name the push
- * service host and nothing more.
+ * https only (shared schema), must pass the egress rule (a public DNS name on
+ * 443, refused with 403 `host_not_allowed` otherwise; push.ts checks again at
+ * every send), and is never echoed back: responses name the push service host
+ * and nothing more.
  *
  * Subscriptions are per user: a browser belongs to whoever subscribed it
  * (last), GET lists only the caller's devices, unsubscribe touches only the
@@ -29,11 +36,12 @@ export const pushRoutes: FastifyPluginAsync = async (app) => {
     devices: listPushDevices(db, requireRequestUser(request).id),
   }));
 
-  app.post("/push/subscriptions", { config: { authz: "user" } }, (request, reply) => {
+  app.post("/push/subscriptions", { config: { authz: "user" } }, async (request, reply) => {
     const body = pushSubscribeSchema.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ error: "invalid_body", message: z.prettifyError(body.error) });
     }
+    await assertPushEndpointAllowed(body.data.endpoint);
     const userAgent = request.headers["user-agent"];
     savePushSubscription(db, {
       endpoint: body.data.endpoint,

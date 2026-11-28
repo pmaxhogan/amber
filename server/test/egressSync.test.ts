@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db/db.ts";
@@ -12,7 +12,15 @@ import {
   syncRepo,
   type SyncRepoDeps,
 } from "../src/sync/syncRepo.ts";
-import { fakeDns, PUBLIC_V4, PUBLIC_V6, usePublicDns } from "./helpers/egress.ts";
+import {
+  createRecordingGit,
+  fakeDns,
+  gitSubcommand,
+  PUBLIC_V4,
+  PUBLIC_V6,
+  usePublicDns,
+  type RecordingGit,
+} from "./helpers/egress.ts";
 import {
   createTestDb,
   fixedSettings,
@@ -34,64 +42,19 @@ import { adminOf, makeUser } from "./helpers/users.ts";
  */
 
 const PASSWORD = "tok-very-secret-123";
-const NETWORK = new Set(["fetch", "ls-remote", "clone", "lfs"]);
 
 let root: string;
 let db: Db;
-let logPath: string;
-let fakeGit: string;
+let git: RecordingGit;
 
-function writeFakeGit(): void {
-  fakeGit = join(root, "fake-git.mjs");
-  logPath = join(root, "git-argv.ndjson");
-  writeFileSync(
-    fakeGit,
-    `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
-const args = process.argv.slice(2);
-appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
-let sub = "";
-for (let i = 0; i < args.length; i += 1) {
-  if (args[i] === "-c") { i += 1; continue; }
-  if (!args[i].startsWith("-")) { sub = args[i]; break; }
-}
-if (${JSON.stringify([...NETWORK])}.includes(sub)) {
-  process.exit(0);
-}
-const result = spawnSync("git", args, { stdio: "inherit" });
-process.exit(result.status ?? 1);
-`,
-    "utf8",
-  );
-  chmodSync(fakeGit, 0o755);
-}
+const subcommand = gitSubcommand;
 
 function invocations(): string[][] {
-  if (!existsSync(logPath)) {
-    return [];
-  }
-  return readFileSync(logPath, "utf8")
-    .split("\n")
-    .filter((line) => line !== "")
-    .map((line) => JSON.parse(line) as string[]);
-}
-
-function subcommand(args: readonly string[]): string {
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "-c") {
-      i += 1;
-      continue;
-    }
-    if (!(args[i] ?? "").startsWith("-")) {
-      return args[i] ?? "";
-    }
-  }
-  return "";
+  return git.invocations();
 }
 
 function networkCalls(): string[][] {
-  return invocations().filter((args) => NETWORK.has(subcommand(args)));
+  return git.networkCalls();
 }
 
 /** The -c values of one invocation, in order. */
@@ -129,7 +92,7 @@ async function sync(
     logger: silentLog,
     settings: fixedSettings({ lfs_enabled: true }),
     credentials: () => ({ username: "octo", password: PASSWORD }),
-    gitBinary: fakeGit,
+    gitBinary: git.binary,
     ...overrides,
   });
 }
@@ -143,7 +106,7 @@ describe("syncing a restricted forge", () => {
   beforeEach(() => {
     root = tempDir("egress-sync");
     db = createTestDb(root);
-    writeFakeGit();
+    git = createRecordingGit(root);
   });
 
   afterEach(() => {
@@ -184,7 +147,7 @@ describe("syncing a restricted forge", () => {
     const restrictedRepo = repoOn("git.example.com", true);
     await sync(restrictedRepo, { resolveHost: fakeDns({ "git.example.com": [PUBLIC_V4] }) });
     const pinned = networkCalls();
-    rmSync(logPath);
+    git.reset();
 
     const openRepo = repoOn("git.example.org", false);
     await sync(openRepo, {
@@ -280,11 +243,80 @@ describe("syncing a restricted forge", () => {
 
     // Control: the same settings on an unrestricted forge do reach git-lfs,
     // wherever git-lfs is installed (the probe runs the real binary).
-    rmSync(logPath);
+    git.reset();
     resetLfsProbe();
     const lfsInstalled = await isGitLfsAvailable({ stateDir: join(root, "state") });
     await sync(repoOn("git.example.org", false));
     expect(networkCalls().map(subcommand).includes("lfs")).toBe(lfsInstalled);
+  });
+});
+
+describe("the well-known public forge tier", () => {
+  beforeEach(() => {
+    root = tempDir("egress-tier");
+    db = createTestDb(root);
+    git = createRecordingGit(root);
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function seededGithubRepo(): number {
+    // Seeded by 003 and restricted by the 010 backfill.
+    const forge = db.get<{ id: number; allow_private_network: number }>(
+      "SELECT id, allow_private_network FROM forges WHERE host = 'github.com'",
+    );
+    expect(forge?.allow_private_network).toBe(0);
+    return insertRepo(db, { forgeId: forge?.id ?? 0, path: "acme/widgets" });
+  }
+
+  it("is pinned, keeps git's redirect default, and forces the LFS endpoint", async () => {
+    resetLfsProbe();
+    const lfsInstalled = await isGitLfsAvailable({ stateDir: join(root, "state") });
+    const run = await sync(seededGithubRepo(), {
+      resolveHost: fakeDns({ "github.com": [PUBLIC_V4] }),
+    });
+    expect(run.outcome).toBe("success");
+
+    const calls = networkCalls();
+    const git = calls.filter((args) => subcommand(args) !== "lfs");
+    expect(git.map(subcommand)).toEqual(["ls-remote", "fetch"]);
+    for (const args of git) {
+      expect(configOf(args).slice(-4)).toEqual([
+        "http.curloptResolve=",
+        `http.curloptResolve=github.com:443:${PUBLIC_V4}`,
+        "http.followRedirects=initial",
+        "transfer.bundleURI=false",
+      ]);
+    }
+    const lfs = calls.filter((args) => subcommand(args) === "lfs");
+    expect(lfs.length).toBe(lfsInstalled ? 1 : 0);
+    for (const args of lfs) {
+      expect(configOf(args).at(-1)).toBe("lfs.url=https://github.com/acme/widgets.git/info/lfs");
+      expect(configOf(args)).toContain(`http.curloptResolve=github.com:443:${PUBLIC_V4}`);
+    }
+  });
+
+  it("still refuses a well-known host that resolves privately", async () => {
+    const run = await sync(seededGithubRepo(), {
+      resolveHost: fakeDns({ "github.com": ["10.0.0.1"] }),
+    });
+    expect(run.errorKind).toBe("network");
+    expect(invocations()).toEqual([]);
+  });
+
+  it("gives any other restricted forge no redirects and no LFS", async () => {
+    const run = await sync(repoOn("git.example.com", true), {
+      resolveHost: fakeDns({ "git.example.com": [PUBLIC_V4] }),
+    });
+    expect(run.outcome).toBe("success");
+    for (const args of networkCalls()) {
+      expect(configOf(args)).toContain("http.followRedirects=false");
+      expect(configOf(args).some((value) => value.startsWith("lfs.url="))).toBe(false);
+    }
+    expect(networkCalls().map(subcommand)).not.toContain("lfs");
   });
 });
 
@@ -448,7 +480,8 @@ describe("creating forges", () => {
     });
     expect(refused.json()).toMatchObject({
       failed: 1,
-      results: [{ action: "failed", code: "host_not_allowed" }],
+      // The egress category travels through the route to the web label.
+      results: [{ action: "failed", code: "host_not_allowed", reason: "not_public" }],
     });
     expect(refused.body).not.toContain("10.1.2.3");
     expect(forgeCount("intranet.example.com")).toBe(0);

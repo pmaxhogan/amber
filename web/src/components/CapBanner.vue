@@ -20,8 +20,14 @@ const cap = computed(() => humanBytes(me.storage?.capBytes ?? null));
     <AppIcon name="alert" :size="20" />
     <p>
       <strong>You are at your storage limit ({{ used }} of {{ cap }}).</strong>
-      New imports are refused. Your existing backups keep syncing. Remove repositories, or ask the
-      Amber admin for more space.
+      <template v-if="me.storage?.atCeiling === true">
+        You are using twice your limit, so syncing is paused for all your repositories. New imports
+        are refused too. Remove repositories, or ask the Amber admin for more space.
+      </template>
+      <template v-else>
+        New imports are refused. Your existing backups keep syncing until you reach twice your
+        limit, when syncing pauses. Remove repositories, or ask the Amber admin for more space.
+      </template>
     </p>
   </div>
 </template>

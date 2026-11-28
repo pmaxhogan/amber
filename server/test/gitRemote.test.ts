@@ -214,6 +214,82 @@ describe("authentication", () => {
       rmSync(fresh.dataDir, { recursive: true, force: true });
     }
   });
+
+  // A real clone first asks with no credentials and only sends Basic after
+  // the 401, so the known-address bypass only works if that first leg is
+  // never throttled. Proven with the git CLI, not with hand-built requests.
+  it("lets a user clone again from their known address after someone sprays it dry", async () => {
+    const fresh = await startTestServer();
+    try {
+      const sprayedSlug = "fixtures-known-77665544";
+      await createRepoFixture(fresh.backupsDir, sprayedSlug);
+      insertRepoRow(fresh.db, { slug: sprayedSlug });
+      const secret = await enableRemote(fresh);
+      const urlFor = (user: string, password: string): string =>
+        `${fresh.baseUrl.replace("http://", `http://${user}:${password}@`)}/git/${sprayedSlug}.git`;
+      const first = join(scratch("known-first"), "repo");
+      expect((await clone(urlFor(secret.username, secret.password), first)).code).toBe(0);
+
+      const infoRefs = `${fresh.baseUrl}/git/${sprayedSlug}.git/info/refs?service=git-upload-pack`;
+      let throttled = false;
+      for (let attempt = 0; attempt < 80 && !throttled; attempt += 1) {
+        const response = await fetch(infoRefs, {
+          headers: { authorization: basic(`spray${String(attempt).padStart(5, "0")}`, "x") },
+        });
+        throttled = response.status === 429;
+      }
+      expect(throttled).toBe(true);
+
+      const again = join(scratch("known-again"), "repo");
+      const result = await clone(urlFor(secret.username, secret.password), again);
+      expect(result.code, result.stderr).toBe(0);
+    } finally {
+      await fresh.close();
+      rmSync(fresh.dataDir, { recursive: true, force: true });
+    }
+  });
+
+  // trustProxy is ONE hop (cloudflared -> Amber). The client writes the
+  // left-most X-Forwarded-For entry itself; only the entry the nearest proxy
+  // appended (the right-most) may decide which bucket a failure lands in.
+  it("keys the throttle on the address the nearest proxy saw, not a client-written one", async () => {
+    const fresh = await startTestServer();
+    try {
+      const throttleSlug = "fixtures-xff-66554433";
+      await createRepoFixture(fresh.backupsDir, throttleSlug);
+      insertRepoRow(fresh.db, { slug: throttleSlug });
+      await enableRemote(fresh);
+      const url = `${fresh.baseUrl}/git/${throttleSlug}.git/info/refs?service=git-upload-pack`;
+      const attemptFrom = (forwarded: string, username: string) =>
+        fetch(url, {
+          headers: {
+            authorization: basic(username, "wrong"),
+            "x-forwarded-for": forwarded,
+          },
+        });
+
+      let throttledAt = -1;
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        // A fresh spoofed left-most address and a fresh username every time:
+        // under trustProxy: true each of these was a brand new bucket.
+        const response = await attemptFrom(
+          `198.51.100.${String(attempt)}, 203.0.113.5`,
+          `spray${String(attempt).padStart(5, "0")}`,
+        );
+        if (response.status === 429) {
+          throttledAt = attempt;
+          break;
+        }
+        expect(response.status).toBe(401);
+      }
+      expect(throttledAt).toBeGreaterThan(0);
+      // Another address the proxy reports is unaffected.
+      expect((await attemptFrom("203.0.113.6", "otheruser1")).status).toBe(401);
+    } finally {
+      await fresh.close();
+      rmSync(fresh.dataDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("pushing", () => {

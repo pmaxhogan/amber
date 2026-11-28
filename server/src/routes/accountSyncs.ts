@@ -17,6 +17,7 @@ import {
   getAccountSyncRow,
   insertAccountSync,
   mapAccountSync,
+  ownerMayRunAccountSync,
   runAccountSyncDetailed,
   supportsNamespaceSync,
   supportsStarredSync,
@@ -394,6 +395,16 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     }
     if (target.source === "trending" && !hasPermission(user, "manage_settings")) {
       return trendingForbidden(reply);
+    }
+    if (!ownerMayRunAccountSync(getUser(db, target.owner_user_id))) {
+      // The scheduler skips it too (listDueAccountSyncs); a manual run must
+      // not be the way around a revoked `import`.
+      return fail(
+        reply,
+        409,
+        "owner_cannot_import",
+        "This sync's owner can no longer import repositories, so it does not run.",
+      );
     }
 
     const result: AccountSyncRunResult = await runAccountSyncDetailed(db, params.data.id, deps);

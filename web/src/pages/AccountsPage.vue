@@ -12,7 +12,7 @@ import ToggleSwitch from "primevue/toggleswitch";
 import { FORGE_KINDS, type Account, type Forge, type ForgeKind } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
-import { forgeOrigin } from "../lib/format.ts";
+import { forgeFailureSummary, forgeOrigin } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
 import { useMeStore } from "../stores/me.ts";
 import AppIcon from "../components/AppIcon.vue";
@@ -148,7 +148,7 @@ async function saveForge(): Promise<void> {
     forgeDialog.value = false;
     await load();
   } catch (cause) {
-    toast.failure("Could not add the forge", cause);
+    toast.failure(forgeFailureSummary("Could not add the forge", cause), cause);
   } finally {
     forgeBusy.value = false;
   }

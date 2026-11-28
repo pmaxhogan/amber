@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { assertForgeAllowed } from "../src/domain/forges.ts";
 import type { User } from "../src/domain/users.ts";
@@ -14,6 +14,8 @@ import {
   isAcceptableHostname,
   isIpLiteralHost,
   isPublicAddress,
+  isWellKnownPublicForge,
+  lfsEndpointConfig,
   pinnedFetch,
   systemResolver,
   vetRestrictedTarget,
@@ -425,6 +427,97 @@ describe("gitPinConfig", () => {
       ["http.followRedirects", "false"],
       ["transfer.bundleURI", "false"],
     ]);
+  });
+});
+
+describe("the well-known public forge tier", () => {
+  it.each([
+    [{ protocol: "https", host: "github.com", port: null }, true],
+    [{ protocol: "https", host: "github.com", port: 443 }, true],
+    [{ protocol: "https", host: "GitLab.com", port: null }, true],
+    [{ protocol: "https", host: "bitbucket.org", port: null }, true],
+    [{ protocol: "https", host: "codeberg.org", port: null }, true],
+    [{ protocol: "http", host: "github.com", port: null }, false],
+    [{ protocol: "https", host: "github.com", port: 8443 }, false],
+    [{ protocol: "https", host: "www.github.com", port: null }, false],
+    [{ protocol: "https", host: "github.com.evil.example", port: null }, false],
+    [{ protocol: "https", host: "git.example.com", port: null }, false],
+  ] as const)("%o -> %s", (target, expected) => {
+    expect(isWellKnownPublicForge(target)).toBe(expected);
+  });
+
+  it("keeps git's default redirect handling only when asked, and the pin always", () => {
+    const vetted: VettedTarget = {
+      protocol: "https",
+      host: "github.com",
+      port: 443,
+      addresses: [PUBLIC_V4],
+    };
+    expect(gitPinConfig(vetted, { followRedirects: true })).toEqual([
+      ["http.curloptResolve", ""],
+      ["http.curloptResolve", `github.com:443:${PUBLIC_V4}`],
+      ["http.followRedirects", "initial"],
+      ["transfer.bundleURI", "false"],
+    ]);
+    expect(gitPinConfig(vetted)).toContainEqual(["http.followRedirects", "false"]);
+  });
+
+  it("derives the LFS endpoint the way git-lfs does", () => {
+    expect(lfsEndpointConfig("https://github.com/acme/widgets.git")).toEqual([
+      ["lfs.url", "https://github.com/acme/widgets.git/info/lfs"],
+    ]);
+    expect(lfsEndpointConfig("https://github.com/acme/widgets")).toEqual([
+      ["lfs.url", "https://github.com/acme/widgets.git/info/lfs"],
+    ]);
+  });
+});
+
+describe("forcing the LFS endpoint with a real git-lfs", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = tempDir("egress-lfs");
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("ignores a repository .lfsconfig that names another server", async (context) => {
+    const stateDir = join(root, "state");
+    const probe = await runGit(["lfs", "version"], { stateDir, allowFailure: true });
+    if (probe.code !== 0) {
+      context.skip();
+      return;
+    }
+    const work = join(root, "work");
+    const bare = join(root, "bare.git");
+    const remote = "https://github.com/acme/widgets.git";
+    await runGit(["init", "--quiet", work], { stateDir });
+    writeFileSync(
+      join(work, ".lfsconfig"),
+      '[lfs]\n\turl = https://evil.example.net/lfs\n[remote "origin"]\n\tlfsurl = https://evil.example.net/other\n',
+    );
+    await runGit(["add", ".lfsconfig"], { cwd: work, stateDir });
+    await runGit(
+      ["-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "--quiet", "-m", "x"],
+      { cwd: work, stateDir },
+    );
+    await runGit(["clone", "--quiet", "--bare", work, bare], { stateDir, allowFileProtocol: true });
+    await runGit(["config", "--local", "remote.origin.url", remote], { cwd: bare, stateDir });
+
+    // Control: without the override, git-lfs does follow the repository.
+    const open = await runGit(["lfs", "env"], { cwd: bare, stateDir, allowFailure: true });
+    expect(open.stdout).toContain("Endpoint=https://evil.example.net/lfs");
+
+    const forced = await runGit(["lfs", "env"], {
+      cwd: bare,
+      stateDir,
+      allowFailure: true,
+      configList: lfsEndpointConfig(remote),
+    });
+    expect(forced.stdout).toContain(`Endpoint=${remote}/info/lfs`);
+    expect(forced.stdout).not.toContain("evil.example.net");
   });
 });
 

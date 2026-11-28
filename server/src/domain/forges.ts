@@ -183,6 +183,31 @@ export async function assertForgeAllowed(
 }
 
 /**
+ * VISIBILITY ON AN UNRESTRICTED FORGE. On a forge that may reach private
+ * networks (`allow_private_network = 1`), network position is the credential:
+ * that an anonymous fetch works, or that the forge's API calls a repository
+ * public, only says it is public to whoever can reach that host, which may be
+ * nobody outside the LAN. So nothing there may ever make a repository public
+ * (`is_private = 0`) to other Amber users. Every writer of is_private (sync,
+ * the provider pass, discovery) passes its answer through here.
+ */
+export function effectiveIsPrivate(
+  derivedIsPrivate: boolean,
+  allowPrivateNetwork: boolean,
+): boolean {
+  return allowPrivateNetwork ? true : derivedIsPrivate;
+}
+
+/** The flag for one forge, failing closed (unrestricted, so private) when it is missing. */
+export function forgeAllowsPrivateNetwork(db: Db, forgeId: number): boolean {
+  const row = db.get<{ allow_private_network: number }>(
+    "SELECT allow_private_network FROM forges WHERE id = ?",
+    forgeId,
+  );
+  return row === undefined || row.allow_private_network !== 0;
+}
+
+/**
  * Idempotent: returns the existing forge when protocol+host+port already
  * exist. An explicit kind is honored on create; on an existing forge the
  * stored kind is kept, because re-importing a URL must never silently

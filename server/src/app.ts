@@ -17,6 +17,7 @@ import {
   type AuthzRequirement,
 } from "./security/authz.ts";
 import { cfAccessPlugin, requestPathname, type CfAccessKeyGetter } from "./security/cfAccess.ts";
+import { classifyAddress } from "./security/egress.ts";
 import { identityPlugin } from "./security/identity.ts";
 import { APP_VERSION } from "./version.ts";
 import { webPlugin } from "./web.ts";
@@ -96,6 +97,29 @@ export const INSECURE_BANNER =
   "is bound to 127.0.0.1 only. Never expose this port.";
 
 /**
+ * Which proxy hops Fastify may believe X-Forwarded-For from: ONE hop, the
+ * immediate peer, and only while that peer is on a loopback or private
+ * address. The reference deployment is cloudflared -> Amber, so request.ip
+ * becomes the address cloudflared reported (the right-most X-Forwarded-For
+ * entry). Trusting every hop (the old `trustProxy: true`) made request.ip the
+ * LEFT-most entry, which the client writes itself, so a caller could choose
+ * whose git throttle bucket its failures landed in. A numeric hop count is no
+ * option: Fastify 5 treats one as "trust nothing", since a count alone cannot
+ * tell a proxy from a direct client. A direct client on a public address is
+ * never trusted, so it cannot spoof one either.
+ */
+export function trustNearestProxy(address: string, hop: number): boolean {
+  if (hop !== 0) {
+    return false;
+  }
+  const bare = address.toLowerCase().startsWith("::ffff:") ? address.slice(7) : address;
+  const kind = classifyAddress(bare);
+  return (
+    kind === "loopback" || kind === "private" || kind === "unique_local" || kind === "link_local"
+  );
+}
+
+/**
  * Build the Fastify instance. Exported separately from index.ts so tests can
  * drive it with app.inject() without binding a port.
  */
@@ -150,7 +174,7 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
 
   const app = Fastify({
     loggerInstance: deps.log,
-    trustProxy: true,
+    trustProxy: trustNearestProxy,
   });
 
   app.decorate("amber", ctx);
@@ -183,6 +207,24 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
   if (ctx.config.insecureMode) {
     deps.log.warn(INSECURE_BANNER);
   }
+
+  /**
+   * A `#` in the request target is refused before anything routes it. No
+   * browser sends one (the fragment stays client side) and Cloudflare never
+   * forwards one, so only a hand-made request has it, and it splits the url
+   * two ways: requestPathname cuts at `#` (so `/git#x` looks like the public
+   * /git prefix and skips identity) while the router and the static file
+   * fallback see a different path. Refusing it keeps every layer agreeing.
+   * The very first hook, at the root, so it runs before the token check.
+   */
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.raw.url?.includes("#") === true) {
+      return reply
+        .code(400)
+        .send({ error: "invalid_request", message: "A request target cannot contain #." });
+    }
+    return undefined;
+  });
 
   // Unauthenticated by design: the docker healthcheck uses it.
   app.get("/healthz", (): Health => ({ ok: true, version: ctx.version }));

@@ -74,8 +74,16 @@ describe("GET /api/me", () => {
       usedBytes: 6 * 1024 ** 3,
       capBytes: 5 * 1024 ** 3,
       overCap: true,
+      atCeiling: false,
     });
     expect(me.policy).toBeNull();
+
+    // Twice the cap: /api/me says syncing is paused.
+    addRepo(t, "bigger", friend.id, 4 * 1024 ** 3);
+    const after = meSchema.parse(
+      (await t.app.inject({ method: "GET", url: "/api/me", headers: asUser(FRIEND) })).json(),
+    );
+    expect(after.storage).toMatchObject({ overCap: true, atCeiling: true });
   });
 });
 

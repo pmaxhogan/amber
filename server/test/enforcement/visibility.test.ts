@@ -40,6 +40,7 @@ import {
   tempDir,
   type OriginRepo,
 } from "../helpers/gitFixtures.ts";
+import { createRecordingGit, fakeDns, PUBLIC_V4 } from "../helpers/egress.ts";
 import { adminOf, makeUser } from "../helpers/users.ts";
 import { collect, context, JSON_HEADERS, mockHttp, type MockHttp } from "../providers/support.ts";
 
@@ -967,16 +968,24 @@ describe("what a successful fetch proves about visibility", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  /**
+   * A RESTRICTED forge (the default) can only fetch over pinned https, so its
+   * fetch goes through the recording git and succeeds with nothing to fetch.
+   * An UNRESTRICTED one fetches the local file:// origin for real.
+   */
   async function syncOnce(options: {
     kind: string;
     start: 0 | 1;
     authenticated: boolean;
     remoteUrl?: string;
+    unrestricted?: boolean;
   }): Promise<{ outcome: string; isPrivate: number }> {
     forgeSeq += 1;
+    const unrestricted = options.unrestricted === true || options.remoteUrl !== undefined;
     const forgeId = insertForge(fixtureDb, {
       host: `forge${String(forgeSeq)}.example.com`,
       kind: options.kind,
+      allowPrivateNetwork: unrestricted,
     });
     const repoId = insertRepo(fixtureDb, { forgeId, path: "acme/widgets" });
     fixtureDb.run("UPDATE repos SET is_private = ? WHERE id = ?", options.start, repoId);
@@ -990,8 +999,12 @@ describe("what a successful fetch proves about visibility", () => {
       settings: fixedSettings(),
       credentials: () =>
         options.authenticated ? { username: "someone", password: "pw" } : undefined,
-      remoteUrl: options.remoteUrl ?? origin.url,
-      allowFileProtocol: true,
+      ...(unrestricted
+        ? { remoteUrl: options.remoteUrl ?? origin.url, allowFileProtocol: true }
+        : {
+            gitBinary: createRecordingGit(root).binary,
+            resolveHost: fakeDns({}, [PUBLIC_V4]),
+          }),
     });
     const after = fixtureDb.get<{ is_private: number }>(
       "SELECT is_private FROM repos WHERE id = ?",
@@ -1006,6 +1019,25 @@ describe("what a successful fetch proves about visibility", () => {
       isPrivate: 0,
     });
   });
+
+  // On a forge that may reach private networks, reaching it anonymously only
+  // proves AMBER can: nothing there is ever public, whichever way it started.
+  it.each([
+    ["generic", false, 0],
+    ["generic", false, 1],
+    ["github", false, 0],
+    ["github", true, 0],
+    ["gitea", true, 0],
+    ["generic", true, 0],
+  ] as const)(
+    "on an unrestricted %s forge a success (authenticated: %s) leaves the repo private (started %i)",
+    async (kind, authenticated, start) => {
+      expect(await syncOnce({ kind, start, authenticated, unrestricted: true })).toEqual({
+        outcome: "success",
+        isPrivate: 1,
+      });
+    },
+  );
 
   it("an anonymous failure changes nothing, whichever way the row started", async () => {
     const remoteUrl = pathToFileURL(join(root, "no-such-origin")).href;
@@ -1199,5 +1231,119 @@ describe("updateRepo and visibility", () => {
     updateRepo(db, id, { forceAnonymous: true });
 
     expect(row(id)).toMatchObject({ is_private: 0, visibility_checked_at: 4242 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Unrestricted forges: nothing there is ever public
+// ---------------------------------------------------------------------------
+
+describe("on an unrestricted forge nothing is ever made public", () => {
+  let lan: number;
+
+  beforeEach(() => {
+    // A forge the admin let reach private networks: there, being able to read
+    // a repository says nothing about who else can.
+    lan = seedForge(db, "git.lan.example.com", "github");
+    db.run("UPDATE forges SET allow_private_network = 1 WHERE id = ?", lan);
+  });
+
+  it("the provider pass writes private even when the forge's API says public", async () => {
+    const fresh = addRepo({ forgeId: lan, path: "me/open" });
+    // Even a row that was public (say the forge was restricted before) goes private.
+    const wasPublic = addRepo({ forgeId: lan, path: "me/was-public", isPrivate: false });
+    const unknown = addRepo({ forgeId: lan, path: "me/unknown", isPrivate: false });
+    answers.set("me/open", answer(false));
+    answers.set("me/was-public", answer(false));
+    answers.set("me/unknown", answer(null));
+
+    await resolvePendingForks(db, deps());
+
+    expect(row(fresh)).toMatchObject({ is_private: 1, visibility_checked_at: NOW });
+    expect(row(wasPublic)).toMatchObject({ is_private: 1, visibility_checked_at: NOW });
+    // A non-answer still changes nothing.
+    expect(row(unknown)).toMatchObject({ is_private: 0, visibility_checked_at: NOW });
+  });
+
+  it("the single-repo lookup does the same", async () => {
+    const id = addRepo({ forgeId: lan, path: "me/one", isPrivate: false });
+    answers.set("me/one", answer(false));
+    await lookupRepoInfo(db, id, deps({ cooldowns: new Map(), anonymousBudget: new Map() }));
+    expect(row(id).is_private).toBe(1);
+  });
+
+  it("an account sync listing that says public creates and keeps the repo private", () => {
+    const owner = makeUser(db, "owner@example.com", { import_private: true });
+    const existing = addRepo({
+      forgeId: lan,
+      path: "me/listed",
+      owner: owner.id,
+      isPrivate: false,
+    });
+    const listing = (path: string): DiscoveredRepo => ({
+      path,
+      defaultBranch: "main",
+      isPrivate: false,
+      archived: false,
+      description: null,
+      isFork: null,
+      forkParent: null,
+    });
+    upsertDiscoveredRepos(db, {
+      forgeId: lan,
+      accountSyncId: db.run(
+        `INSERT INTO account_syncs (forge_id, source, namespace, owner_user_id, created_at, updated_at)
+         VALUES (?, 'namespace', 'me', ?, 1, 1)`,
+        lan,
+        owner.id,
+      ).lastInsertRowid,
+      ownerUserId: owner.id,
+      repos: [listing("me/listed"), listing("me/new")],
+      helpers: { generateShortId, buildSlug, deleteRepo: () => Promise.resolve() },
+      now: 7000,
+    });
+    expect(
+      db.all<{ path: string; is_private: number }>(
+        "SELECT path, is_private FROM repos WHERE forge_id = ? ORDER BY path",
+        lan,
+      ),
+    ).toEqual([
+      { path: "me/listed", is_private: 1 },
+      { path: "me/new", is_private: 1 },
+    ]);
+    expect(row(existing).is_private).toBe(1);
+  });
+});
+
+describe("a rename during a visibility lookup", () => {
+  it("does not let the old path's answer, or its checked stamp, land on the renamed row", async () => {
+    const id = addRepo({ path: "me/old-name", checkedAt: null });
+    const renaming = {
+      kind: "github",
+      listRepos: providerOf("github").listRepos,
+      getRepoInfo: () => {
+        db.run("UPDATE repos SET path = 'me/new-name' WHERE id = ?", id);
+        return Promise.resolve(answer(false));
+      },
+    } as unknown as AccountSyncProvider;
+
+    await lookupRepoInfo(
+      db,
+      id,
+      deps({ providerFor: () => renaming, cooldowns: new Map(), anonymousBudget: new Map() }),
+    );
+    expect(row(id)).toMatchObject({ is_private: 1, visibility_checked_at: null });
+
+    // Same for the background pass, with a non-answer.
+    db.run("UPDATE repos SET path = 'me/old-name', visibility_checked_at = NULL WHERE id = ?", id);
+    const silent = {
+      ...renaming,
+      getRepoInfo: () => {
+        db.run("UPDATE repos SET path = 'me/newer-name' WHERE id = ?", id);
+        return Promise.resolve(answer(null));
+      },
+    } as unknown as AccountSyncProvider;
+    await resolvePendingForks(db, deps({ providerFor: () => silent }));
+    expect(row(id)).toMatchObject({ is_private: 1, visibility_checked_at: null });
   });
 });

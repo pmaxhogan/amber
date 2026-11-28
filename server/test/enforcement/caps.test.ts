@@ -4,9 +4,11 @@ import type { AmberEvent, PushPayload, SyncRun } from "@amber/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../../src/db/db.ts";
 import {
+  CAP_CEILING_ERROR,
   CAP_REACHED_ERROR,
   CAP_WOULD_NOT_FIT_ERROR,
   firstCloneFacts,
+  isAtCapCeiling,
   markFirstCloneRefused,
   refreshCapState,
   remainingAllowanceBytes,
@@ -16,13 +18,14 @@ import {
   commitImport,
   STORAGE_CAP_MESSAGE,
 } from "../../src/domain/importer.ts";
-import { createRepo } from "../../src/domain/repos.ts";
+import { createRepo, updateRepo } from "../../src/domain/repos.ts";
 import { putScopeSettings } from "../../src/domain/settings.ts";
 import {
   getUser,
   isAtOrOverCap,
   updateUser,
   userCapBytes,
+  userStorage,
   userUsageBytes,
   type User,
 } from "../../src/domain/users.ts";
@@ -39,7 +42,7 @@ import type {
   DiscoveryContext,
   RepoInfo,
 } from "../../src/providers/types.ts";
-import { setNextSyncAt } from "../../src/sync/repoStore.ts";
+import { applyRunToRepo, setNextSyncAt } from "../../src/sync/repoStore.ts";
 import {
   BREAKER_FAILURE_THRESHOLD,
   Scheduler,
@@ -56,6 +59,10 @@ import {
   type OriginRepo,
 } from "../helpers/gitFixtures.ts";
 import { adminOf, makeUser } from "../helpers/users.ts";
+import { usePublicDns } from "../helpers/egress.ts";
+
+// Push endpoints are vetted by the egress guard; every name is public here.
+usePublicDns();
 
 /**
  * Storage caps beyond "refuse a new repository at or over the cap" (docs/
@@ -870,7 +877,8 @@ describe("scheduler first-clone gate", () => {
 
   it("does not apply to a repo that has synced before, even at the cap", async () => {
     const owner = userWithCap(db);
-    addRepo(db, forgeId, owner, { usage: CAP * 2, synced: true, nextSyncAt: FOREVER });
+    // Over the cap but under the twice-the-cap ceiling (tested below).
+    addRepo(db, forgeId, owner, { usage: CAP + CAP / 2, synced: true, nextSyncAt: FOREVER });
     const resync = addRepo(db, forgeId, owner, { usage: 5, synced: true });
     const infoCalls: number[] = [];
     const scheduler = makeScheduler({
@@ -988,6 +996,188 @@ describe("scheduler first-clone gate", () => {
     expect(started).toEqual([running]);
     expect(repoRow(db, waiting).last_error).toBe(CAP_REACHED_ERROR);
     expect(runCount(waiting)).toBe(0);
+  });
+
+  // A RENAME points a synced row at a different upstream of unknown size, so
+  // it goes back through the gate (first_clone_gate_path), even though
+  // last_success_at is set.
+  it("puts a renamed repo back through the gate: the size check refuses it", async () => {
+    const owner = userWithCap(db);
+    addRepo(db, forgeId, owner, { usage: 400, synced: true, nextSyncAt: FOREVER });
+    const small = addRepo(db, forgeId, owner, { usage: 5, synced: true, nextSyncAt: FOREVER });
+    updateRepo(db, small, { path: "acme/huge-upstream" });
+    setNextSyncAt(db, small, 0, 0);
+    const infoCalls: number[] = [];
+    const scheduler = makeScheduler({
+      repoInfo: (_db, repoId) => {
+        infoCalls.push(repoId);
+        return Promise.resolve(info(50 * CAP));
+      },
+    });
+
+    await scheduler.start();
+    await until(() => repoRow(db, small).last_error !== null, "the refusal");
+    await settle();
+    expect(started).toEqual([]);
+    expect(repoRow(db, small).last_error).toBe(CAP_WOULD_NOT_FIT_ERROR);
+    expect(infoCalls).toEqual([small]);
+    expect(firstCloneFacts(db, small).firstClone).toBe(true);
+  });
+
+  it("runs a renamed repo's clones one at a time with the owner's other first clones", async () => {
+    const owner = userWithCap(db, 1_000_000);
+    const renamed = addRepo(db, forgeId, owner, { usage: 5, synced: true, nextSyncAt: FOREVER });
+    updateRepo(db, renamed, { path: "acme/renamed-elsewhere" });
+    setNextSyncAt(db, renamed, 0, 0);
+    const fresh = addRepo(db, forgeId, owner);
+    const hold = new Map<number, () => void>();
+    const scheduler = makeScheduler({ hold });
+
+    await scheduler.start();
+    await until(() => started.length === 1, "one of the two");
+    await settle();
+    expect(started).toHaveLength(1);
+    const [running] = started;
+    hold.get(running ?? 0)?.();
+    await until(() => started.length === 2, "the other one");
+    expect(started).toEqual(expect.arrayContaining([renamed, fresh]));
+  });
+
+  it.each([
+    { name: "exactly twice the cap", usage: CAP * 2, refused: true },
+    { name: "far over twice the cap", usage: CAP * 10, refused: true },
+    { name: "one byte under twice the cap", usage: CAP * 2 - 1, refused: false },
+  ])("pauses every sync of an owner at $name, without the breaker", async ({ usage, refused }) => {
+    const owner = userWithCap(db);
+    addRepo(db, forgeId, owner, { usage, synced: true, nextSyncAt: FOREVER });
+    const existing = addRepo(db, forgeId, owner, { usage: 0, synced: true });
+    const admins = addRepo(db, forgeId, adminOf(db), { synced: true });
+    const scheduler = makeScheduler();
+
+    await scheduler.start();
+    await until(() => started.includes(admins), "the admin's sync");
+    if (refused) {
+      await until(() => repoRow(db, existing).last_error !== null, "the refusal");
+      await settle();
+      expect(started).toEqual([admins]);
+      expect(repoRow(db, existing)).toEqual({
+        last_error: CAP_CEILING_ERROR,
+        next_sync_at: clock + intervalMs,
+        consecutive_failures: 0,
+      });
+      expect(runCount(existing)).toBe(0);
+      expect(scheduler.status().breakerOpen).toBe(false);
+      expect(userStorage(db, owner).atCeiling).toBe(true);
+    } else {
+      await until(() => started.includes(existing), "the existing repo's sync");
+      expect(repoRow(db, existing).last_error).toBeNull();
+      expect(userStorage(db, owner).atCeiling).toBe(false);
+    }
+    // The two definitions of the ceiling agree.
+    expect(isAtCapCeiling(db, owner)).toBe(userStorage(db, owner).atCeiling);
+  });
+
+  it("treats a cap of 0 as a freeze: the owner is at the ceiling with nothing stored", () => {
+    // Deliberate: an admin who sets a cap of 0 means "this user gets no
+    // storage", so nothing of theirs syncs, not even an empty repository.
+    const frozen = userWithCap(db, 0);
+    addRepo(db, forgeId, frozen, { usage: 0, synced: true });
+    expect(isAtCapCeiling(db, frozen)).toBe(true);
+    expect(userStorage(db, frozen)).toMatchObject({ overCap: true, atCeiling: true });
+  });
+
+  it("never applies the ceiling to the admin", async () => {
+    addRepo(db, forgeId, adminOf(db), { usage: 900 * GB, synced: true, nextSyncAt: FOREVER });
+    const existing = addRepo(db, forgeId, adminOf(db), { synced: true });
+    const scheduler = makeScheduler();
+    await scheduler.start();
+    await until(() => started.includes(existing), "the admin's sync");
+    expect(isAtCapCeiling(db, adminOf(db))).toBe(false);
+  });
+});
+
+describe("renaming a repository under a storage cap", () => {
+  let temp: TempDb;
+  let db: Db;
+  let forgeId: number;
+
+  beforeEach(() => {
+    temp = createTempDb();
+    db = temp.db;
+    forgeId = seedForge(db);
+  });
+
+  afterEach(() => {
+    temp.close();
+  });
+
+  function gatePath(repoId: number): string | null {
+    return (
+      db.get<{ first_clone_gate_path: string | null }>(
+        "SELECT first_clone_gate_path FROM repos WHERE id = ?",
+        repoId,
+      )?.first_clone_gate_path ?? null
+    );
+  }
+
+  it("is refused outright with storage_cap_reached when the owner is at or over the cap", () => {
+    const owner = userWithCap(db);
+    addRepo(db, forgeId, owner, { usage: CAP, synced: true });
+    const small = addRepo(db, forgeId, owner, { usage: 0, synced: true });
+    expect(() => updateRepo(db, small, { path: "acme/huge" })).toThrow(
+      expect.objectContaining({ code: "storage_cap_reached" }),
+    );
+    expect(gatePath(small)).toBeNull();
+  });
+
+  it("marks the new path for the first-clone gate under the cap; the admin is never refused", () => {
+    const owner = userWithCap(db);
+    const repo = addRepo(db, forgeId, owner, { usage: 10, synced: true });
+    updateRepo(db, repo, { path: "acme/elsewhere" });
+    expect(gatePath(repo)).toBe("acme/elsewhere");
+    expect(firstCloneFacts(db, repo).firstClone).toBe(true);
+    // Other settings edits do not touch the gate.
+    updateRepo(db, repo, { forceAnonymous: true });
+    expect(gatePath(repo)).toBe("acme/elsewhere");
+
+    const admin = adminOf(db);
+    addRepo(db, forgeId, admin, { usage: 900 * GB, synced: true });
+    const adminRepo = addRepo(db, forgeId, admin, { synced: true });
+    expect(() => updateRepo(db, adminRepo, { path: "acme/admin-elsewhere" })).not.toThrow();
+  });
+
+  it("is cleared only by a success that fetched the gated path, not a stale old-path fetch", () => {
+    const owner = userWithCap(db);
+    const repo = addRepo(db, forgeId, owner, { usage: 10, synced: true });
+    updateRepo(db, repo, { path: "acme/new-upstream" });
+    const success = {
+      now: 5,
+      outcome: "success" as const,
+      error: null,
+      nextSyncAt: 10,
+      consecutiveFailures: 0,
+      diskUsageBytes: 10,
+      defaultBranch: null,
+      lastFetchHead: null,
+    };
+    // A fetch of the OLD path that finished after the rename.
+    applyRunToRepo(db, repo, { ...success, fetchedPath: "acme/old" });
+    expect(gatePath(repo)).toBe("acme/new-upstream");
+    applyRunToRepo(db, repo, { ...success, fetchedPath: "acme/new-upstream" });
+    expect(gatePath(repo)).toBeNull();
+    expect(firstCloneFacts(db, repo).firstClone).toBe(false);
+  });
+
+  it("does not disturb gone detection: last_success_at survives the rename", () => {
+    const owner = userWithCap(db);
+    const repo = addRepo(db, forgeId, owner, { usage: 10, synced: true });
+    updateRepo(db, repo, { path: "acme/renamed" });
+    expect(
+      db.get<{ last_success_at: number | null }>(
+        "SELECT last_success_at FROM repos WHERE id = ?",
+        repo,
+      )?.last_success_at,
+    ).toBe(1);
   });
 });
 
@@ -1108,6 +1298,8 @@ describe("a real sync that crosses the cap", () => {
     db = temp.db;
     root = tempDir("caps-sync");
     forgeId = seedForge(db);
+    // The sync fetches a local file:// origin, which a restricted forge refuses.
+    db.run("UPDATE forges SET allow_private_network = 1 WHERE id = ?", forgeId);
     origin = await createOrigin(join(root, "origin"));
     await origin.commitFile("README.md", "hello\n", "initial commit");
     sent = [];

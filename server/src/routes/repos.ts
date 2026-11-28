@@ -186,6 +186,11 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
   app.get("/repos/:id/runs", { config: { authz: "user" } }, (request): Page<SyncRun> => {
     const { id } = parseParams(idParamsSchema, request);
     requireRepoView(request, id);
-    return listSyncRuns(db, id, parseQuery(paginationQuerySchema, request));
+    return listSyncRuns(
+      db,
+      id,
+      parseQuery(paginationQuerySchema, request),
+      requireRequestUser(request),
+    );
   });
 };

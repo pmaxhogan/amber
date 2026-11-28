@@ -12,6 +12,9 @@ import {
   isAtOrOverCap,
   LAST_SEEN_RESOLUTION_MS,
   listUserRows,
+  listUsers,
+  normalizeEmail,
+  normalizeEmailList,
   reconcileUsers,
   requireUser,
   revokeGitPassword,
@@ -271,6 +274,36 @@ describe("revokeGitPassword and touchLastSeen", () => {
   });
 });
 
+describe("normalizeEmail", () => {
+  it("lower cases plain ASCII and refuses everything else BEFORE case folding", () => {
+    expect(normalizeEmail("  Friend@Example.COM ")).toBe("friend@example.com");
+    // U+212A KELVIN SIGN folds to "k": judged first, so it never becomes ASCII.
+    expect(normalizeEmail("\u212aim@example.com")).toBeNull();
+    expect(normalizeEmail("caf\u00e9@example.com")).toBeNull();
+    expect(normalizeEmail("a b@example.com")).toBeNull();
+    expect(normalizeEmail("   ")).toBeNull();
+  });
+
+  it("drops refused entries from a list and warns with a count only", () => {
+    const warnings: unknown[][] = [];
+    const out = normalizeEmailList(["A@example.com", "\u212a@example.com", "", "b@example.com"], {
+      warn: (...args: unknown[]) => {
+        warnings.push(args);
+      },
+    } as never);
+    expect(out).toEqual(["a@example.com", "b@example.com"]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.[0]).toEqual({ skipped: 1 });
+    expect(JSON.stringify(warnings)).not.toContain("example.com");
+  });
+
+  it("reconcile creates no row for a non-ASCII entry", () => {
+    reconcileUsers(temp.db, ["ok@example.com", "\u212aok@example.com"]);
+    expect(listUsers(temp.db).map((user) => user.email)).not.toContain("kok@example.com");
+    expect(findUserByEmail(temp.db, "ok@example.com")).toBeDefined();
+  });
+});
+
 describe("adoptRepos", () => {
   it("moves every repo to the admin and clears each override", () => {
     const admin = bootstrapAdmin(temp.db, log, "admin@example.com");
@@ -318,6 +351,7 @@ describe("storage usage and caps", () => {
       usedBytes: 3 * GB,
       capBytes: 5 * GB,
       overCap: false,
+      atCeiling: false,
     });
 
     putScopeSettings(temp.db, "global", null, { default_user_storage_cap_gb: 3 });
@@ -326,6 +360,7 @@ describe("storage usage and caps", () => {
       capBytes: 3 * GB,
       // At the cap counts as reached.
       overCap: true,
+      atCeiling: false,
     });
     expect(isAtOrOverCap(temp.db, friend)).toBe(true);
 
@@ -340,6 +375,7 @@ describe("storage usage and caps", () => {
       usedBytes: 100 * GB,
       capBytes: null,
       overCap: false,
+      atCeiling: false,
     });
   });
 

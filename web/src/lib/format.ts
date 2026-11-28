@@ -80,13 +80,65 @@ export function pluralize(count: number, singular: string, plural = `${singular}
   return count === 1 ? `${count} ${singular}` : `${count} ${plural}`;
 }
 
-export type ImportFailureKind = "host_not_enabled" | "storage_cap_reached" | "not_imported";
+export type ImportFailureKind =
+  "host_not_enabled" | "host_not_allowed" | "storage_cap_reached" | "not_imported";
 
 export const IMPORT_FAILURE_LABELS: Record<ImportFailureKind, string> = {
   host_not_enabled: "Host not enabled",
+  host_not_allowed: "Host not allowed",
   storage_cap_reached: "Storage limit reached",
   not_imported: "Could not import",
 };
+
+/**
+ * Short human reasons for a `host_not_allowed` refusal, keyed by the server's
+ * `details.reason` (security/egress.ts EgressRefusalReason).
+ */
+export const HOST_NOT_ALLOWED_REASONS: Record<string, string> = {
+  scheme: "only http and https",
+  port: "non-standard port",
+  ip_literal: "IP address, not a host name",
+  invalid_host: "not a public host name",
+  not_public: "private network address",
+  unresolvable: "does not resolve",
+};
+
+/** "Host not allowed", plus the short reason when the server named a known one. */
+export function hostNotAllowedLabel(reason: unknown): string {
+  const short = typeof reason === "string" ? HOST_NOT_ALLOWED_REASONS[reason] : undefined;
+  return short === undefined
+    ? IMPORT_FAILURE_LABELS.host_not_allowed
+    : `${IMPORT_FAILURE_LABELS.host_not_allowed}: ${short}`;
+}
+
+/** The tag text for a failed import line. */
+export function importFailureLabel(line: {
+  code?: string | undefined;
+  message?: string | undefined;
+  reason?: string | undefined;
+}): string {
+  const kind = importFailureKind(line.code, line.message);
+  return kind === "host_not_allowed"
+    ? hostNotAllowedLabel(line.reason)
+    : IMPORT_FAILURE_LABELS[kind];
+}
+
+/**
+ * The toast summary for a failed forge create or edit: a `host_not_allowed`
+ * refusal names its reason, anything else keeps the caller's summary.
+ */
+export function forgeFailureSummary(fallback: string, cause: unknown): string {
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "problem" in cause &&
+    (cause as { problem: unknown }).problem === "host_not_allowed"
+  ) {
+    const details = (cause as { details?: Record<string, unknown> | null }).details;
+    return hostNotAllowedLabel(details?.["reason"]);
+  }
+  return fallback;
+}
 
 /**
  * Name why an import line failed. The server sets a machine-readable `code` on
@@ -99,7 +151,8 @@ export function importFailureKind(
   code: string | undefined,
   message?: string | undefined,
 ): ImportFailureKind {
-  if (code === "host_not_enabled" || code === "storage_cap_reached") return code;
+  if (code === "host_not_enabled" || code === "host_not_allowed" || code === "storage_cap_reached")
+    return code;
   if (code !== undefined) return "not_imported";
   const text = (message ?? "").toLowerCase();
   if (text.includes("host") && text.includes("not enabled")) return "host_not_enabled";

@@ -21,6 +21,8 @@ import { providerForKind } from "../providers/discovery.ts";
 import {
   EgressRefusedError,
   gitPinConfig,
+  isWellKnownPublicForge,
+  lfsEndpointConfig,
   vetRestrictedUrl,
   type HostResolver,
 } from "../security/egress.ts";
@@ -228,14 +230,27 @@ const EMPTY_STATS: SyncStats = {
 /**
  * What a successful fetch proves about visibility, written straight away so
  * the fact is durable (docs/ARCHITECTURE.md "Private versus public"):
- * - an ANONYMOUS success means anyone could have fetched it: public, on any
- *   forge;
+ * - on an UNRESTRICTED forge (allow_private_network = 1) nothing is ever
+ *   public: whatever happened, the repo is private;
+ * - otherwise an ANONYMOUS success means anyone could have fetched it: public;
  * - on a forge Amber cannot ask (no provider), an authenticated success
  *   leaves the last successful fetch authenticated: private;
  * - on a forge with a provider, an authenticated success proves nothing and
  *   the visibility pass (providers/forks.ts) has the say.
  */
 function recordFetchVisibility(db: Db, target: SyncTarget, anonymous: boolean, now: number): void {
+  // On an unrestricted forge network position is the credential: an anonymous
+  // success only proves that AMBER can reach it, so the repo stays private
+  // whatever the fetch looked like (domain/forges.ts effectiveIsPrivate).
+  if (target.forge.allowPrivateNetwork) {
+    db.run(
+      "UPDATE repos SET is_private = 1, updated_at = ? WHERE id = ? AND path = ?",
+      now,
+      target.repo.id,
+      target.repo.path,
+    );
+    return;
+  }
   // Guarded on the path the fetch actually used: a rename that landed while
   // this sync was running names a different upstream, and must stay private
   // until something proves otherwise about THAT one.
@@ -378,6 +393,7 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
       defaultBranch: stats.defaultBranch ?? target.repo.defaultBranch,
       lastFetchHead: stats.lastFetchHead,
       goneAt: becameGone ? finishedAt : null,
+      fetchedPath: target.repo.path,
     });
     enforceRunRetention(db, repoId, finishedAt);
     if (outcome === "success") {
@@ -445,7 +461,8 @@ async function performSync(
   // Restricted forge: resolve and vet the host NOW, once per sync, and pin
   // every network git call below to the addresses that passed. Throws before
   // anything touches the network or the disk.
-  const egressConfig = await gitEgressConfig(target, remote, deps.resolveHost);
+  const egress = await gitEgressFor(target, remote, deps.resolveHost);
+  const egressConfig = egress.config;
   // Resolved once: the same account backs the credential presented to the
   // fetch and the last_used_at stamp written after it succeeds.
   const account = resolveRepoAccount(deps.db, target);
@@ -515,13 +532,23 @@ async function performSync(
   }
 
   if (settings.lfs_enabled) {
-    if (target.forge.allowPrivateNetwork) {
+    if (egress.tier === "unrestricted") {
       await fetchLfs(settings.paranoid, defaultBranch, authed, log);
+    } else if (egress.tier === "well_known") {
+      // The endpoint is forced on the command line so the repository's own
+      // .lfsconfig cannot send git-lfs to another server.
+      await fetchLfs(
+        settings.paranoid,
+        defaultBranch,
+        { ...authed, configList: [...egressConfig, ...lfsEndpointConfig(remote)] },
+        log,
+      );
     } else {
       // git-lfs is a separate program with its own HTTP client: it ignores
       // http.curloptResolve, and the LFS batch API hands back download URLs on
       // arbitrary hosts (and .lfsconfig can name another server). None of that
-      // can be pinned, so a restricted forge never fetches LFS objects.
+      // can be pinned, so a restricted forge off the well-known list never
+      // fetches LFS objects.
       log.warn("skipping LFS objects: this forge is restricted and git-lfs cannot be pinned");
     }
   }
@@ -552,19 +579,27 @@ async function performSync(
 }
 
 /**
- * The pinning -c entries for a restricted forge, or none for an unrestricted
- * one (which behaves exactly as before). The remote actually fetched is what
+ * The egress tier and pinning -c entries for this sync: none for an
+ * unrestricted forge (which behaves exactly as before); the pin with git's
+ * default redirect handling for the well-known public tier; the pin with no
+ * redirects for every other restricted forge. The remote actually fetched is what
  * gets vetted, so a non-http(s) remote on a restricted forge is refused too.
  */
-async function gitEgressConfig(
+async function gitEgressFor(
   target: SyncTarget,
   remote: string,
   resolver: HostResolver | undefined,
-): Promise<[string, string][]> {
+): Promise<{ tier: "unrestricted" | "well_known" | "restricted"; config: [string, string][] }> {
   if (target.forge.allowPrivateNetwork) {
-    return [];
+    return { tier: "unrestricted", config: [] };
   }
-  return gitPinConfig(await vetRestrictedUrl(remote, resolver));
+  const vetted = await vetRestrictedUrl(remote, resolver);
+  // Judged on what is actually fetched (protocol, host, effective port).
+  const wellKnown = isWellKnownPublicForge(vetted);
+  return {
+    tier: wellKnown ? "well_known" : "restricted",
+    config: gitPinConfig(vetted, { followRedirects: wellKnown }),
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -467,9 +467,15 @@ export const importLineResultSchema = z.object({
   target: z.enum(["repo", "namespace"]).optional(),
   /**
    * Set by the server on a refused line: `host_not_enabled` (the host is new
-   * and the caller may not add one) or `storage_cap_reached`.
+   * and the caller may not add one), `host_not_allowed` (the egress rule
+   * refused it) or `storage_cap_reached`.
    */
   code: z.string().optional(),
+  /**
+   * With `host_not_allowed`: the egress refusal category (`scheme`, `port`,
+   * `ip_literal`, `invalid_host`, `not_public`, `unresolvable`).
+   */
+  reason: z.string().optional(),
 });
 
 export const importPreviewResponseSchema = z.object({
@@ -963,8 +969,19 @@ export type Health = z.infer<typeof healthSchema>;
  *   is "admin".
  * - `host_not_enabled` (403): an import or forge creation would introduce a
  *   host Amber does not have, and the caller may not add one.
- * - `storage_cap_reached` (403): the caller is at or over their storage cap,
- *   so a new repository is refused. Existing ones keep syncing.
+ * - `host_not_allowed` (403): a restricted forge's host failed the egress
+ *   rule; `details.reason` is `scheme`, `port`, `ip_literal`, `invalid_host`,
+ *   `not_public` or `unresolvable`. Also a push endpoint that fails it.
+ * - `storage_cap_reached` (403): the caller (or, for a rename, the repo's
+ *   owner) is at or over their storage cap, so a new repository, or pointing
+ *   an existing one at a different path, is refused. Existing ones keep
+ *   syncing until twice the cap.
+ * - `owner_cannot_import` (409): an account sync run was asked for, but the
+ *   sync's owner no longer holds `import`, so it does not run.
+ * - `invalid_request` (400): the request target itself is malformed (a `#`).
+ *
+ * `git_remote_disabled` is gone: rotating a credential while the remote is
+ * off now just works, since the kill switch is checked on /git itself.
  */
 export const API_ERROR_CODES = [
   "unauthorized",
@@ -976,6 +993,8 @@ export const API_ERROR_CODES = [
   // literal, not a public DNS name, or it resolves to a non-public address.
   "host_not_allowed",
   "storage_cap_reached",
+  "owner_cannot_import",
+  "invalid_request",
   "not_found",
   "conflict",
   "invalid",
@@ -1091,6 +1110,11 @@ export const storageUsageSchema = z.object({
   /** The effective cap: the user's own, else the global default. Null for the admin. */
   capBytes: z.number().int().nonnegative().nullable(),
   overCap: z.boolean(),
+  /**
+   * At or above TWICE the cap: every sync of the user's repos is paused until
+   * usage drops or the cap is raised. Optional for older servers.
+   */
+  atCeiling: z.boolean().optional(),
 });
 export type StorageUsage = z.infer<typeof storageUsageSchema>;
 

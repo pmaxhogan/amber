@@ -45,6 +45,10 @@ function seed(): { forgeId: number; accountId: number; syncId: number } {
   const forgeId = db.get<{ id: number }>(
     "SELECT id FROM forges WHERE protocol = 'https' AND host = 'github.com' AND port IS NULL",
   )!.id;
+  // Migration 010 restricts the seeded github.com; this suite exercises the
+  // domain layer through a MockAgent fetch, which an unpinnable restricted
+  // context would (rightly) ignore. The egress path has its own tests.
+  db.run("UPDATE forges SET allow_private_network = 1 WHERE id = ?", forgeId);
   const accountId = Number(
     db.run(
       `INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at, owner_user_id)

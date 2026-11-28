@@ -5,6 +5,13 @@ import type { Db } from "../db/db.ts";
 import { getAdminUser, getUser, listUsers } from "../domain/users.ts";
 import type { EventMeta } from "../events.ts";
 import { canView, loadRepoAccessFacts } from "../security/authz.ts";
+import {
+  EgressRefusedError,
+  pinnedHttpsAgent,
+  vetRestrictedUrl,
+  type HostResolver,
+  type VettedTarget,
+} from "../security/egress.ts";
 
 /**
  * Web push: tells subscribed browsers when a repository goes gone upstream.
@@ -25,6 +32,16 @@ import { canView, loadRepoAccessFacts } from "../security/authz.ts";
  * notification goes to an explicit audience: a gone repository only to the
  * users who can view it (decided when the batch is sent, from fresh rows), a
  * storage cap crossing to that user and the admin, a test to the caller.
+ *
+ * EGRESS. A push endpoint is a URL a browser (that is, any user) hands us and
+ * we later POST to, so it gets the restricted-forge rule (security/egress.ts):
+ * https on 443, a DNS name, every address public. It is checked when the
+ * subscription is saved AND again at every send, and the connection is pinned
+ * to the addresses that passed, so a name that rebinds to an internal address
+ * after subscribing is refused at the send that would reach it. What a failed
+ * send records is a fixed category (PUSH_ERRORS), never the push service's
+ * status line or body: anything more would turn "send me a test" into a probe
+ * that reports what an arbitrary URL answered.
  */
 
 export const KV_VAPID_PUBLIC = "push.vapid_public";
@@ -36,7 +53,18 @@ export const GONE_BATCH_WINDOW_MS = 30_000;
 const TTL_SECONDS = 24 * 60 * 60;
 /** Repositories named in one notification before it says "and N more". */
 const MAX_NAMED = 3;
-const MAX_STORED_ERROR_CHARS = 300;
+
+/**
+ * The only strings a failed send ever stores or returns. Deliberately coarse:
+ * the detail (status, body, resolved addresses) goes to the server log.
+ */
+export const PUSH_ERRORS = {
+  refused: "Amber will not send to this push service: it is not on a public address.",
+  rejected: "The push service refused the notification.",
+  timeout: "The push service did not answer in time.",
+  unreachable: "Could not reach the push service.",
+} as const;
+export type PushErrorCategory = keyof typeof PUSH_ERRORS;
 
 export interface VapidKeys {
   publicKey: string;
@@ -50,11 +78,16 @@ export interface StoredSubscription {
   auth: string;
 }
 
-/** The one call that leaves the process. Injectable so tests never do. */
+/**
+ * The one call that leaves the process. Injectable so tests never do. `pin`
+ * is the endpoint's host and the addresses that passed the egress check; the
+ * sender must connect to those and nothing else.
+ */
 export type PushSender = (
   subscription: StoredSubscription,
   payload: string,
   vapid: VapidKeys & { subject: string },
+  pin: VettedTarget,
 ) => Promise<void>;
 
 interface SubscriptionRow extends StoredSubscription {
@@ -187,25 +220,56 @@ export function deletePushSubscription(db: Db, endpoint: string, userId: number)
   );
 }
 
-const defaultSender: PushSender = async (subscription, payload, vapid) => {
-  await sendNotification(
-    {
-      endpoint: subscription.endpoint,
-      keys: { p256dh: subscription.p256dh, auth: subscription.auth },
-    },
-    payload,
-    {
-      vapidDetails: {
-        subject: vapid.subject,
-        publicKey: vapid.publicKey,
-        privateKey: vapid.privateKey,
+/**
+ * Refuse an endpoint the egress rule does not allow. Called when a browser
+ * subscribes; send() runs the same check again every time.
+ */
+export async function assertPushEndpointAllowed(
+  endpoint: string,
+  resolver?: HostResolver,
+): Promise<VettedTarget> {
+  return vetRestrictedUrl(endpoint, resolver);
+}
+
+const defaultSender: PushSender = async (subscription, payload, vapid, pin) => {
+  // web-push issues one https.request; this agent's lookup answers only with
+  // the validated addresses, while TLS still checks the certificate against
+  // the endpoint's host name.
+  const agent = pinnedHttpsAgent(pin);
+  try {
+    await sendNotification(
+      {
+        endpoint: subscription.endpoint,
+        keys: { p256dh: subscription.p256dh, auth: subscription.auth },
       },
-      TTL: TTL_SECONDS,
-      urgency: "high",
-      timeout: 15_000,
-    },
-  );
+      payload,
+      {
+        vapidDetails: {
+          subject: vapid.subject,
+          publicKey: vapid.publicKey,
+          privateKey: vapid.privateKey,
+        },
+        TTL: TTL_SECONDS,
+        urgency: "high",
+        timeout: 15_000,
+        agent,
+      },
+    );
+  } finally {
+    agent.destroy();
+  }
 };
+
+function categoryOf(cause: unknown, status: number | null): PushErrorCategory {
+  if (cause instanceof EgressRefusedError) {
+    return "refused";
+  }
+  if (status !== null) {
+    return "rejected";
+  }
+  const text = cause instanceof Error ? `${cause.name} ${cause.message}` : String(cause);
+  return /timeout|timed out/i.test(text) ? "timeout" : "unreachable";
+}
 
 function statusOf(cause: unknown): number | null {
   if (typeof cause === "object" && cause !== null && "statusCode" in cause) {
@@ -250,6 +314,8 @@ export interface PushNotifierOptions {
   /** config.publicOrigin; becomes the VAPID contact when it is https. */
   publicOrigin: string;
   send?: PushSender;
+  /** Test seam: the egress resolver for push endpoints. */
+  resolveHost?: HostResolver;
   batchWindowMs?: number;
   now?: () => number;
 }
@@ -319,7 +385,9 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
     await Promise.all(
       subscriptions.map(async (subscription) => {
         try {
-          await sender(subscription, body, vapid);
+          // Re-vetted at every send, so the address used is the one checked.
+          const pin = await vetRestrictedUrl(subscription.endpoint, options.resolveHost);
+          await sender(subscription, body, vapid, pin);
           sent += 1;
           db.run(
             "UPDATE push_subscriptions SET last_success_at = ?, last_error = NULL, updated_at = ? WHERE id = ?",
@@ -340,18 +408,24 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
             );
             return;
           }
-          const message = (cause instanceof Error ? cause.message : String(cause)).slice(
-            0,
-            MAX_STORED_ERROR_CHARS,
-          );
+          const category = categoryOf(cause, status);
           db.run(
             "UPDATE push_subscriptions SET last_error = ?, updated_at = ? WHERE id = ?",
-            status === null ? message : `HTTP ${String(status)}: ${message}`,
+            PUSH_ERRORS[category],
             now(),
             subscription.id,
           );
+          // The detail is for the operator only.
           log.warn(
-            { subscriptionId: subscription.id, status, err: message },
+            {
+              subscriptionId: subscription.id,
+              category,
+              status,
+              err: cause instanceof Error ? cause.message.slice(0, 300) : String(cause),
+              ...(cause instanceof EgressRefusedError
+                ? { reason: cause.reason, addresses: cause.addresses }
+                : {}),
+            },
             "push notification failed",
           );
         }

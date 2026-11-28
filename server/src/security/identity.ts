@@ -62,15 +62,18 @@ const POLICY_UNAVAILABLE = {
   message: "Amber cannot confirm your access right now. Try again in a minute.",
 };
 
-/** The insecure-mode header, when present: one address, lower cased. */
-function insecureUserHeader(request: FastifyRequest): string | null {
+/**
+ * The insecure-mode header: absent (null), one normalized address, or
+ * "invalid" when it is present but normalizeEmail refuses it. Invalid is
+ * refused, never read as "no header": that would make it the admin.
+ */
+function insecureUserHeader(request: FastifyRequest): string | null | "invalid" {
   const raw = request.headers[INSECURE_USER_HEADER];
   const value = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof value !== "string") {
+  if (typeof value !== "string" || value.trim() === "") {
     return null;
   }
-  const email = normalizeEmail(value);
-  return email === "" ? null : email;
+  return normalizeEmail(value) ?? "invalid";
 }
 
 type Resolution = { user: User } | { refuse: "not_a_user" | "policy_unavailable" | "unauthorized" };
@@ -98,6 +101,9 @@ const plugin: FastifyPluginAsync<IdentityOptions> = async (
   const resolveInsecure = (request: FastifyRequest): Resolution => {
     const admin = getAdminUser(db);
     const asked = insecureUserHeader(request);
+    if (asked === "invalid") {
+      return { refuse: "not_a_user" };
+    }
     if (asked === null || asked === admin.email) {
       return { user: admin };
     }
@@ -108,11 +114,18 @@ const plugin: FastifyPluginAsync<IdentityOptions> = async (
   };
 
   const resolveSecure = async (request: FastifyRequest): Promise<Resolution> => {
-    const email = request.cfAccess?.email;
-    if (email === undefined) {
+    const claimed = request.cfAccess?.email;
+    if (claimed === undefined) {
       // The token hook answers 401 before this runs; reaching here without a
       // verified email means that hook was not installed. Fail closed.
       return { refuse: "unauthorized" };
+    }
+    // Normalized HERE, from the claim as signed, and before any comparison:
+    // an address that is not plain ASCII is nobody, never the admin (see
+    // normalizeEmail for why lower casing first would be unsafe).
+    const email = normalizeEmail(claimed);
+    if (email === null) {
+      return { refuse: "not_a_user" };
     }
     if (config.adminEmail !== null && email === config.adminEmail) {
       const admin = getAdminUser(db);

@@ -209,6 +209,46 @@ describe("policy members", () => {
   });
 });
 
+describe("email addresses that are not plain ASCII", () => {
+  // U+212A KELVIN SIGN lower-cases to an ASCII "k". Comparing after lower
+  // casing would let a token for the lookalike address pass as the real one.
+  const KELVIN = "\u212a";
+
+  it("are never the admin, even when they case-fold to the admin's address", async () => {
+    const h = await secureApp([], { AMBER_ADMIN_EMAIL: "kim@example.com" });
+    expect(`${KELVIN}im@example.com`.toLowerCase()).toBe("kim@example.com");
+    expect((await h.get("kim@example.com")).statusCode).toBe(200);
+    const response = await h.get(`${KELVIN}im@example.com`);
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ error: "not_a_user" });
+  });
+
+  it("are refused as not_a_user rather than matched to a member", async () => {
+    const h = await secureApp(["kit@example.com"]);
+    expect((await h.get("kit@example.com")).statusCode).toBe(200);
+    for (const email of [`${KELVIN}it@example.com`, "kit@ex\u00e4mple.com"]) {
+      const response = await h.get(email);
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ error: "not_a_user" });
+    }
+    // Nothing was created for the lookalikes.
+    expect(listUsers(h.temp.db).map((user) => user.email)).not.toContain("kit@ex\u00e4mple.com");
+  });
+
+  it("are skipped when the policy lists them, with a warn", async () => {
+    const h = await secureApp([
+      "ok@example.com",
+      `${KELVIN}ok@example.com`,
+      "caf\u00e9@example.com",
+    ]);
+    expect((await h.get("ok@example.com")).statusCode).toBe(200);
+    const emails = listUsers(h.temp.db).map((user) => user.email);
+    expect(emails).toContain("ok@example.com");
+    expect(emails.filter((email) => !/^[\x21-\x7e]+$/.test(email))).toEqual([]);
+    expect((await h.get(`${KELVIN}ok@example.com`)).statusCode).toBe(403);
+  });
+});
+
 describe("without a policy", () => {
   it("is admin-only", async () => {
     const h = await secureApp([], { CF_API_TOKEN: "", CF_ACCOUNT_ID: "", CF_ACCESS_POLICY_ID: "" });

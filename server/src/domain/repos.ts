@@ -16,10 +16,17 @@ import type {
 import { parseImportLine } from "@amber/shared";
 import type { Db } from "../db/db.ts";
 import { canView, hasPermission, isRepoOwner, visibleRepoSqlFilter } from "../security/authz.ts";
-import { conflict, forbidden, invalid, isUniqueViolation, notFound } from "./errors.ts";
+import {
+  conflict,
+  DomainError,
+  forbidden,
+  invalid,
+  isUniqueViolation,
+  notFound,
+} from "./errors.ts";
 import { requireForge } from "./forges.ts";
 import { resolveSettingsForRepos } from "./settings.ts";
-import { getUser, type User } from "./users.ts";
+import { getUser, isAtOrOverCap, type User } from "./users.ts";
 
 /**
  * `forge_id` is IMMUTABLE. A repo cannot be re-pointed at another forge, which
@@ -131,6 +138,39 @@ function viewerFields(
   return owner === undefined
     ? { mine }
     : { mine, owner: { id: owner.id, email: owner.email, removed: owner.removedAt !== null } };
+}
+
+/**
+ * What a viewer who is neither the owner nor the admin reads instead of a
+ * sync error. Non-null whenever there is an error, so the UI still shows that
+ * the last sync failed.
+ */
+export const OWNER_ONLY_ERROR =
+  "The last sync failed. The details are visible to the repository's owner.";
+
+function isOwnerOrAdmin(ownerUserId: number | null, viewer: User): boolean {
+  return viewer.isAdmin || (ownerUserId !== null && ownerUserId === viewer.id);
+}
+
+/**
+ * Fields that were learned or chosen with the OWNER'S account: which of their
+ * accounts is pinned, which of their account syncs manages the repo, and the
+ * error text a fetch with their token produced (which can name private repos,
+ * an account, or a token problem). Another viewer (view_others_* or
+ * modify_others) sees the repo, never these.
+ */
+function ownerDerivedFields(
+  row: RepoRow,
+  viewer: User,
+): Partial<Pick<Repo, "accountOverrideId" | "managedByAccountSyncId" | "lastError">> {
+  if (isOwnerOrAdmin(row.owner_user_id, viewer)) {
+    return {};
+  }
+  return {
+    accountOverrideId: null,
+    managedByAccountSyncId: null,
+    lastError: row.last_error === null ? null : OWNER_ONLY_ERROR,
+  };
 }
 
 /** The owners of a page of rows, for the admin's owner column. One read per distinct owner. */
@@ -308,7 +348,11 @@ export function getRepoFor(db: Db, id: number, viewer: User): Repo | undefined {
   ) {
     return undefined;
   }
-  const repo = { ...toRepo(row), ...viewerFields(row, viewer, ownersOf(db, [row], viewer)) };
+  const repo = {
+    ...toRepo(row),
+    ...ownerDerivedFields(row, viewer),
+    ...viewerFields(row, viewer, ownersOf(db, [row], viewer)),
+  };
   const parentId = forkParentRepoIds(db, [row], viewer).get(row.id);
   return parentId === undefined ? repo : { ...repo, forkParentRepoId: parentId };
 }
@@ -436,7 +480,10 @@ export function listRepos(db: Db, viewer: User, query: RepoListQuery): Page<Repo
   if ((query.ownerId !== undefined || query.ownerRemoved !== undefined) && !viewer.isAdmin) {
     throw forbidden("Only the admin can filter repositories by owner.", { requires: "admin" });
   }
-  if (query.gone === true && !hasPermission(viewer, "view_removed")) {
+  // Sorting by gone_at would order the visible rows by a fact the Removed
+  // page keeps behind `view_removed` (which repos are gone, and since when),
+  // so it is refused the same way rather than silently ignored.
+  if ((query.gone === true || query.sort === "gone_at") && !hasPermission(viewer, "view_removed")) {
     throw forbidden('The Removed page needs the "view_removed" permission.', {
       permission: "view_removed",
     });
@@ -543,6 +590,7 @@ export function listRepos(db: Db, viewer: User, query: RepoListQuery): Page<Repo
     const parentId = parentIds.get(row.id);
     return {
       ...toRepo(row),
+      ...ownerDerivedFields(row, viewer),
       ...viewerFields(row, viewer, owners),
       ...(parentId === undefined ? {} : { forkParentRepoId: parentId }),
       cloneMode: resolved?.clone_mode,
@@ -567,8 +615,15 @@ export function countRepos(db: Db, viewer: User): number {
   );
 }
 
-/** Repositories currently judged gone upstream, of those the viewer can see. */
+/**
+ * Repositories currently judged gone upstream, of those the viewer can see.
+ * Zero without `view_removed`: the count is the Removed page's headline, and
+ * a viewer who may not open that page may not read its size either.
+ */
 export function countGoneRepos(db: Db, viewer: User): number {
+  if (!hasPermission(viewer, "view_removed")) {
+    return 0;
+  }
   const visible = visibleRepoSqlFilter(viewer, "repos");
   return (
     db.get<{ count: number }>(
@@ -773,10 +828,29 @@ export function updateRepo(
               : "This repository cannot be renamed to that path.",
           );
         }
-        // The row now names a different upstream and nothing is known about
-        // it: back to private until the forge says otherwise.
-        sets.push("path = ?", "display_name = ?", "is_private = 1", "visibility_checked_at = NULL");
-        params.push(path, displayNameFor(path));
+        // The row now names a different upstream of unknown size. An owner
+        // already at or over their cap may not point a repo at one at all
+        // (otherwise a small synced repo could be renamed to a huge one and
+        // skip every cap check, which key on "never synced"); under the cap,
+        // the next sync goes back through the first-clone gate.
+        const owner = ownerUserId === null ? undefined : getUser(db, ownerUserId);
+        if (owner !== undefined && isAtOrOverCap(db, owner)) {
+          throw new DomainError(
+            "storage_cap_reached",
+            "This repository's owner is at or over their storage cap, so it cannot be pointed " +
+              "at a different repository until they are under it again.",
+          );
+        }
+        // Nothing is known about its visibility either: back to private
+        // until the forge says otherwise.
+        sets.push(
+          "path = ?",
+          "display_name = ?",
+          "is_private = 1",
+          "visibility_checked_at = NULL",
+          "first_clone_gate_path = ?",
+        );
+        params.push(path, displayNameFor(path), path);
       }
     }
 
@@ -963,8 +1037,19 @@ function toSyncRun(row: SyncRunRow): SyncRun {
   };
 }
 
-export function listSyncRuns(db: Db, repoId: number, query: PaginationQuery): Page<SyncRun> {
+export function listSyncRuns(
+  db: Db,
+  repoId: number,
+  query: PaginationQuery,
+  viewer?: User,
+): Page<SyncRun> {
   requireRepo(db, repoId);
+  // Same rule as a repo row's lastError (ownerDerivedFields): run errors came
+  // from fetches made with the owner's account.
+  const owner =
+    db.get<{ owner_user_id: number | null }>("SELECT owner_user_id FROM repos WHERE id = ?", repoId)
+      ?.owner_user_id ?? null;
+  const redact = viewer !== undefined && !isOwnerOrAdmin(owner, viewer);
   const total =
     db.get<{ count: number }>("SELECT COUNT(*) AS count FROM sync_runs WHERE repo_id = ?", repoId)
       ?.count ?? 0;
@@ -978,5 +1063,8 @@ export function listSyncRuns(db: Db, repoId: number, query: PaginationQuery): Pa
     query.perPage,
     (query.page - 1) * query.perPage,
   );
-  return { rows: rows.map(toSyncRun), total, page: query.page, perPage: query.perPage };
+  const runs = rows
+    .map(toSyncRun)
+    .map((run) => (redact && run.error !== null ? { ...run, error: OWNER_ONLY_ERROR } : run));
+  return { rows: runs, total, page: query.page, perPage: query.perPage };
 }

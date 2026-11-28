@@ -11,6 +11,10 @@ import type { PushSender, StoredSubscription } from "../../src/notify/push.ts";
 import { createTempApp, seedForge, type TempApp } from "../helpers.ts";
 import { asUser } from "../helpers/accessFixtures.ts";
 import { adminOf, makeUser } from "../helpers/users.ts";
+import { usePublicDns } from "../helpers/egress.ts";
+
+// Push endpoints are vetted by the egress guard; every name is public here.
+usePublicDns();
 
 /**
  * Live surfaces (the SSE stream, web push, /api/status) are filtered by what
@@ -749,15 +753,16 @@ describe("GET /api/status counts only what the caller can view", () => {
     }
   }
 
-  // [totalRepos, goneRepos, totalDiskUsageBytes]
+  // [totalRepos, goneRepos, totalDiskUsageBytes]. goneRepos is 0 for anyone
+  // without view_removed (only the admin holds it here); see the test below.
   const EXPECTED: Record<Who, [number, number, number]> = {
     admin: [4, 3, 1500],
     // Their own two, plus the admin's public one.
-    alice: [3, 2, 700],
+    alice: [3, 0, 700],
     // Both public repos only.
-    bob: [2, 1, 500],
+    bob: [2, 0, 500],
     nothing: [0, 0, 0],
-    viewPrivate: [4, 3, 1500],
+    viewPrivate: [4, 0, 1500],
   };
 
   it.each(ALL)("%s sees totals for their own view", async (who) => {
@@ -767,11 +772,50 @@ describe("GET /api/status counts only what the caller can view", () => {
 
   it("follows a permission change on the very next request", async () => {
     seed();
-    expect(await totals("bob")).toEqual([2, 1, 500]);
+    expect(await totals("bob")).toEqual([2, 0, 500]);
     grant(bob, { view_others_private: true });
-    expect(await totals("bob")).toEqual([4, 3, 1500]);
+    expect(await totals("bob")).toEqual([4, 0, 1500]);
     grant(bob, { view_others_private: false, view_others_public: false });
     expect(await totals("bob")).toEqual([0, 0, 0]);
+  });
+
+  it("reports gone repos only with view_removed, and still only the visible ones", async () => {
+    seed();
+    expect(await totals("alice")).toEqual([3, 0, 700]);
+    grant(alice, { view_removed: true });
+    // Alice's own gone repo and the admin's public gone one; never the
+    // admin's private gone one.
+    expect(await totals("alice")).toEqual([3, 2, 700]);
+    grant(alice, { view_removed: false });
+    expect(await totals("alice")).toEqual([3, 0, 700]);
+  });
+
+  it("refuses sort=gone_at without view_removed, and keeps goneAt on visible rows", async () => {
+    seed();
+    const sorted = await temp.app.inject({
+      method: "GET",
+      url: "/api/repos?sort=gone_at&dir=desc",
+      headers: headersFor("alice"),
+    });
+    expect(sorted.statusCode).toBe(403);
+    expect(sorted.json()).toMatchObject({ details: { permission: "view_removed" } });
+
+    const plain = await temp.app.inject({
+      method: "GET",
+      url: "/api/repos?mine=true",
+      headers: headersFor("alice"),
+    });
+    // goneAt stays on rows the viewer can already see: Alice's own gone repo.
+    const rows = plain.json<{ rows: { goneAt: number | null }[] }>().rows;
+    expect(rows.filter((row) => row.goneAt !== null)).toHaveLength(1);
+
+    grant(alice, { view_removed: true });
+    const allowed = await temp.app.inject({
+      method: "GET",
+      url: "/api/repos?sort=gone_at&dir=desc",
+      headers: headersFor("alice"),
+    });
+    expect(allowed.statusCode).toBe(200);
   });
 
   it("still reports instance-wide queue figures to a user who sees no repos", async () => {

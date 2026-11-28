@@ -16,7 +16,8 @@ import {
   type RepoFileRemover,
 } from "../domain/repos.ts";
 import { ownedAccountId, ownerMayUseAccounts } from "../domain/credentials.ts";
-import { getUser, isAtOrOverCap } from "../domain/users.ts";
+import { effectiveIsPrivate, forgeAllowsPrivateNetwork } from "../domain/forges.ts";
+import { getUser, isAtOrOverCap, type User } from "../domain/users.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
 import { bitbucketProvider } from "./bitbucket.ts";
@@ -273,17 +274,39 @@ export function insertAccountSync(
 }
 
 /** Every enabled sync whose next_run_at has come around (or was never set). */
+/**
+ * Whether a sync owned by `owner` may run at all. A removed owner's never
+ * does: their accounts are never used, and nothing new is created in their
+ * name. Nor does one whose owner has lost `import`: every run can create
+ * repositories, which is exactly what `import` grants, and revoking it must
+ * stop the syncs that user set up while they held it. Permissions are
+ * effective, so the admin always passes.
+ */
+export function ownerMayRunAccountSync(owner: User | undefined): owner is User {
+  return owner !== undefined && owner.removedAt === null && owner.permissions.import;
+}
+
 export function listDueAccountSyncs(db: Db, now: number = Date.now()): AccountSync[] {
+  const owners = new Map<number, boolean>();
+  const mayRun = (ownerId: number): boolean => {
+    let decision = owners.get(ownerId);
+    if (decision === undefined) {
+      decision = ownerMayRunAccountSync(getUser(db, ownerId));
+      owners.set(ownerId, decision);
+    }
+    return decision;
+  };
   return db
     .all<AccountSyncRow>(
-      // A sync whose owner was removed does not run: their accounts are never
-      // used, and nothing new should be created in their name.
+      // Removed owners are filtered in SQL; the permission is a JSON column
+      // with defaults filled in code, so it is judged on the parsed user.
       `SELECT * FROM account_syncs
-        WHERE enabled = 1 AND (next_run_at IS NULL OR next_run_at <= ?)
-          AND owner_user_id IN (SELECT id FROM users WHERE removed_at IS NULL)
-        ORDER BY next_run_at IS NULL DESC, next_run_at ASC, id ASC`,
+          WHERE enabled = 1 AND (next_run_at IS NULL OR next_run_at <= ?)
+            AND owner_user_id IN (SELECT id FROM users WHERE removed_at IS NULL)
+          ORDER BY next_run_at IS NULL DESC, next_run_at ASC, id ASC`,
       now,
     )
+    .filter((row) => mayRun(row.owner_user_id))
     .map(mapAccountSync);
 }
 
@@ -368,6 +391,9 @@ export async function runAccountSyncDetailed(
       // Not an error the forge can fix: the owner left, so nothing runs in
       // their name and none of their accounts is used.
       throw new Error("The owner of this sync was removed, so it does not run.");
+    }
+    if (!ownerMayRunAccountSync(owner)) {
+      throw new Error("The owner of this sync can no longer import, so it does not run.");
     }
     const mayUseAccounts = ownerMayUseAccounts(owner);
     // The account a run presents is always the sync OWNER's own: the pinned
@@ -670,8 +696,16 @@ interface UpsertOutcome {
  * its origin: per-repo configuration always wins over account-level sync.
  */
 export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
+  // A listing on an unrestricted forge never makes anything public
+  // (domain/forges.ts effectiveIsPrivate): applied once, here, so both the
+  // insert and the update below inherit it.
+  const unrestricted = forgeAllowsPrivateNetwork(db, args.forgeId);
+  const listed = args.repos.map((repo) => ({
+    ...repo,
+    isPrivate: effectiveIsPrivate(repo.isPrivate, unrestricted),
+  }));
   const existing = new Map<string, { id: number; managed: number | null; mine: boolean }>();
-  for (const repo of args.repos) {
+  for (const repo of listed) {
     const found = db.get<{
       id: number;
       managed_by_account_sync_id: number | null;
@@ -690,7 +724,7 @@ export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
     }
   }
 
-  const fresh = args.skipNew === true ? [] : args.repos.filter((repo) => !existing.has(repo.path));
+  const fresh = args.skipNew === true ? [] : listed.filter((repo) => !existing.has(repo.path));
   const step =
     fresh.length === 0 ? 0 : Math.min(STAGGER_STEP_MAX_MS, STAGGER_WINDOW_MS / fresh.length);
 
@@ -700,7 +734,7 @@ export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
 
   db.tx(() => {
     let index = 0;
-    for (const repo of args.repos) {
+    for (const repo of listed) {
       const found = existing.get(repo.path);
       if (found !== undefined) {
         if (!found.mine) {
@@ -838,11 +872,14 @@ function writeListedForkKnowledge(db: Db, repoId: number, repo: DiscoveredRepo, 
  * private, so this can only ever expose what the forge said is public.
  */
 function writeListedVisibility(db: Db, repoId: number, repo: DiscoveredRepo, now: number): void {
+  // Guarded on the listed path like every other visibility writer, so an
+  // answer about one path can never land on a row that now names another.
   db.run(
-    "UPDATE repos SET is_private = ?, visibility_checked_at = ? WHERE id = ?",
+    "UPDATE repos SET is_private = ?, visibility_checked_at = ? WHERE id = ? AND path = ?",
     repo.isPrivate ? 1 : 0,
     now,
     repoId,
+    repo.path,
   );
 }
 

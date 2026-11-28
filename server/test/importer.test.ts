@@ -177,7 +177,11 @@ describe("commitImport creates forges and repos", () => {
     const result = await commitImport(db, adminOf(db), "https://git.example.com:8443/a/b", {
       now: NOW,
     });
-    expect(result.results[0]).toMatchObject({ action: "failed", code: "host_not_allowed" });
+    expect(result.results[0]).toMatchObject({
+      action: "failed",
+      code: "host_not_allowed",
+      reason: "port",
+    });
     expect(listForges(db).some((forge) => forge.host === "git.example.com")).toBe(false);
   });
 

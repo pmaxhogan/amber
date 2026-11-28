@@ -9,6 +9,7 @@ import {
   goneNotification,
   KV_VAPID_PRIVATE,
   listPushDevices,
+  PUSH_ERRORS,
   savePushSubscription,
   vapidSubject,
   type PushSender,
@@ -17,6 +18,10 @@ import {
 import { createRepo } from "../src/domain/repos.ts";
 import { createTempApp, createTempDb, seedForge, type TempApp, type TempDb } from "./helpers.ts";
 import { adminOf } from "./helpers/users.ts";
+import { usePublicDns } from "./helpers/egress.ts";
+
+// Push endpoints are vetted by the egress guard; every name is public here.
+usePublicDns();
 
 const log = createConsoleLogger("silent");
 
@@ -207,7 +212,9 @@ describe("push notifier", () => {
     expect(result).toEqual({ sent: 1, failed: 2 });
     const devices = listPushDevices(temp.db, adminOf(temp.db).id);
     expect(devices.map((d) => d.userAgent)).toEqual(["flaky", "fine"]);
-    expect(devices[0]?.lastError).toBe("HTTP 503: push service is on fire");
+    // A fixed category: never the status line or body the push service sent.
+    expect(devices[0]?.lastError).toBe(PUSH_ERRORS.rejected);
+    expect(devices[0]?.lastError).not.toMatch(/503|fire/);
     expect(devices[1]?.lastError).toBeNull();
   });
 
@@ -218,7 +225,7 @@ describe("push notifier", () => {
     await notifier(send).send({ title: "t", body: "b", url: "/", tag: "x" }, [adminOf(temp.db).id]);
 
     expect(listPushDevices(temp.db, adminOf(temp.db).id)[0]?.lastError).toBe(
-      "getaddrinfo ENOTFOUND",
+      PUSH_ERRORS.unreachable,
     );
   });
 

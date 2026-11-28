@@ -188,6 +188,24 @@ describe("the credential rule", () => {
     );
     expect(row).toEqual({ owner_user_id: admin.id, account_override_id: null });
   });
+
+  it("adopted repos fetch anonymously, never with the admin's own default account", () => {
+    account(admin, "admin-bot");
+    const theirs = repo(alice, "alice/chosen-path");
+    adoptRepos(temp.db, alice.id);
+    const row = temp.db.get<{ owner_user_id: number; force_anonymous: number }>(
+      "SELECT owner_user_id, force_anonymous FROM repos WHERE id = ?",
+      theirs,
+    );
+    expect(row).toEqual({ owner_user_id: admin.id, force_anonymous: 1 });
+    // The admin owns it now and has a default account on this forge, yet the
+    // path a friend chose is not fetched with the admin's token.
+    expect(credentialOf(theirs)).toBeNull();
+    // Control: the same repo with anonymous turned off WOULD use it, so the
+    // assertion above is about force_anonymous and not a missing account.
+    temp.db.run("UPDATE repos SET force_anonymous = 0 WHERE id = ?", theirs);
+    expect(credentialOf(theirs)).not.toBeNull();
+  });
 });
 
 describe("accounts API", () => {
@@ -703,6 +721,49 @@ describe("account sync runs", () => {
     const result = await runAccountSyncDetailed(temp.db, sync.id, deps(stubProvider([], seen)));
     expect(result.error).toMatch(/removed/);
     expect(seen).toEqual([]);
+  });
+
+  it("does not run a sync whose owner lost import, by schedule or by hand", async () => {
+    const sync = insertAccountSync(temp.db, {
+      ownerUserId: alice.id,
+      forgeId,
+      accountId: null,
+      source: "namespace",
+      namespace: "acme",
+      visibility: "all",
+      enabled: true,
+      intervalMinutes: 60,
+    });
+    const adminSync = insertAccountSync(temp.db, {
+      ownerUserId: admin.id,
+      forgeId,
+      accountId: null,
+      source: "namespace",
+      namespace: "other",
+      visibility: "all",
+      enabled: true,
+      intervalMinutes: 60,
+    });
+    expect(listDueAccountSyncs(temp.db, Date.now() + 1).map((row) => row.id)).toContain(sync.id);
+
+    makeUser(temp.db, ALICE, { import: false });
+    const due = listDueAccountSyncs(temp.db, Date.now() + 1).map((row) => row.id);
+    expect(due).not.toContain(sync.id);
+    // Admin-owned syncs are unaffected.
+    expect(due).toContain(adminSync.id);
+
+    const seen: DiscoveryContext[] = [];
+    const result = await runAccountSyncDetailed(temp.db, sync.id, deps(stubProvider([], seen)));
+    expect(result.error).toMatch(/can no longer import/);
+    expect(seen).toEqual([]);
+
+    // The manual run is refused for the owner and for the admin alike: it is
+    // the owner's permission that decides, not the caller's.
+    for (const email of [ALICE, null]) {
+      const response = await call(email, "POST", `/api/account-syncs/${String(sync.id)}/run`);
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ error: "owner_cannot_import" });
+    }
   });
 
   it("lets starred auto-removal touch only the sync owner's repos", async () => {

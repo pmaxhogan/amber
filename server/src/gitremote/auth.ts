@@ -16,9 +16,11 @@ import type { AuthThrottle } from "./throttle.ts";
  * step fails closed, and the order is part of the contract:
  *
  * 1. Kill switch off: 404 for everything, before a credential is read.
- * 2. Per-IP throttle.
- * 3. Parse HTTP Basic. A request without it is the normal first leg of every
- *    git clone, so it gets the challenge without spending a throttle token.
+ * 2. Parse HTTP Basic. A request without it is the normal first leg of every
+ *    git clone, so it always gets the challenge and spends no token.
+ * 3. Throttle (throttle.ts), before anything is derived: the (address,
+ *    username) bucket, and the address bucket unless that username has logged
+ *    in from that address before.
  * 4. Look the credential up by username. When there is none, scrypt still
  *    runs against a dummy hash, so response time does not say which
  *    usernames exist.
@@ -103,18 +105,26 @@ export async function authenticateGitRequest(
   }
 
   const ip = request.ip;
-  if (!throttle.allow(ip)) {
+
+  const credentials = parseBasicAuth(request.authorization);
+  if (credentials === null) {
+    // Always the challenge, even from a throttled address: it derives
+    // nothing, and it is the first leg of every real clone (git sends Basic
+    // only after a 401). Answering 429 here would lock a known-good user out
+    // of a sprayed address before their credentials ever reached the
+    // per-username check below.
+    return { ok: false, status: 401, reason: "no_credentials" };
+  }
+  // Parsing Basic costs nothing; the derivation below is what the throttle
+  // protects, and it needs the username to tell a known address apart.
+  const throttleName = credentials.username;
+  if (!throttle.allow(ip, throttleName)) {
     return {
       ok: false,
       status: 429,
       reason: "throttled",
-      retryAfterSeconds: throttle.retryAfterSeconds(ip),
+      retryAfterSeconds: throttle.retryAfterSeconds(ip, throttleName),
     };
-  }
-
-  const credentials = parseBasicAuth(request.authorization);
-  if (credentials === null) {
-    return { ok: false, status: 401, reason: "no_credentials" };
   }
 
   const stored = isWellFormedGitUsername(credentials.username)
@@ -123,12 +133,12 @@ export async function authenticateGitRequest(
   // Exactly one derivation on every path, found or not.
   const passwordOk = verify(credentials.password, stored?.passwordHash ?? dummyGitPasswordHash());
   if (stored === undefined || !passwordOk) {
-    throttle.recordFailure(ip);
+    throttle.recordFailure(ip, throttleName);
     return { ok: false, status: 401, reason: "bad_credentials" };
   }
 
   const refuse = (reason: "not_permitted" | "not_member" | "changed"): GitAuthFailure => {
-    throttle.recordFailure(ip);
+    throttle.recordFailure(ip, throttleName);
     return { ok: false, status: 401, reason, userId: stored.userId };
   };
 
@@ -148,7 +158,7 @@ export async function authenticateGitRequest(
   if (user.isAdmin) {
     // The admin is exempt from the membership rule, exactly as on the web
     // path: a Cloudflare outage or a policy edit can never lock them out.
-    throttle.recordSuccess(ip);
+    throttle.recordSuccess(ip, throttleName);
     return { ok: true, user };
   }
 
@@ -174,6 +184,6 @@ export async function authenticateGitRequest(
   if (after === null) {
     return refuse("changed");
   }
-  throttle.recordSuccess(ip);
+  throttle.recordSuccess(ip, throttleName);
   return { ok: true, user: after };
 }

@@ -9,7 +9,7 @@ import Textarea from "primevue/textarea";
 import type { ImportCommitResponse, ImportPreviewResponse } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
-import { IMPORT_FAILURE_LABELS, importFailureKind, pluralize } from "../lib/format.ts";
+import { importFailureLabel, pluralize } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
 import AppIcon from "../components/AppIcon.vue";
 import ErrorState from "../components/ErrorState.vue";
@@ -264,10 +264,7 @@ function statusIcon(status: string): string {
               class="import-failure"
               data-testid="import-failure"
             >
-              <Tag
-                :value="IMPORT_FAILURE_LABELS[importFailureKind(data.code, data.message)]"
-                severity="danger"
-              />
+              <Tag :value="importFailureLabel(data)" severity="danger" />
               <span v-if="data.message">{{ data.message }}</span>
             </div>
             <span v-else-if="data.message">{{ data.message }}</span>

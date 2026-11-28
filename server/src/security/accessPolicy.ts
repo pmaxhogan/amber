@@ -3,7 +3,12 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import type { RedactedSecret } from "../config.ts";
 import type { Db } from "../db/db.ts";
-import { normalizeEmail, reconcileUsers, type ReconcileChanges } from "../domain/users.ts";
+import {
+  normalizeEmail,
+  normalizeEmailList,
+  reconcileUsers,
+  type ReconcileChanges,
+} from "../domain/users.ts";
 
 /**
  * Who besides the admin is a user: exactly the explicit `email` include rules
@@ -125,7 +130,11 @@ export function parsePolicyResponse(body: unknown): ParsedPolicy {
           // A malformed email rule would otherwise read as that user leaving.
           throw new PolicyReadError("Cloudflare answered with a malformed email rule.");
         }
-        out.push(normalizeEmail(email.data.email.email));
+        // An entry normalizeEmail refuses is passed through as written:
+        // reconcileUsers and the membership set skip it with a warn, so it
+        // never becomes anyone's identity.
+        const raw = email.data.email.email;
+        out.push(normalizeEmail(raw) ?? raw.trim());
         continue;
       }
       if (record) {
@@ -189,9 +198,9 @@ export class AccessPolicy {
     if (this.#source?.kind === "static") {
       // The stand-in list is authoritative and constant, so it is reconciled
       // once and never refreshed.
-      this.#emails = new Set(this.#source.emails.map(normalizeEmail));
+      this.#emails = new Set(normalizeEmailList(this.#source.emails));
       this.#fetchedAt = this.#now();
-      reconcileUsers(this.#db, this.#emails, this.#now());
+      reconcileUsers(this.#db, this.#source.emails, this.#now(), this.#log);
     } else if (this.#source?.kind === "cloudflare") {
       this.#loadMirror();
     }
@@ -259,6 +268,9 @@ export class AccessPolicy {
       return "not_member";
     }
     const normalized = normalizeEmail(email);
+    if (normalized === null) {
+      return "not_member";
+    }
     if (source.kind === "static") {
       return this.#emails?.has(normalized) === true ? "allow" : "not_member";
     }
@@ -347,7 +359,7 @@ export class AccessPolicy {
       if (!Number.isSafeInteger(fetchedAt)) {
         return;
       }
-      this.#emails = new Set(emails.map(normalizeEmail));
+      this.#emails = new Set(normalizeEmailList(emails));
       this.#fetchedAt = fetchedAt;
     } catch {
       // A mirror that cannot be read is treated as no copy at all, which the
@@ -392,12 +404,12 @@ export class AccessPolicy {
       this.#noteIgnored(policy);
       const now = this.#now();
       const changes = this.#db.tx(() => {
-        const result = reconcileUsers(this.#db, policy.emails, now);
+        const result = reconcileUsers(this.#db, policy.emails, now, this.#log);
         writeKv(this.#db, KV_POLICY_EMAILS, JSON.stringify(policy.emails), now);
         writeKv(this.#db, KV_POLICY_FETCHED_AT, String(now), now);
         return result;
       });
-      this.#emails = new Set(policy.emails);
+      this.#emails = new Set(normalizeEmailList(policy.emails));
       this.#fetchedAt = now;
       this.#lastError = null;
       if (changes.created + changes.removed + changes.restored > 0) {

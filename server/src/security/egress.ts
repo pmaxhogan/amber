@@ -541,7 +541,9 @@ function curlAddress(address: string): string {
  * - `http.followRedirects=false`, because the default `initial` follows a
  *   redirect on the first request to ANY host, and that host would be
  *   resolved by libcurl, unvalidated and unpinned. A restricted forge's
- *   redirects (renamed repos included) therefore fail the fetch;
+ *   redirects (renamed repos included) therefore fail the fetch. The one
+ *   exception is the well-known public tier (`followRedirects: true`), which
+ *   keeps git's default `initial` so renamed repositories keep working;
  * - `transfer.bundleURI=false`, so a server cannot point a clone at bundles
  *   on another host. (Packfile URIs need `fetch.uriProtocols`, which is
  *   unset and cannot be set by a repository.)
@@ -549,21 +551,109 @@ function curlAddress(address: string): string {
  * Nothing in these values can carry a credential: they hold the host, the
  * port and numeric addresses only.
  */
-export function gitPinConfig(vetted: VettedTarget): [string, string][] {
+export function gitPinConfig(
+  vetted: VettedTarget,
+  options: { followRedirects?: boolean } = {},
+): [string, string][] {
   return [
     ["http.curloptResolve", ""],
     [
       "http.curloptResolve",
       `${vetted.host}:${String(vetted.port)}:${vetted.addresses.map(curlAddress).join(",")}`,
     ],
-    ["http.followRedirects", "false"],
+    ["http.followRedirects", options.followRedirects === true ? "initial" : "false"],
     ["transfer.bundleURI", "false"],
   ];
 }
 
 // ---------------------------------------------------------------------------
+// The well-known public forge tier
+// ---------------------------------------------------------------------------
+
+/**
+ * Forges everyone knows are public internet services. KEEP IN SYNC with the
+ * literal list in db/migrations.ts (010 backfill), which cannot import app
+ * code; migration010.test.ts asserts the two match.
+ */
+export const WELL_KNOWN_PUBLIC_FORGE_HOSTS: readonly string[] = [
+  "github.com",
+  "gitlab.com",
+  "bitbucket.org",
+  "codeberg.org",
+];
+
+/**
+ * A RESTRICTED forge on this list (https, default port, exact host) keeps the
+ * DNS check and the pin, but is allowed two things other restricted forges
+ * are not, because the hosts are known public services and refusing them
+ * would break real backups: git's default `http.followRedirects=initial`
+ * (renamed repositories redirect), and git-lfs, run with its endpoint forced
+ * on the command line (lfsEndpointConfig). Everything else restricted gets
+ * no redirects and no LFS.
+ */
+export function isWellKnownPublicForge(target: EgressTarget): boolean {
+  const protocol = target.protocol.toLowerCase();
+  return (
+    protocol === "https" &&
+    (target.port === null || target.port === 443) &&
+    WELL_KNOWN_PUBLIC_FORGE_HOSTS.includes(target.host.trim().toLowerCase())
+  );
+}
+
+/**
+ * The git-lfs endpoint for a clone URL, derived the way git-lfs derives it
+ * itself (`<remote>.git/info/lfs`), forced with `-c lfs.url=`. Git config
+ * (command line included) outranks a repository's `.lfsconfig`, and `lfs.url`
+ * outranks `remote.<name>.lfsurl` (git-lfs-config(5); lfsapi endpoint
+ * finder), so a hostile repository cannot point git-lfs at another server.
+ * The batch API's object download URLs are still the forge's to choose; that
+ * is accepted for this tier only.
+ */
+export function lfsEndpointConfig(remoteUrl: string): [string, string][] {
+  const base = remoteUrl.replace(/\/+$/, "");
+  const endpoint = /\.git$/i.test(base) ? `${base}/info/lfs` : `${base}.git/info/lfs`;
+  return [["lfs.url", endpoint]];
+}
+
+// ---------------------------------------------------------------------------
 // Pinning: provider HTTP
 // ---------------------------------------------------------------------------
+
+/**
+ * A socket `lookup` that answers only for `pin.host`, and only with the
+ * validated addresses. Anything else fails as "not found", so a connection
+ * can never be steered to an address the guard did not check. For
+ * node:http(s) requests and agents (pinnedFetch here, web push in
+ * notify/push.ts).
+ */
+export function pinnedLookup(pin: VettedTarget): LookupFunction {
+  return (hostname, options, callback) => {
+    const first = pin.addresses[0];
+    if (hostname.toLowerCase() !== pin.host || first === undefined) {
+      const error = Object.assign(new Error(`refusing to resolve ${hostname}`), {
+        code: "ENOTFOUND",
+      });
+      callback(error, "", 0);
+      return;
+    }
+    const all = pin.addresses.map((address) => ({ address, family: isIP(address) }));
+    if (options.all === true) {
+      (callback as unknown as (err: null, list: typeof all) => void)(null, all);
+      return;
+    }
+    callback(null, first, isIP(first));
+  };
+}
+
+/**
+ * An https.Agent pinned like pinnedLookup, for clients that only accept an
+ * agent (web-push). TLS still verifies the certificate against the request's
+ * host name; only the address lookup is replaced. No keep-alive, so the
+ * caller destroys it after one request and nothing outlives the pin.
+ */
+export function pinnedHttpsAgent(pin: VettedTarget): https.Agent {
+  return new https.Agent({ lookup: pinnedLookup(pin), keepAlive: false });
+}
 
 /** Same shape as the providers' fetch, plus the target it must be pinned to. */
 export type PinnedFetch = (url: string, init: RequestInit, pin: VettedTarget) => Promise<Response>;
@@ -614,21 +704,7 @@ export const pinnedFetch: PinnedFetch = async (url, init, pin) => {
     throw new EgressRefusedError("unresolvable", pin.host);
   }
 
-  const lookup: LookupFunction = (hostname, options, callback) => {
-    if (hostname.toLowerCase() !== pin.host) {
-      const error = Object.assign(new Error(`refusing to resolve ${hostname}`), {
-        code: "ENOTFOUND",
-      });
-      callback(error, "", 0);
-      return;
-    }
-    const all = pin.addresses.map((address) => ({ address, family: isIP(address) }));
-    if (options.all === true) {
-      (callback as unknown as (err: null, list: typeof all) => void)(null, all);
-      return;
-    }
-    callback(null, first, isIP(first));
-  };
+  const lookup = pinnedLookup(pin);
 
   const transport = protocol === "https" ? https : http;
   const signal = init.signal ?? undefined;

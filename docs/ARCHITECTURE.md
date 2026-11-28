@@ -432,6 +432,14 @@ directory names never collide regardless of sanitization overlaps.
   refspecs explicitly on the command line, which is what keeps a mode change
   (bare to mirror, say) from being silently overridden by config left behind by
   the previous mode.
+- Which forges get LFS at all is an egress decision (see "Forges and outbound
+  requests"): an unrestricted forge runs git-lfs as configured; a well-known
+  public forge runs it with the endpoint forced on the command line,
+  `-c lfs.url=<remote>.git/info/lfs`, so a repository's `.lfsconfig` (or a
+  `remote.<name>.lfsurl`) cannot point git-lfs at another host (command-line
+  config outranks `.lfsconfig`, and `lfs.url` outranks the per-remote key,
+  git-lfs-config(5)); every other restricted forge skips git-lfs entirely,
+  whatever `lfs_enabled` says.
 - LFS fetch failures are non-fatal: they are logged at warn and the sync still
   records success. An LFS server that is down, rate limiting, or refusing a
   token must not cost the run its git objects, which are the part that matters.
@@ -551,8 +559,22 @@ switch (`git_remote.enabled`, admin only) decides whether they answer. Endpoints
   credentials is the normal first leg of a clone and gets 401 with
   `WWW-Authenticate: Basic` without spending a throttle token; a wrong
   password, an unknown username, a removed user, one without `git` and one who
-  left the access policy all get the same 401; per-IP failure throttling
-  (in-memory token bucket) answers 429.
+  left the access policy all get the same 401. Failure throttling
+  (`gitremote/throttle.ts`, in-memory token buckets) answers 429 before any
+  derivation: every failure spends a token from the ADDRESS bucket (30, the CPU
+  guard, never cleared by a success, so one valid credential cannot reset the
+  guessing budget for other usernames) and from the (address, username) bucket
+  (10). A success clears only its own pair and remembers it as known good for 7
+  days; a known-good pair is let through a dry address bucket (its own bucket
+  still applies), so someone spraying guesses from a shared address cannot lock
+  a user out of an address they already log in from. The challenge leg (no
+  credentials) is never throttled, since a real clone always starts with it.
+  Both maps are bounded. The address is `request.ip` with `trustProxy` set to a
+  function that believes exactly ONE hop, and only from a loopback or private
+  peer (`trustNearestProxy` in `app.ts`): behind cloudflared that is the client
+  address Cloudflare reported, never the left-most `X-Forwarded-For` entry a
+  client writes itself. A function rather than a hop count because Fastify 5
+  treats a numeric `trustProxy` as "trust nothing".
 - Visibility: after authentication the slug must resolve and the user must be
   able to view that repo (`canView`); anything else is the same 404 as an
   unknown slug.
@@ -671,7 +693,7 @@ Rules that make it safe:
   an object they can see but may not change, or a missing permission.
 - Resources:
   - `GET /api/me` - `{ id, email, isAdmin, permissions, storage: { usedBytes,
-    capBytes, overCap }, policy }`; `policy` (`configured`, `fetchedAt`, `stale`,
+    capBytes, overCap, atCeiling }, policy }`; `policy` (`configured`, `fetchedAt`, `stale`,
     `editUrl`, `lastError`) is null for everyone but the admin.
   - `GET /api/users`, `PATCH /api/users/:id` `{ permissions?, storageCapBytes? }`,
     `POST /api/users/refresh`, `POST /api/users/:id/adopt-repos`,
@@ -687,7 +709,8 @@ Rules that make it safe:
   - `POST /api/import/preview` (text blob -> per-line parse results),
     `POST /api/import` (commit; returns created/updated/failed per line); both need
     `import`. A refused line carries an optional machine-readable `code`:
-    `host_not_enabled`, `storage_cap_reached`, or a domain error code. The generic
+    `host_not_enabled`, `host_not_allowed` (with `reason`, the egress
+    category), `storage_cap_reached`, or a domain error code. The generic
     "Amber could not import this repository" refusal deliberately has none.
     Re-importing something the caller can already view answers status ok, action
     `updated`, with the message "Already backed up. Nothing was changed.".
@@ -758,10 +781,12 @@ Rules that make it safe:
     last delivery per subscribed browser of the CALLER - never an endpoint or
     key; subscribe, unsubscribe and test likewise act on the caller's browsers),
     `POST /api/push/subscriptions` (a browser's `{ endpoint, keys }`; https
-    endpoints only; idempotent), `POST /api/push/unsubscribe` `{ endpoint }`
+    endpoints only, and the endpoint must pass the egress rule, else 403
+    `host_not_allowed`; idempotent), `POST /api/push/unsubscribe` `{ endpoint }`
     (in the body, since the endpoint is a capability that does not belong in a
     URL), `POST /api/push/test` (sends a test notification; answers
-    `{ sent, failed }`).
+    `{ sent, failed }`). A device's `lastError` is one of a few fixed
+    categories, never the push service's status or body.
   - `GET /api/repos/:id/browse/*` - see "Repository browser".
   - `GET /api/status` - version, queue depth, active syncs, totals (repos, gone
     repos, disk, filtered to what the caller can view), breaker state,
@@ -823,6 +848,14 @@ configure.
   the line together must be one push, not hundreds. A notification about a
   single repository that GitHub took down over a DMCA notice says so ("was
   removed by a DMCA takedown") instead of "can no longer be fetched".
+- EGRESS. A push endpoint is a URL any user's browser hands Amber, which Amber
+  later POSTs to, so it gets the restricted-forge rule: https on 443, a public
+  DNS name, every resolved address public. It is checked when the subscription
+  is saved (403 `host_not_allowed` otherwise) and again at every send, and the
+  connection is pinned to the addresses that passed. A failed send stores and
+  returns one of a few fixed categories (refused, rejected, timeout,
+  unreachable), never the push service's status line or body, so "send me a
+  test" cannot be used to learn what an arbitrary URL answers.
 - A push service answering 404 or 410 means the subscription is dead and its
   row is deleted. Any other failure is recorded on the row and retried on the
   next notification. A failed notification never fails a sync.
@@ -889,12 +922,16 @@ configure.
   - `repos.forge_id` is IMMUTABLE - a repo cannot be re-pointed at another forge
     while inheriting that forge's or its override account's credentials.
     `repos.path` may be edited (renames), which stays on the same host.
-  - A credential is only ever presented to its owning forge's origin: git fetch
-    runs with explicit `-c http.followRedirects=initial` (never follow
-    post-initial redirects), and the askpass helper receives the expected
-    host in env and refuses (returns empty) when git's prompt names any other
-    host. Defense in depth against a malicious forge redirecting to a
-    credential-phishing host.
+  - A credential is only ever presented to its owning forge's origin. The
+    redirect rule depends on the forge's tier (see "Forges and outbound
+    requests"): a restricted forge outside the well-known list follows no
+    redirect at all (`http.followRedirects=false`); a well-known public forge
+    and an unrestricted forge use `http.followRedirects=initial`, which DOES
+    follow a redirect on the first request, to any host, and then none after
+    it. The backstop for that first redirect is the askpass helper: it receives
+    the expected host in env and refuses (returns empty) when git's prompt
+    names any other host, so a credential never follows a redirect off the
+    forge.
 - Hostile repository content. The browser shows what is inside backups, so a
   repository's author is an attacker against whoever views it. The layers,
   each assumed to fail:
@@ -946,8 +983,9 @@ configure.
   host, only the admin or `manage_forges` may introduce a new host, a forge the
   admin did not explicitly allow is RESTRICTED to public addresses with every
   request validated and pinned (`security/egress.ts`, see "Forges and outbound
-  requests"), and the server runs on an isolated docker network with nothing else
-  listening on trust-by-source.
+  requests"), web push endpoints get the same rule (see "Web push"), and the
+  server runs on an isolated docker network with nothing else listening on
+  trust-by-source.
 
 ## Multi-user access control
 
@@ -1025,10 +1063,18 @@ the last good list rather than from nothing.
 - `repos.owner_user_id`: FK to `users`, RESTRICT. Every repo has exactly ONE
   owner: the user who imported it. There is no co-ownership.
 - `forges.allow_private_network` INTEGER NOT NULL DEFAULT 0 (see "Forges and
-  outbound requests"). Existing forges are backfilled to 1: the admin made
-  them.
+  outbound requests"). Backfill: 0 for a forge on the default port whose host
+  is exactly one of the well-known public forges (github.com, gitlab.com,
+  bitbucket.org, codeberg.org; migration 003 seeds the first two on every
+  install, so "the admin made it" is not true of them), 1 for every other
+  existing forge (the admin made those, and they may be on a LAN). The
+  migration repeats the literal list (it cannot import app code); a test
+  asserts it matches `WELL_KNOWN_PUBLIC_FORGE_HOSTS` in `security/egress.ts`.
 - `repos.is_private` INTEGER NOT NULL DEFAULT 1 and
   `repos.visibility_checked_at` INTEGER NULL.
+- `repos.first_clone_gate_path` TEXT NULL: set by a path change, cleared by the
+  first successful fetch OF THAT PATH; while set, the next sync is a first
+  clone for the cap gate (see "Storage caps"). NULL on every existing repo.
 - `accounts.owner_user_id`, `account_syncs.owner_user_id`,
   `push_subscriptions.user_id`: FK to `users`, NOT NULL in effect.
 - Backfill: the admin row is created at first boot (the migration cannot know
@@ -1089,8 +1135,15 @@ Rules that are not toggles:
   OWNER'S token fetches, so they are owner or admin only, and an override may
   only name an account the repo's owner owns. Anyone allowed to edit may clear
   an override.
+- OWNER-DERIVED FIELDS. A viewer who is neither the owner nor the admin reads
+  `accountOverrideId` and `managedByAccountSyncId` as null, and `lastError`
+  (and each run's `error` in the run history) as a fixed marker ("The last
+  sync failed. The details are visible to the repository's owner.") whenever
+  there is one: those values were chosen or learned with the owner's account.
 - A PATH CHANGE resets `is_private` to 1 and clears `visibility_checked_at`:
-  the row now names a different upstream and nothing is known about it.
+  the row now names a different upstream and nothing is known about it. It
+  also puts the repo back through the first-clone cap gate, and is refused
+  outright when the owner is at or over their cap (see "Storage caps").
 - Bulk actions apply the same rules per repo and report the ones refused.
   Starred-sync auto-removal only ever touches repos owned by the sync's owner.
 - USER MANAGEMENT (permissions, caps, adoption, policy refresh) is admin only
@@ -1100,8 +1153,18 @@ Rules that are not toggles:
   and keep syncing anonymously where that works. The admin sees them under an
   "owner removed" filter on the repo list and can ADOPT them
   (`POST /api/users/:id/adopt-repos`: the admin becomes the owner of every
-  repo that user owns, and each repo's account override is cleared). Nothing
-  is deleted automatically.
+  repo that user owns, each repo's account override is cleared, and each is
+  set `force_anonymous = 1`, since otherwise it would resolve the ADMIN'S
+  default account and the admin's token would start fetching paths a friend
+  chose; the admin turns anonymous off per repo, deliberately). Nothing is
+  deleted automatically.
+- An account sync whose owner no longer holds `import` does not run: the
+  scheduler skips it, and `POST /api/account-syncs/:id/run` answers 409
+  `owner_cannot_import` (the owner's permission decides, not the caller's).
+  Admin-owned syncs are unaffected.
+- Without `view_removed`, `GET /api/status` reports `goneRepos: 0` and
+  `GET /api/repos?sort=gone_at` is refused (403, like `gone=true`). `goneAt`
+  stays on rows the caller can already see.
 
 ### Credentials are per user
 
@@ -1136,9 +1199,41 @@ an access-control decision.
   restricted forge (`security/egress.ts`): resolve the host, refuse unless
   every answer is public, then pin the connection to the validated address -
   `git -c http.curloptResolve=<host>:<port>:<ip>` for fetches (and
-  `ls-remote`), and a pinned lookup for provider API calls. Redirects off the
-  host are already refused (`http.followRedirects=initial` applies to the
-  same pinned host; a redirect to another host is not followed).
+  `ls-remote`), and a pinned lookup for provider API calls.
+- Note what `http.followRedirects=initial` (git's default) actually does: it
+  FOLLOWS a redirect on the first request, to ANY host, and that host is
+  resolved by libcurl itself, unvalidated and unpinned. So redirects are
+  decided per tier:
+
+  | tier | which forges | DNS check and pin | git redirects | git-lfs |
+  | --- | --- | --- | --- | --- |
+  | unrestricted | `allow_private_network = 1` (admin only) | no | `initial` | as configured |
+  | well-known public | restricted, https on the default port, host exactly github.com, gitlab.com, bitbucket.org or codeberg.org | yes | `initial` | yes, endpoint forced with `-c lfs.url=<remote>.git/info/lfs` |
+  | restricted | every other restricted forge | yes | none (`http.followRedirects=false`) | skipped |
+
+  The well-known tier exists because a backup tool needs two things there that
+  the plain restricted rule would break: same-host redirects for renamed
+  repositories, and LFS content. Those hosts are known public services, so
+  following their initial redirect is accepted; the askpass host check still
+  keeps a credential from following it off the forge, and the forced `lfs.url`
+  keeps a hostile `.lfsconfig` from steering git-lfs. RESIDUAL: git-lfs has
+  its own HTTP client, which ignores `http.curloptResolve`, so on this tier
+  its traffic is not pinned, and the object download hosts the LFS batch API
+  hands back are the forge's to choose and are not vetted. That is accepted
+  for these four hosts only. The list is
+  `WELL_KNOWN_PUBLIC_FORGE_HOSTS` in `security/egress.ts`, the one place it is
+  defined.
+- A refusal is 403 `host_not_allowed` with `details.reason`: `scheme`, `port`,
+  `ip_literal`, `invalid_host`, `not_public` or `unresolvable`. The message
+  names the host and the category, never a resolved address. A refused import
+  line carries the same `code` and `reason`.
+- An import from a new host, by the admin as by anyone, creates a RESTRICTED
+  forge. A host on a private network or an odd port must first be created on
+  the forges page by the admin with "allow private network" switched on; the
+  import then finds it.
+- Web push endpoints are vetted by the same rule (https on 443, a public DNS
+  name), at subscribe time and again at every send, with the connection
+  pinned (see "Web push").
 - Editing or deleting forges needs `manage_forges`. `protocol`, `host` and
   `port` stay immutable.
 
@@ -1151,7 +1246,9 @@ an access-control decision.
   fork-parent pass (`providers/forks.ts`) and is refreshed at most daily per
   repo.
 - Where the forge cannot be asked (generic hosts, API failure): a repo whose
-  last successful fetch was anonymous is public; anything else stays private.
+  last successful fetch was anonymous is public, on a RESTRICTED forge only;
+  anything else stays private. On an unrestricted forge every repo is private,
+  whatever any fetch or API answer says.
 - Unknown is always private.
 
 ### Importing something Amber already has
@@ -1171,7 +1268,26 @@ never creates anything:
   `default_user_storage_cap_gb` (default 5). The admin is uncapped.
 - At or over the cap, a new repo is refused: manual import lines fail with a
   clear message, and the user's account syncs skip new discoveries. Existing
-  repos KEEP SYNCING.
+  repos KEEP SYNCING, up to the hard ceiling below.
+- A PATH CHANGE (rename) points a synced row at a different upstream of
+  unknown size, and the first-clone gate keys on "never synced", so a rename
+  would skip it. A rename therefore sets `repos.first_clone_gate_path`: the
+  next sync is a first clone for every gate below (cap check, forge size check,
+  one at a time), until a fetch of THAT path succeeds (a fetch of the old path
+  finishing after the rename does not clear it). `last_success_at` is left
+  alone, so gone detection is unaffected. An owner already at or over their
+  cap cannot rename at all: 403 `storage_cap_reached`.
+- HARD CEILING. While a non-admin owner's usage is at or above TWICE their
+  cap, none of their repos syncs: each due sync is refused before it starts,
+  recorded on the repo as "Storage cap exceeded" (`last_error`, no run row, so
+  no backoff growth and no circuit-breaker effect) and retried on its normal
+  schedule, until usage drops or the cap is raised. "Existing repos keep
+  syncing" stays true, but clone-setting edits on existing repos (full
+  history, every ref, LFS, paranoid archives) and growing upstreams could
+  otherwise take a capped user past their cap without bound and fill the disk
+  for everyone. A cap of 0 is a freeze: that user is at the ceiling with
+  nothing stored. `GET /api/me` reports `storage.atCeiling`, and the banner
+  says syncing is paused.
 - A size is only known after a clone, so a batch of imports would all pass
   that check. Two more gates close it: the cap is re-checked when a
   never-synced repo is about to start its FIRST clone (over the cap, the clone
@@ -1209,8 +1325,9 @@ never creates anything:
 ### API
 
 - `GET /api/me`: `{ email, isAdmin, permissions, storage: { usedBytes,
-  capBytes, overCap }, policy: { configured, fetchedAt, stale, editUrl } }`.
-  `capBytes` is null for the admin. `policy` is null for non-admins.
+  capBytes, overCap, atCeiling }, policy: { configured, fetchedAt, stale,
+  editUrl } }`. `capBytes` is null for the admin. `policy` is null for
+  non-admins. `atCeiling` is true at or above twice the cap.
 - `GET /api/users` (admin): every row with permissions, cap, usage, repo
   count, `removedAt`, `lastSeenAt`, `hasGitPassword`.
   `PATCH /api/users/:id` `{ permissions?, storageCapBytes? }` (the admin row
@@ -1246,8 +1363,14 @@ extends a rule above, this list is the current behavior.
   older than two background intervals (10 minutes), so a stopped timer does not
   look healthy. `policy.lastError` carries why, never the API token. In insecure
   mode the policy is the `INSECURE_USER_EMAILS` list and is never stale.
-- VISIBILITY, as implemented (`sync/syncRepo.ts` and `providers/forks.ts`). An
-  ANONYMOUS successful fetch marks the repo public on any forge. An authenticated
+- VISIBILITY, as implemented (`sync/syncRepo.ts` and `providers/forks.ts`). On
+  an UNRESTRICTED forge (`allow_private_network = 1`) nothing ever marks a repo
+  public, not an anonymous fetch, not the provider pass, not account-sync
+  discovery: there, network position is the credential, so "anonymous works"
+  only proves Amber can reach it. Every write is guarded on the path that was
+  asked about (`AND path = ?`), so a rename landing mid-lookup never receives
+  the old path's answer. On a restricted forge, an ANONYMOUS successful fetch
+  marks the repo public. An authenticated
   success on a forge Amber cannot ask (generic) marks it private. On a forge with
   a provider, an authenticated success proves nothing and the visibility pass
   decides: it reads the forge's visibility field, and a DEFINITIVE "not visible"
@@ -1270,6 +1393,32 @@ extends a rule above, this list is the current behavior.
   without `git` with the ordinary 401; see "Git remote, per user".
 - The storage-cap "reached" transition notifies by web push both the user and the
   admin; dropping back under the cap clears `cap_notified_at`.
+- EMAILS are normalized in ONE place (`normalizeEmail` in `domain/users.ts`):
+  trimmed and lower cased, or refused when not plain printable ASCII. The ASCII
+  test runs before lower casing, because Unicode case mapping can fold a
+  lookalike into an ASCII address (U+212A KELVIN SIGN lower-cases to "k"). An
+  identity whose email is refused is 403 `not_a_user`, never the admin; a policy
+  entry that is refused is skipped (reconcile logs a count at warn); config
+  refuses such an `AMBER_ADMIN_EMAIL` or `INSECURE_USER_EMAILS` entry.
+- A `#` anywhere in the raw request target is refused with 400
+  `invalid_request` before any other hook. No browser or Cloudflare sends one,
+  and the auth hooks cut the path at `#` while the router does not, so
+  `/git#x` would otherwise pass as the public `/git` prefix. The SPA fallback
+  cuts paths the same way (`requestPathname`) so the two never disagree. An
+  absolute-form request line (`GET http://x/api/users`) is still matched to its
+  route and goes through that route's permission check (pinned by a raw-socket
+  test).
+
+### Known limits
+
+A repository has exactly one copy and one owner per forge and path. So
+importing, or renaming a repo to, a path that another user already backs up
+privately is refused, and that refusal tells the caller that someone on this
+Amber backs up that exact path. The refusal is generic and the caller must
+already know the exact path to ask, so it cannot be used to list anything, but
+it is a one-bit oracle. Likewise a forge login (forge plus username) can be
+registered by only one user: a second registration is a 409, which says that
+login is already registered by someone.
 
 ### Insecure mode and tests
 

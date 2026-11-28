@@ -6,6 +6,7 @@ import { openDb, type Db } from "../src/db/db.ts";
 import { migrate } from "../src/db/migrate.ts";
 import { migrations } from "../src/db/migrations.ts";
 import { createConsoleLogger } from "../src/logging.ts";
+import { WELL_KNOWN_PUBLIC_FORGE_HOSTS } from "../src/security/egress.ts";
 
 const log = createConsoleLogger("silent");
 
@@ -237,16 +238,57 @@ describe("010_users", () => {
     );
   });
 
-  it("backfills existing forges to allow private networks, and restricts new ones", () => {
+  it("leaves no existing repo marked for the first-clone cap gate", () => {
+    seedAt009();
+    migrate(db, log);
+    const rows = db.all<{ first_clone_gate_path: string | null }>(
+      "SELECT first_clone_gate_path FROM repos",
+    );
+    expect(rows).toHaveLength(3);
+    expect(rows.every((row) => row.first_clone_gate_path === null)).toBe(true);
+  });
+
+  it("restricts the well-known public forges, keeps the admin's own ones open, and restricts new ones", () => {
     const seeded = seedAt009();
+    for (const [protocol, host, port] of [
+      ["https", "bitbucket.org", null],
+      ["https", "codeberg.org", null],
+      // Not the bare host on its default port: the admin's, so left open.
+      ["https", "www.github.com", null],
+      ["https", "codeberg.org", 8443],
+      ["http", "gitlab.com", 8080],
+    ] as const) {
+      insert(
+        "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, 'generic', 1, 1)",
+        protocol,
+        host,
+        port,
+      );
+    }
     migrate(db, log);
 
-    const existing = db.all<{ allow_private_network: number }>(
-      "SELECT allow_private_network FROM forges",
+    const flags = Object.fromEntries(
+      db
+        .all<{ origin: string; allow_private_network: number }>(
+          `SELECT protocol || '://' || host || COALESCE(':' || port, '') AS origin,
+                  allow_private_network
+             FROM forges`,
+        )
+        .map((row) => [row.origin, row.allow_private_network]),
     );
-    // The two seeded by 003 plus the two above.
-    expect(existing).toHaveLength(4);
-    expect(existing.every((row) => row.allow_private_network === 1)).toBe(true);
+    expect(flags).toEqual({
+      // Seeded by 003 on every install: restricted.
+      "https://github.com": 0,
+      "https://gitlab.com": 0,
+      "https://bitbucket.org": 0,
+      "https://codeberg.org": 0,
+      // The admin's own forges, LAN ones included: unrestricted.
+      "https://forge.example.com": 1,
+      "http://git.example.net:8080": 1,
+      "https://www.github.com": 1,
+      "https://codeberg.org:8443": 1,
+      "http://gitlab.com:8080": 1,
+    });
 
     const fresh = insert(
       "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES ('https', 'new.example.org', NULL, 'generic', 1, 1)",
@@ -310,6 +352,18 @@ describe("010_users", () => {
     // Trending is instance-level and stays per forge and window.
     expect(indexes["idx_account_syncs_trending"]).toContain("(forge_id, window_days)");
     expect(indexes["idx_account_syncs_trending"]).not.toContain("owner_user_id");
+  });
+});
+
+describe("010 backfill and the app agree on the well-known public forges", () => {
+  it("lists exactly WELL_KNOWN_PUBLIC_FORGE_HOSTS", () => {
+    const sql = migrations.find((migration) => migration.name === "010_users")?.sql ?? "";
+    const match = /host IN \(([^)]*)\)/.exec(sql);
+    const hosts = (match?.[1] ?? "")
+      .split(",")
+      .map((value) => value.trim().replace(/^'|'$/g, ""))
+      .filter((value) => value !== "");
+    expect(hosts).toEqual([...WELL_KNOWN_PUBLIC_FORGE_HOSTS]);
   });
 });
 

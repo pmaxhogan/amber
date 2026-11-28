@@ -444,7 +444,7 @@ onMounted(() => void load());
     <ConfirmDialog
       :visible="adoptTarget !== null"
       title="Adopt this user's repositories?"
-      :message="`You will become the owner of all ${adoptTarget?.repoCount ?? 0} repositories ${adoptTarget?.email ?? 'this user'} owns, and each one's account override is cleared. Their backups stay and keep syncing.`"
+      :message="`You will become the owner of all ${adoptTarget?.repoCount ?? 0} repositories ${adoptTarget?.email ?? 'this user'} owns, and each one's account override is cleared. They are set to fetch anonymously, so your own accounts are never used on paths someone else chose; turn that off per repository once you have checked it. Their backups stay and keep syncing.`"
       confirm-label="Adopt"
       :busy="adoptTarget !== null && saving.has(adoptTarget.id)"
       @update:visible="adoptTarget = null"

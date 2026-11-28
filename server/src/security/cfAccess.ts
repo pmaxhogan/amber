@@ -109,14 +109,19 @@ export function extractToken(request: FastifyRequest): string | null {
   return null;
 }
 
-/** The email claim, normalized for a case-insensitive comparison. */
+/**
+ * The email claim exactly as signed (trimmed). It is deliberately NOT lower
+ * cased here: identity.ts normalizes it with domain/users.ts normalizeEmail,
+ * which must see the original characters to refuse a non-ASCII address before
+ * case mapping could fold it into an ASCII one.
+ */
 function emailClaim(payload: JWTPayload): string | null {
   const email = payload["email"];
   if (typeof email !== "string") {
     return null;
   }
-  const normalized = email.trim().toLowerCase();
-  return normalized === "" ? null : normalized;
+  const trimmed = email.trim();
+  return trimmed === "" ? null : trimmed;
 }
 
 class CfAccessDenied extends Error {

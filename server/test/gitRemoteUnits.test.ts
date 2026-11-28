@@ -14,7 +14,7 @@ import {
   sanitizeGitProtocol,
   serviceAnnouncement,
 } from "../src/gitremote/routes.ts";
-import { AuthThrottle } from "../src/gitremote/throttle.ts";
+import { AuthThrottle, pairKey } from "../src/gitremote/throttle.ts";
 import { buildGitEnv, GitSpawnError, liveGitProcessCount, runGitCapture } from "../src/gitSpawn.ts";
 import { getRepo, getRepoBySlug } from "../src/domain/repos.ts";
 import { repoDirFor } from "../src/repoDir.ts";
@@ -102,56 +102,113 @@ describe("parseBasicAuth", () => {
 });
 
 describe("AuthThrottle", () => {
-  it("allows a burst, then refuses, then refills over time", () => {
+  it("allows a burst per (address, username), then refuses, then refills", () => {
     let now = 1_000_000;
     const throttle = new AuthThrottle({ capacity: 3, refillMs: 1000, now: () => now });
 
-    expect(throttle.allow("a")).toBe(true);
+    expect(throttle.allow("a", "u")).toBe(true);
     for (let i = 0; i < 3; i += 1) {
-      throttle.recordFailure("a");
+      throttle.recordFailure("a", "u");
     }
-    expect(throttle.allow("a")).toBe(false);
-    expect(throttle.retryAfterSeconds("a")).toBe(1);
+    expect(throttle.allow("a", "u")).toBe(false);
+    expect(throttle.retryAfterSeconds("a", "u")).toBe(1);
 
     now += 1000;
-    expect(throttle.allow("a")).toBe(true);
-    expect(throttle.retryAfterSeconds("a")).toBe(0);
+    expect(throttle.allow("a", "u")).toBe(true);
+    expect(throttle.retryAfterSeconds("a", "u")).toBe(0);
 
     now += 60_000;
     for (let i = 0; i < 3; i += 1) {
-      throttle.recordFailure("a");
+      throttle.recordFailure("a", "u");
     }
-    expect(throttle.allow("a")).toBe(false);
+    expect(throttle.allow("a", "u")).toBe(false);
   });
 
   it("keeps buckets per address", () => {
-    const throttle = new AuthThrottle({ capacity: 1, refillMs: 1000 });
-    throttle.recordFailure("a");
-    expect(throttle.allow("a")).toBe(false);
-    expect(throttle.allow("b")).toBe(true);
+    const throttle = new AuthThrottle({ capacity: 1, addressCapacity: 1, refillMs: 1000 });
+    throttle.recordFailure("a", "u");
+    expect(throttle.allow("a", "u")).toBe(false);
+    expect(throttle.allowAddress("a")).toBe(false);
+    expect(throttle.allow("b", "u")).toBe(true);
   });
 
-  it("forgets an address that authenticates successfully", () => {
-    const throttle = new AuthThrottle({ capacity: 1, refillMs: 1000 });
-    throttle.recordFailure("a");
-    expect(throttle.allow("a")).toBe(false);
-    throttle.recordSuccess("a");
-    expect(throttle.allow("a")).toBe(true);
-    expect(throttle.size).toBe(1);
+  it("refuses every username once the address bucket is dry", () => {
+    const throttle = new AuthThrottle({ capacity: 10, addressCapacity: 3, refillMs: 1000 });
+    for (const name of ["x1", "x2", "x3"]) {
+      throttle.recordFailure("a", name);
+    }
+    expect(throttle.allowAddress("a")).toBe(false);
+    expect(throttle.allow("a", "fresh")).toBe(false);
+    expect(throttle.retryAfterSeconds("a", "fresh")).toBe(1);
+  });
+
+  it("lets a known-good pair through a sprayed address, never a stranger", () => {
+    const throttle = new AuthThrottle({ capacity: 2, addressCapacity: 3, refillMs: 60_000 });
+    throttle.recordSuccess("shared", "victim");
+    // Someone else at the same address sprays guesses until the address is dry.
+    for (let i = 0; i < 10; i += 1) {
+      throttle.recordFailure("shared", `guess${String(i)}`);
+    }
+    expect(throttle.allowAddress("shared")).toBe(false);
+    expect(throttle.allow("shared", "attacker")).toBe(false);
+    // The user who logged in from here before still gets in.
+    expect(throttle.allow("shared", "victim")).toBe(true);
+    // ...but only within their own pair budget.
+    throttle.recordFailure("shared", "victim");
+    throttle.recordFailure("shared", "victim");
+    expect(throttle.allow("shared", "victim")).toBe(false);
+  });
+
+  it("forgets a known-good pair after its lifetime", () => {
+    let now = 0;
+    const throttle = new AuthThrottle({
+      capacity: 5,
+      addressCapacity: 1,
+      refillMs: 1_000_000,
+      knownGoodMs: 1000,
+      now: () => now,
+    });
+    throttle.recordSuccess("a", "u");
+    throttle.recordFailure("a", "other");
+    expect(throttle.allow("a", "u")).toBe(true);
+    now += 1001;
+    expect(throttle.allow("a", "u")).toBe(false);
+    expect(throttle.knownGoodSize).toBe(0);
+  });
+
+  it("a success clears only its own pair, never the address", () => {
+    const throttle = new AuthThrottle({ capacity: 1, addressCapacity: 2, refillMs: 60_000 });
+    throttle.recordFailure("a", "u");
+    throttle.recordFailure("a", "other");
+    expect(throttle.allow("a", "u")).toBe(false);
+    throttle.recordSuccess("a", "u");
+    expect(throttle.allow("a", "u")).toBe(true);
+    // A valid credential does not reset the guessing budget for anyone else.
+    expect(throttle.allowAddress("a")).toBe(false);
+    expect(throttle.allow("a", "other")).toBe(false);
+    expect(throttle.allow("a", "third")).toBe(false);
   });
 
   it("evicts the oldest entry rather than growing without bound", () => {
     const throttle = new AuthThrottle({ capacity: 1, refillMs: 1000, maxEntries: 3 });
     for (const key of ["a", "b", "c", "d", "e"]) {
-      throttle.recordFailure(key);
+      throttle.recordFailure(key, key);
+      throttle.recordSuccess(key, `${key}-ok`);
     }
     expect(throttle.size).toBeLessThanOrEqual(3);
+    expect(throttle.knownGoodSize).toBeLessThanOrEqual(3);
     throttle.clear();
     expect(throttle.size).toBe(0);
+    expect(throttle.knownGoodSize).toBe(0);
+  });
+
+  it("caps the username part of a key", () => {
+    expect(pairKey("a", "x".repeat(10_000)).length).toBeLessThan(100);
   });
 
   it("reports no wait for an address it has never seen", () => {
     expect(new AuthThrottle().retryAfterSeconds("nobody")).toBe(0);
+    expect(new AuthThrottle().retryAfterSeconds("nobody", "u")).toBe(0);
   });
 });
 

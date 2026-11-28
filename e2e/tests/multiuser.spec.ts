@@ -16,6 +16,13 @@ import { join } from "node:path";
  * from a throwaway loopback server. The loopback forge is created by the admin
  * first, because a new host needs the admin or manage_forges.
  *
+ * That forge reaches a private address, so it is UNRESTRICTED, and on an
+ * unrestricted forge every repository is private whatever any fetch says
+ * (network position is the credential there). No real public forge is
+ * reachable from a test, so the cross-user visibility scenarios run on
+ * view_others_private: granted, a friend sees the other's repository; revoked,
+ * it answers 404 exactly like one that does not exist.
+ *
  * Serial: each test builds on what the one before it left behind.
  */
 test.describe.configure({ mode: "serial" });
@@ -177,8 +184,9 @@ test("the admin seeds the loopback forge and one repository only the admin can s
   await importAs(admin, withAccount);
   const secret = await waitSynced(admin, names.secret);
   expect(secret.isPrivate, "an authenticated fetch of a generic forge is private").toBe(true);
-  // The seed was fetched anonymously, so anyone could have: public.
-  expect(seed.isPrivate).toBe(false);
+  // Fetched anonymously, but on an unrestricted forge: that only proves Amber
+  // could reach it, so it stays private.
+  expect(seed.isPrivate, "an unrestricted forge never derives public").toBe(true);
 });
 
 test("the admin's Users page lists both friends, toggles a permission and sets a cap", async () => {
@@ -275,9 +283,9 @@ test("friend A imports a repository through the UI and it is theirs", async () =
     page.locator(".repo-cell__name", { hasText: row.displayName }).first(),
   ).toBeVisible();
 
-  // The admin sees it too, and the owner column names friend A.
+  // The admin sees it too. Anonymous, but on an unrestricted forge: private.
   const seen = await find(admin, names.a);
-  expect(seen?.isPrivate, "fetched anonymously, so public").toBe(false);
+  expect(seen?.isPrivate, "an unrestricted forge never derives public").toBe(true);
 });
 
 test("friend A cannot see the admin's private repository", async () => {
@@ -286,7 +294,21 @@ test("friend A cannot see the admin's private repository", async () => {
   expect((await a.get(`/api/repos/${String(secret.id)}`)).status()).toBe(404);
 });
 
-test("friend B sees A's public repository but cannot change it", async () => {
+test("friend B cannot see A's private repository until granted view_others_private", async () => {
+  const mine = (await find(a, names.a))!;
+  // With the defaults (view_others_public only) B sees neither A's repository
+  // nor the admin's: both are private.
+  expect(await find(b, names.a)).toBeUndefined();
+  expect(await find(b, names.secret)).toBeUndefined();
+  expect((await b.get(`/api/repos/${String(mine.id)}`)).status()).toBe(404);
+
+  const { page: adminPage } = await open(ADMIN);
+  await adminPage.goto("/users");
+  await toggle(adminPage, FRIEND_B, "view_others_private");
+  expect((await b.get(`/api/repos/${String(mine.id)}`)).status()).toBe(200);
+});
+
+test("friend B sees A's repository but cannot change it", async () => {
   const mine = (await find(a, names.a))!;
   const { page } = await open(FRIEND_B);
 
@@ -304,16 +326,13 @@ test("friend B sees A's public repository but cannot change it", async () => {
   const deleted = await b.delete(`/api/repos/${String(mine.id)}`);
   expect(deleted.status()).toBe(403);
   expect((await find(a, names.a))?.id).toBe(mine.id);
-
-  // And B cannot see the private repository either.
-  expect(await find(b, names.secret)).toBeUndefined();
 });
 
-test("turning off view_others_public hides A's repository from B entirely", async () => {
+test("turning off view_others_private hides A's repository from B entirely", async () => {
   const mine = (await find(a, names.a))!;
   const { page } = await open(ADMIN);
   await page.goto("/users");
-  await toggle(page, FRIEND_B, "view_others_public");
+  await toggle(page, FRIEND_B, "view_others_private");
 
   // A repository B cannot view answers exactly like one that does not exist.
   expect(await find(b, names.a)).toBeUndefined();
@@ -322,6 +341,8 @@ test("turning off view_others_public hides A's repository from B entirely", asyn
   const { page: bPage } = await open(FRIEND_B);
   await bPage.goto("/");
   await expect(bPage.locator(".repo-cell__name", { hasText: mine.displayName })).toHaveCount(0);
+  // The admin's private repository is gone from B's view again too.
+  expect(await find(b, names.secret)).toBeUndefined();
 });
 
 test("a personal git credential clones what the user can view and nothing else", async () => {

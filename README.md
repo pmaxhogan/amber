@@ -107,9 +107,11 @@ By default Amber is admin-only. To let a few friends in:
    policy's id) in `.env`. Set all three or none. Restart Amber.
 4. Open the Users page. Amber reads the policy every five minutes (the page has a refresh
    button), and each address in it appears with the default permissions and a
-   default storage cap of 5 GB. The admin adjusts the
-   permissions and the cap per person there, can revoke someone's git password,
-   and can adopt the repositories of a user who has left.
+   default storage cap of 5 GB. At the cap new imports are refused; at twice
+   the cap that person's repositories stop syncing until they free space. The
+   admin adjusts the permissions and the cap per person there, can revoke
+   someone's git password, and can adopt the repositories of a user who has left
+   (adopted repositories fetch anonymously until the admin says otherwise).
 5. Each person creates their own git password on the Git Remote page (shown
    once). It only reaches the repositories that person can see. The admin turns
    the git remote on or off for everyone.
@@ -117,6 +119,12 @@ By default Amber is admin-only. To let a few friends in:
 Removing an email from the policy removes that person's web and git access
 within about a minute, and deletes their git password. Their repositories stay
 and keep syncing until the admin adopts or deletes them.
+
+New hosts are restricted to public addresses on the standard port, even when the
+admin imports from them. To back up from a server on your LAN or on an odd port,
+first add it on the forges page with "allow private network" switched on, then
+import. github.com, gitlab.com, bitbucket.org and codeberg.org follow renamed
+repository redirects and fetch LFS content; other restricted hosts do neither.
 
 For local development you can set `INSECURE_ALLOW_PUBLIC_ACCESS=1`, which skips
 authentication entirely. Amber then binds `127.0.0.1` only, no matter what

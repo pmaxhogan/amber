@@ -2,9 +2,11 @@ import type { ResolvedSettings, SyncErrorKind, SyncRun } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
 import {
+  CAP_CEILING_ERROR,
   CAP_REACHED_ERROR,
   CAP_WOULD_NOT_FIT_ERROR,
   firstCloneFacts,
+  isAtCapCeiling,
   markFirstCloneRefused,
   remainingAllowanceBytes,
 } from "../domain/caps.ts";
@@ -458,13 +460,15 @@ export class Scheduler {
    * cap, it does not start; where the forge reports a size that would not fit
    * the remaining allowance, it does not start either. Both mark the repo
    * "storage cap reached" and retry on its normal schedule. Manual syncs go
-   * through here too. An unknown size lets the clone proceed.
+   * through here too. An unknown size lets the clone proceed. A renamed repo
+   * counts as a first clone (firstCloneFacts), and the twice-the-cap ceiling
+   * is checked here for EVERY sync of a capped owner.
    */
   async #firstCloneGate(repoId: number, settings: ResolvedSettings): Promise<boolean> {
     const { db } = this.#options;
     const facts = firstCloneFacts(db, repoId);
     const owner = facts.cappedOwner;
-    if (!facts.firstClone || owner === null) {
+    if (owner === null) {
       return true;
     }
     const refuse = (message: string): false => {
@@ -472,10 +476,20 @@ export class Scheduler {
       const retryAt =
         now + jitteredIntervalMs(settings.sync_interval_minutes * 60_000, this.#options.random);
       markFirstCloneRefused(db, repoId, message, retryAt, now);
-      this.#log.info({ repoId, ownerUserId: owner.id }, "first clone refused by the storage cap");
+      this.#log.info({ repoId, ownerUserId: owner.id }, "sync refused by the storage cap");
       this.#options.events?.publish("repo.updated", { repoId });
       return false;
     };
+    // THE HARD CEILING (domain/caps.ts isAtCapCeiling), for every sync of a
+    // capped owner's repo, not only first clones. Refused like the gate below:
+    // no run row, so no backoff growth and no breaker effect, retried on the
+    // normal schedule.
+    if (isAtCapCeiling(db, owner)) {
+      return refuse(CAP_CEILING_ERROR);
+    }
+    if (!facts.firstClone) {
+      return true;
+    }
     if (isAtOrOverCap(db, owner)) {
       return refuse(CAP_REACHED_ERROR);
     }

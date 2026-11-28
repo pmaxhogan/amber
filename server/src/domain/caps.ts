@@ -12,7 +12,9 @@ import { getUser, userCapBytes, userUsageBytes, type User } from "./users.ts";
  *   imports would all pass the import-time check. The scheduler re-checks
  *   the cap right before a never-synced repo's first clone, refuses one the
  *   forge says would not fit, and runs a capped owner's first clones one at a
- *   time (sync/scheduler.ts).
+ *   time (sync/scheduler.ts). A PATH CHANGE puts a repo back through it;
+ * - the HARD CEILING at twice the cap (isAtCapCeiling): no sync of any repo
+ *   the owner has runs while they are at or above it.
  */
 
 export type CapTransition = "reached" | "cleared" | null;
@@ -54,8 +56,21 @@ export const CAP_WOULD_NOT_FIT_ERROR =
   "remaining allowance, so its first backup has not started. It will be tried again on its " +
   "normal schedule.";
 
+export const CAP_CEILING_ERROR =
+  "Storage cap exceeded: the owner is using at least twice their storage cap, so this " +
+  "repository's syncs are paused until usage drops or the cap is raised. Amber is keeping " +
+  "the backup it has.";
+
+/** The hard ceiling is this many times the user's cap. */
+export const CAP_CEILING_FACTOR = 2;
+
 export interface FirstCloneFacts {
-  /** The repo has never synced successfully: the next run is its first clone. */
+  /**
+   * The next run is a first clone: the repo has never synced successfully, or
+   * its path changed since it last did (`first_clone_gate_path`). A rename
+   * points the row at a different upstream of unknown size, so it goes back
+   * through the same gate as a new import.
+   */
   firstClone: boolean;
   /** The owner, when they are capped (not the admin). Null otherwise. */
   cappedOwner: User | null;
@@ -63,8 +78,12 @@ export interface FirstCloneFacts {
 
 /** Whether the next sync of this repo is a capped owner's first clone. */
 export function firstCloneFacts(db: Db, repoId: number): FirstCloneFacts {
-  const row = db.get<{ owner_user_id: number | null; last_success_at: number | null }>(
-    "SELECT owner_user_id, last_success_at FROM repos WHERE id = ?",
+  const row = db.get<{
+    owner_user_id: number | null;
+    last_success_at: number | null;
+    first_clone_gate_path: string | null;
+  }>(
+    "SELECT owner_user_id, last_success_at, first_clone_gate_path FROM repos WHERE id = ?",
     repoId,
   );
   if (row === undefined) {
@@ -72,9 +91,24 @@ export function firstCloneFacts(db: Db, repoId: number): FirstCloneFacts {
   }
   const owner = row.owner_user_id === null ? undefined : getUser(db, row.owner_user_id);
   return {
-    firstClone: row.last_success_at === null,
+    firstClone: row.last_success_at === null || row.first_clone_gate_path !== null,
     cappedOwner: owner === undefined || owner.isAdmin ? null : owner,
   };
+}
+
+/**
+ * THE HARD CEILING: a non-admin owner using at least CAP_CEILING_FACTOR times
+ * their cap. While they are there, none of their repos syncs.
+ *
+ * "Existing repos keep syncing at the cap" stays true, but without a ceiling
+ * it would be unbounded: clone-setting edits on existing repos (full history,
+ * every ref, LFS, paranoid archives) and upstreams that simply grow could
+ * take a capped user arbitrarily far past their cap and fill the disk for
+ * everyone. Twice the cap leaves real headroom for ordinary growth.
+ */
+export function isAtCapCeiling(db: Db, owner: User): boolean {
+  const capBytes = userCapBytes(db, owner);
+  return capBytes !== null && userUsageBytes(db, owner.id) >= capBytes * CAP_CEILING_FACTOR;
 }
 
 /** Bytes the owner may still use, or null when uncapped. Never negative. */

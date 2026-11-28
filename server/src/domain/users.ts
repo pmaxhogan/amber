@@ -81,8 +81,52 @@ const USER_COLUMNS = `id, email, is_admin, permissions, storage_cap_bytes, git_u
   git_password_hash, git_rotated_at, removed_at, last_seen_at, cap_notified_at,
   created_at, updated_at`;
 
-export function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
+/** Printable ASCII with no spaces: what a real address from Access looks like. */
+const PLAIN_ASCII = /^[\x21-\x7e]+$/;
+
+/**
+ * THE one place an email is normalized: trimmed and lower cased, or null when
+ * it is empty or not plain printable ASCII.
+ *
+ * The ASCII test runs BEFORE lower casing, and that order is the point.
+ * Unicode case mapping can turn a non-ASCII address into an ASCII one (the
+ * Kelvin sign U+212A lower-cases to "k"), so an identity provider vouching for
+ * a lookalike address would otherwise compare equal to the admin's. Every
+ * caller treats null as "nobody": an identity with such an email is refused
+ * as not_a_user, and a policy entry with one is skipped.
+ */
+export function normalizeEmail(email: string): string | null {
+  const trimmed = email.trim();
+  if (trimmed === "" || !PLAIN_ASCII.test(trimmed)) {
+    return null;
+  }
+  return trimmed.toLowerCase();
+}
+
+/**
+ * Normalize a list, dropping every entry normalizeEmail refuses. The count of
+ * dropped entries is logged at warn (never the addresses themselves).
+ */
+export function normalizeEmailList(emails: Iterable<string>, log?: Pick<Logger, "warn">): string[] {
+  const out: string[] = [];
+  let skipped = 0;
+  for (const email of emails) {
+    const normalized = normalizeEmail(email);
+    if (normalized === null) {
+      if (email.trim() !== "") {
+        skipped += 1;
+      }
+      continue;
+    }
+    out.push(normalized);
+  }
+  if (skipped > 0) {
+    log?.warn(
+      { skipped },
+      "skipped access policy emails that are not plain ASCII; those people cannot sign in",
+    );
+  }
+  return out;
 }
 
 function parseStoredPermissions(raw: string): Permissions {
@@ -131,10 +175,11 @@ export function requireUser(db: Db, id: number): User {
 }
 
 export function findUserByEmail(db: Db, email: string): User | undefined {
-  const row = db.get<UserDbRow>(
-    `SELECT ${USER_COLUMNS} FROM users WHERE email = ?`,
-    normalizeEmail(email),
-  );
+  const normalized = normalizeEmail(email);
+  if (normalized === null) {
+    return undefined;
+  }
+  const row = db.get<UserDbRow>(`SELECT ${USER_COLUMNS} FROM users WHERE email = ?`, normalized);
   return row === undefined ? undefined : toUser(row);
 }
 
@@ -187,6 +232,10 @@ export function bootstrapAdmin(
       return admin;
     }
     const email = normalizeEmail(adminEmail);
+    if (email === null) {
+      // Config refuses this already; never point the admin row at it.
+      throw new Error("AMBER_ADMIN_EMAIL must be a plain ASCII address.");
+    }
     if (admin.email === email) {
       return admin;
     }
@@ -238,14 +287,11 @@ export function reconcileUsers(
   db: Db,
   emails: Iterable<string>,
   now: number = Date.now(),
+  log?: Pick<Logger, "warn">,
 ): ReconcileChanges {
-  const wanted = new Set<string>();
-  for (const email of emails) {
-    const normalized = normalizeEmail(email);
-    if (normalized !== "") {
-      wanted.add(normalized);
-    }
-  }
+  // A non-ASCII entry is skipped (and counted in a warn): it gets no row, so
+  // it can never be the identity anything resolves to.
+  const wanted = new Set<string>(normalizeEmailList(emails, log));
 
   return db.tx(() => {
     const changes: ReconcileChanges = { created: 0, removed: 0, restored: 0 };
@@ -303,6 +349,9 @@ export function reconcileUsers(
  */
 export function ensureMemberRow(db: Db, email: string, now: number = Date.now()): User {
   const normalized = normalizeEmail(email);
+  if (normalized === null) {
+    throw new Error("Refusing to create a user row for an address that is not plain ASCII");
+  }
   const existing = findUserByEmail(db, normalized);
   if (existing !== undefined) {
     return existing;
@@ -404,6 +453,11 @@ export function touchLastSeen(db: Db, user: User, now: number = Date.now()): voi
  * The admin becomes the owner of every repository `fromUserId` owns, and each
  * one's account override is cleared: an override names an account of the OLD
  * owner, and no user's token may fetch for someone else.
+ *
+ * Every adopted repo is also set `force_anonymous = 1`. Clearing the override
+ * alone would let the repo resolve the ADMIN'S default account on its forge,
+ * so the admin's token would start fetching paths a friend chose. The admin
+ * can turn anonymous off per repo, deliberately, once they have looked.
  */
 export function adoptRepos(db: Db, fromUserId: number, now: number = Date.now()): number {
   return db.tx(() => {
@@ -413,7 +467,8 @@ export function adoptRepos(db: Db, fromUserId: number, now: number = Date.now())
     }
     const admin = getAdminUser(db);
     return db.run(
-      `UPDATE repos SET owner_user_id = ?, account_override_id = NULL, updated_at = ?
+      `UPDATE repos
+          SET owner_user_id = ?, account_override_id = NULL, force_anonymous = 1, updated_at = ?
         WHERE owner_user_id = ?`,
       admin.id,
       now,
@@ -452,7 +507,14 @@ export function userCapBytes(db: Db, user: User): number | null {
 export function userStorage(db: Db, user: User): StorageUsage {
   const usedBytes = userUsageBytes(db, user.id);
   const capBytes = userCapBytes(db, user);
-  return { usedBytes, capBytes, overCap: capBytes !== null && usedBytes >= capBytes };
+  return {
+    usedBytes,
+    capBytes,
+    overCap: capBytes !== null && usedBytes >= capBytes,
+    // The same rule as domain/caps.ts isAtCapCeiling (twice the cap), kept in
+    // step by a test; caps.ts imports this module, not the other way round.
+    atCeiling: capBytes !== null && usedBytes >= capBytes * 2,
+  };
 }
 
 /** True when a new repository must be refused for this user. The admin never is. */

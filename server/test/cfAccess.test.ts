@@ -348,7 +348,9 @@ describe("cfAccessPlugin request guarding", () => {
     await app.close();
   });
 
-  it("records the email claim lower cased", async () => {
+  // Lower casing is identity.ts's job (normalizeEmail), which must see the
+  // characters as signed to refuse a non-ASCII lookalike before case folding.
+  it("records the email claim as signed, only trimmed", async () => {
     const app = Fastify({ loggerInstance: createConsoleLogger("silent") });
     await app.register(cfAccessPlugin, { config: secureConfig(), getKey });
     app.get("/api/whoami", (request) => ({ email: request.cfAccess?.email }));
@@ -356,9 +358,9 @@ describe("cfAccessPlugin request guarding", () => {
     const response = await app.inject({
       method: "GET",
       url: "/api/whoami",
-      headers: { [CF_ACCESS_HEADER]: await makeToken({ email: "Admin@Example.COM" }) },
+      headers: { [CF_ACCESS_HEADER]: await makeToken({ email: " Admin@Example.COM " }) },
     });
-    expect(response.json()).toEqual({ email: "admin@example.com" });
+    expect(response.json()).toEqual({ email: "Admin@Example.COM" });
     await app.close();
   });
 

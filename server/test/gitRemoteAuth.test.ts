@@ -21,7 +21,7 @@ import {
   mintGitCredential,
   toGitRemoteMe,
 } from "../src/gitremote/credentials.ts";
-import { AuthThrottle, DEFAULT_THROTTLE_CAPACITY } from "../src/gitremote/throttle.ts";
+import { AuthThrottle, DEFAULT_THROTTLE_ADDRESS_CAPACITY } from "../src/gitremote/throttle.ts";
 import type { MembershipDecision } from "../src/security/accessPolicy.ts";
 import { SCRYPT_PARAMS, verifyGitPassword } from "../src/security/gitPassword.ts";
 import { createTempDb, type TempDb } from "./helpers.ts";
@@ -82,11 +82,11 @@ function userId(email: string): number {
  */
 function failuresCharged(): number {
   let left = 0;
-  while (throttle.allow(IP) && left < 100) {
-    throttle.recordFailure(IP);
+  while (throttle.allowAddress(IP) && left < 100) {
+    throttle.recordFailure(IP, `probe${String(left)}`);
     left += 1;
   }
-  return DEFAULT_THROTTLE_CAPACITY - left;
+  return DEFAULT_THROTTLE_ADDRESS_CAPACITY - left;
 }
 
 beforeEach(() => {
@@ -236,8 +236,8 @@ describe("the /git authentication order", () => {
 
   it("2. throttles an address with no budget left, before deriving anything", async () => {
     const minted = mintGitCredential(temp.db, userId(FRIEND));
-    for (let index = 0; index < 10; index += 1) {
-      throttle.recordFailure(IP);
+    for (let index = 0; index < DEFAULT_THROTTLE_ADDRESS_CAPACITY; index += 1) {
+      throttle.recordFailure(IP, `spray${String(index)}`);
     }
     const result = await attempt(basic(minted.username, minted.password));
     expect(result).toMatchObject({ ok: false, status: 429, reason: "throttled" });
@@ -368,14 +368,35 @@ describe("the /git authentication order", () => {
     expect(result).toMatchObject({ ok: false, status: 401, reason: "changed" });
   });
 
-  it("accepts a member with a live credential and clears the address", async () => {
+  it("accepts a member with a live credential and clears only that (address, username)", async () => {
     const id = userId(FRIEND);
     const minted = mintGitCredential(temp.db, id);
-    throttle.recordFailure(IP);
+    throttle.recordFailure(IP, minted.username);
+    throttle.recordFailure(IP, "someoneelse");
     const result = await attempt(basic(minted.username, minted.password));
     expect(result).toMatchObject({ ok: true, user: { id, email: FRIEND } });
     expect(membership.calls).toEqual([FRIEND]);
-    expect(throttle.size).toBe(0);
+    // The address bucket and the other username's pair keep their charges: a
+    // valid credential must not reset anyone else's guessing budget.
+    expect(throttle.size).toBe(2);
+    expect(failuresCharged()).toBe(2);
+  });
+
+  it("lets a user in from their known address after someone sprays it dry", async () => {
+    const id = userId(FRIEND);
+    const minted = mintGitCredential(temp.db, id);
+    expect(await attempt(basic(minted.username, minted.password))).toMatchObject({ ok: true });
+    for (let index = 0; index < DEFAULT_THROTTLE_ADDRESS_CAPACITY; index += 1) {
+      const sprayed = await attempt(basic(`spray${String(index)}aa`, "wrong"));
+      expect(sprayed).toMatchObject({ ok: false, status: 401 });
+    }
+    // A stranger at that address is throttled now...
+    expect(await attempt(basic("strangerab", "wrong"))).toMatchObject({ status: 429 });
+    // ...but the user who logged in from it before is not locked out.
+    expect(await attempt(basic(minted.username, minted.password))).toMatchObject({
+      ok: true,
+      user: { id },
+    });
   });
 
   it("does not let one user's password open another user's username", async () => {

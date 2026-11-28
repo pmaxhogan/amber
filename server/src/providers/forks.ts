@@ -2,6 +2,7 @@ import type { ForgeKind } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
 import { resolveRepoAccountId } from "../domain/credentials.ts";
+import { effectiveIsPrivate } from "../domain/forges.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
 import { buildBaseUrl, providerForKind, resolveToken } from "./discovery.ts";
@@ -184,23 +185,47 @@ function contextFor(
  * upstream stops being shown to others. null is a NON-answer (rate limit,
  * network, 5xx): it only stamps the ask and leaves the flag alone. Returns
  * true when is_private changed.
+ *
+ * On an unrestricted forge every answer is "private" (domain/forges.ts
+ * effectiveIsPrivate): there the API saying public proves nothing about who
+ * else may see it.
  */
-function writeVisibility(db: Db, repoId: number, isPrivate: boolean | null, at: number): boolean {
+function writeVisibility(
+  db: Db,
+  row: Pick<PendingRow, "id" | "path" | "allow_private_network">,
+  answer: boolean | null,
+  at: number,
+): boolean {
+  const isPrivate =
+    answer === null ? null : effectiveIsPrivate(answer, row.allow_private_network !== 0);
+  // Every write is guarded on the path that was ASKED about: a rename that
+  // landed while the lookup was in flight names a different upstream, and
+  // the old path's answer (or its "checked" stamp) must not be pinned on it.
   const before = db.get<{ is_private: number }>(
-    "SELECT is_private FROM repos WHERE id = ?",
-    repoId,
+    "SELECT is_private FROM repos WHERE id = ? AND path = ?",
+    row.id,
+    row.path,
   );
+  if (before === undefined) {
+    return false;
+  }
   if (isPrivate === null) {
-    db.run("UPDATE repos SET visibility_checked_at = ? WHERE id = ?", at, repoId);
+    db.run(
+      "UPDATE repos SET visibility_checked_at = ? WHERE id = ? AND path = ?",
+      at,
+      row.id,
+      row.path,
+    );
     return false;
   }
   db.run(
-    "UPDATE repos SET is_private = ?, visibility_checked_at = ? WHERE id = ?",
+    "UPDATE repos SET is_private = ?, visibility_checked_at = ? WHERE id = ? AND path = ?",
     isPrivate ? 1 : 0,
     at,
-    repoId,
+    row.id,
+    row.path,
   );
-  return before !== undefined && (before.is_private !== 0) !== isPrivate;
+  return (before.is_private !== 0) !== isPrivate;
 }
 
 /**
@@ -287,7 +312,7 @@ export async function lookupRepoInfo(
     cooldowns.set(cooldownKey(row.forge_id, accountId), now() + FORK_RATE_LIMIT_COOLDOWN_MS);
     return info;
   }
-  if (writeVisibility(db, row.id, info.isPrivate, now())) {
+  if (writeVisibility(db, row, info.isPrivate, now())) {
     deps.onResolved?.(row.id);
   }
   return info;
@@ -390,7 +415,7 @@ export async function resolvePendingForks(
       }
 
       const at = now();
-      let changed = writeVisibility(db, row.id, info.isPrivate, at);
+      let changed = writeVisibility(db, row, info.isPrivate, at);
       if (info.isPrivate !== null) {
         result.visibilityResolved = (result.visibilityResolved ?? 0) + 1;
       }

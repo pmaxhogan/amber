@@ -336,6 +336,12 @@ export interface RepoRunPatch {
    * is never overwritten, and any success clears it.
    */
   goneAt?: number | null;
+  /**
+   * The path this run fetched. A success clears the first-clone cap gate only
+   * when it fetched the path the gate is waiting on: a fetch of the OLD path
+   * that finishes after a rename proves nothing about the new upstream.
+   */
+  fetchedPath?: string;
 }
 
 /** Denormalized repo fields the listing screen reads without joining runs. */
@@ -345,6 +351,8 @@ export function applyRunToRepo(db: Db, repoId: number, patch: RepoRunPatch): voi
       `UPDATE repos
           SET last_sync_at = ?, last_success_at = ?, last_seen_at = ?, last_error = NULL,
               consecutive_failures = 0, gone_at = NULL, next_sync_at = ?, disk_usage_bytes = ?, default_branch = ?, last_fetch_head = ?,
+              first_clone_gate_path = CASE WHEN first_clone_gate_path = ? THEN NULL
+                                           ELSE first_clone_gate_path END,
               updated_at = ?
         WHERE id = ?`,
       patch.now,
@@ -354,6 +362,7 @@ export function applyRunToRepo(db: Db, repoId: number, patch: RepoRunPatch): voi
       patch.diskUsageBytes,
       patch.defaultBranch,
       patch.lastFetchHead,
+      patch.fetchedPath ?? null,
       patch.now,
       repoId,
     );

@@ -183,8 +183,24 @@ describe("storage cap banner", () => {
     expect(banner.text()).toContain("5.00 GB of 5.00 GB");
     expect(banner.text()).toContain("New imports are refused");
     expect(banner.text()).toContain("keep syncing");
+    expect(banner.text()).toContain("twice your limit");
     // Not dismissible: there is no button on it.
     expect(banner.find("button").exists()).toBe(false);
+  });
+
+  it("says syncing is paused once the user is at twice the cap", async () => {
+    const me: Me = {
+      ...makeUser(),
+      storage: {
+        usedBytes: 10 * 1024 ** 3,
+        capBytes: 5 * 1024 ** 3,
+        overCap: true,
+        atCeiling: true,
+      },
+    };
+    const banner = (await mountApp(me)).wrapper.find('[data-testid="cap-banner"]');
+    expect(banner.text()).toContain("syncing is paused");
+    expect(banner.text()).not.toContain("keep syncing");
   });
 
   it("is absent under the cap and for the admin", async () => {

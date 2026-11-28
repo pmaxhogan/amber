@@ -1,3 +1,5 @@
+import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach } from "vitest";
 import { setDefaultResolver, type HostResolver } from "../../src/security/egress.ts";
 
@@ -33,4 +35,86 @@ export function usePublicDns(resolver: HostResolver = fakeDns({}, [PUBLIC_V4])):
   afterEach(() => {
     setDefaultResolver(refuseAllDns);
   });
+}
+
+/** Subcommands that talk to a remote. */
+export const NETWORK_GIT_COMMANDS: ReadonlySet<string> = new Set([
+  "fetch",
+  "ls-remote",
+  "clone",
+  "lfs",
+]);
+
+/** The git subcommand of a full argv, skipping `-c key=value` pairs. */
+export function gitSubcommand(args: readonly string[]): string {
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === "-c") {
+      i += 1;
+      continue;
+    }
+    if (!(args[i] ?? "").startsWith("-")) {
+      return args[i] ?? "";
+    }
+  }
+  return "";
+}
+
+export interface RecordingGit {
+  /** Pass as SyncRepoDeps.gitBinary. */
+  binary: string;
+  /** Every argv git was started with, in order. */
+  invocations(): string[][];
+  /** Only the ones that would have talked to a remote. */
+  networkCalls(): string[][];
+  /** Forget what was recorded so far. */
+  reset(): void;
+}
+
+/**
+ * A git wrapper for syncs of restricted forges, which can only ever fetch
+ * over http(s) on a standard port and so cannot reach a test origin. Local
+ * commands run the real git; anything that would contact a remote is
+ * recorded and answered with an empty success, so a sync completes (with
+ * nothing fetched) and nothing ever leaves the machine.
+ */
+export function createRecordingGit(dir: string): RecordingGit {
+  const binary = join(dir, "recording-git.mjs");
+  const logPath = join(dir, "recording-git.ndjson");
+  writeFileSync(
+    binary,
+    `#!/usr/bin/env node
+import { appendFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(logPath)}, JSON.stringify(args) + "\\n");
+let sub = "";
+for (let i = 0; i < args.length; i += 1) {
+  if (args[i] === "-c") { i += 1; continue; }
+  if (!args[i].startsWith("-")) { sub = args[i]; break; }
+}
+if (${JSON.stringify([...NETWORK_GIT_COMMANDS])}.includes(sub)) {
+  process.exit(0);
+}
+const result = spawnSync("git", args, { stdio: "inherit" });
+process.exit(result.status ?? 1);
+`,
+    "utf8",
+  );
+  chmodSync(binary, 0o755);
+  const invocations = (): string[][] =>
+    existsSync(logPath)
+      ? readFileSync(logPath, "utf8")
+          .split("\n")
+          .filter((line) => line !== "")
+          .map((line) => JSON.parse(line) as string[])
+      : [];
+  return {
+    binary,
+    invocations,
+    networkCalls: () =>
+      invocations().filter((args) => NETWORK_GIT_COMMANDS.has(gitSubcommand(args))),
+    reset: () => {
+      rmSync(logPath, { force: true });
+    },
+  };
 }

@@ -488,11 +488,13 @@ ALTER TABLE repos ADD COLUMN owner_checked_at INTEGER NULL;
  *   every existing row is assigned to the admin. SQLite cannot add a NOT NULL
  *   foreign key column without a default, and with foreign keys on an added
  *   REFERENCES column must default to NULL, so the columns are nullable and
- *   triggers make them NOT NULL in effect: an insert without an owner gets the
- *   admin, and an update can never clear one. Domain inserts also name the
- *   owner explicitly.
+ *   triggers make them NOT NULL in effect: an insert without an owner, or an
+ *   update that clears one, is ABORTED (never quietly handed to the admin).
+ *   Domain inserts name the owner explicitly.
  * - repos.is_private starts at 1 for everything: nothing is exposed by the
  *   upgrade, and the visibility pass flips the confirmed-public ones.
+ * - repos.first_clone_gate_path marks a renamed repo for the first-clone cap
+ *   gate (domain/caps.ts) without touching last_success_at.
  * - forges.allow_private_network defaults to 0 (restricted), but the forges
  *   that exist were all made by the admin, so they are backfilled to 1.
  * - The instance-wide git credential is deleted. `git_remote.enabled` stays
@@ -541,13 +543,28 @@ VALUES (
 ALTER TABLE repos ADD COLUMN owner_user_id INTEGER NULL REFERENCES users (id) ON DELETE RESTRICT;
 ALTER TABLE repos ADD COLUMN is_private INTEGER NOT NULL DEFAULT 1 CHECK (is_private IN (0, 1));
 ALTER TABLE repos ADD COLUMN visibility_checked_at INTEGER NULL;
+-- The path whose first clone still has to pass the storage-cap gate, set by a
+-- path change and cleared by the first successful fetch OF THAT PATH. A
+-- renamed repo has synced before (last_success_at is set, and gone detection
+-- relies on that), yet the new upstream can be any size.
+ALTER TABLE repos ADD COLUMN first_clone_gate_path TEXT NULL;
 UPDATE repos SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1);
 CREATE INDEX idx_repos_owner ON repos (owner_user_id);
 
 ALTER TABLE forges
   ADD COLUMN allow_private_network INTEGER NOT NULL DEFAULT 0
   CHECK (allow_private_network IN (0, 1));
-UPDATE forges SET allow_private_network = 1;
+-- Backfill: a forge the admin added may well be on their LAN, so it keeps
+-- reaching private networks (1). The well-known public forges are restricted
+-- (0) instead: 003 seeds github.com and gitlab.com on every install, so "the
+-- admin made it" is not true of them, and they are exactly where a hostile
+-- repository's .lfsconfig or a redirect would otherwise be followed unpinned.
+-- Only the bare hosts on their default port; anything else is the admin's.
+-- KEEP IN SYNC with WELL_KNOWN_PUBLIC_FORGE_HOSTS in security/egress.ts (a
+-- migration cannot import app code); migration010.test.ts asserts they match.
+UPDATE forges SET allow_private_network = CASE
+  WHEN port IS NULL AND host IN ('github.com', 'gitlab.com', 'bitbucket.org', 'codeberg.org')
+  THEN 0 ELSE 1 END;
 
 ALTER TABLE accounts ADD COLUMN owner_user_id INTEGER NULL REFERENCES users (id) ON DELETE RESTRICT;
 UPDATE accounts SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1);

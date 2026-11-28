@@ -116,8 +116,26 @@ function originKey(origin: ForgeOrigin): string {
   return `${origin.protocol}://${origin.host.toLowerCase()}:${String(origin.port ?? "")}`;
 }
 
-function failLine(result: ImportLineResult, message: string, code?: string): ImportLineResult {
-  return { ...result, status: "error", message, ...(code === undefined ? {} : { code }) };
+function failLine(
+  result: ImportLineResult,
+  message: string,
+  code?: string,
+  reason?: string,
+): ImportLineResult {
+  return {
+    ...result,
+    status: "error",
+    message,
+    ...(code === undefined ? {} : { code }),
+    ...(reason === undefined ? {} : { reason }),
+  };
+}
+
+/** A refusal as a line carries it. `reason` is the egress category, when there is one. */
+interface HostRefusal {
+  message: string;
+  code: string;
+  reason?: string;
 }
 
 /**
@@ -232,8 +250,8 @@ async function vetNewHosts(
   db: Db,
   importer: User,
   lines: readonly ImportLineResult[],
-): Promise<Map<string, { message: string; code: string } | null>> {
-  const verdicts = new Map<string, { message: string; code: string } | null>();
+): Promise<Map<string, HostRefusal | null>> {
+  const verdicts = new Map<string, HostRefusal | null>();
   for (const line of lines) {
     if (line.status === "error" || line.parsed === undefined) {
       continue;
@@ -257,7 +275,13 @@ async function vetNewHosts(
       verdicts.set(
         key,
         error instanceof DomainError
-          ? { message: error.message, code: error.code }
+          ? {
+              message: error.message,
+              code: error.code,
+              ...(typeof error.details?.["reason"] === "string"
+                ? { reason: error.details["reason"] }
+                : {}),
+            }
           : { message: HOST_NOT_ENABLED_MESSAGE, code: "host_not_enabled" },
       );
     }
@@ -301,7 +325,10 @@ export async function commitImport(
 
     const refusal = hostVerdicts.get(originKey(originOf(line.parsed)));
     if (refusal !== undefined && refusal !== null) {
-      results.push({ ...failLine(line, refusal.message, refusal.code), action: "failed" });
+      results.push({
+        ...failLine(line, refusal.message, refusal.code, refusal.reason),
+        action: "failed",
+      });
       failed += 1;
       continue;
     }

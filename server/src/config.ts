@@ -9,21 +9,32 @@ import { z } from "zod";
  * fundamental belongs in the settings registry, not here.
  */
 
+/**
+ * Printable ASCII, judged before lower casing, exactly like domain/users.ts
+ * normalizeEmail (config sits below the domain layer, so the rule is repeated
+ * rather than imported). An identity with any other address is refused, so
+ * configuring one would only lock that person out.
+ */
+const PLAIN_ASCII = /^[\x21-\x7e]+$/;
+const ASCII_MESSAGE = "email addresses must be plain ASCII";
+
 const csvEmails = z
   .string()
   .transform((raw) =>
     raw
       .split(",")
-      .map((part) => part.trim().toLowerCase())
+      .map((part) => part.trim())
       .filter((part) => part !== ""),
   )
-  .pipe(z.array(z.string().min(3)));
+  .pipe(z.array(z.string().min(3).regex(PLAIN_ASCII, ASCII_MESSAGE)))
+  .transform((parts) => parts.map((part) => part.toLowerCase()));
 
-/** One address, normalized the way the email claim is. */
+/** One address, normalized the way identity.ts normalizes the email claim. */
 const singleEmail = z
   .string()
-  .transform((raw) => raw.trim().toLowerCase())
-  .pipe(z.string().min(3).includes("@"));
+  .transform((raw) => raw.trim())
+  .pipe(z.string().min(3).includes("@").regex(PLAIN_ASCII, ASCII_MESSAGE))
+  .transform((raw) => raw.toLowerCase());
 
 /** Empty means "not set", so a blank line in a .env file is not a value. */
 const optionalString = z

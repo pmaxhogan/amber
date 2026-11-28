@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildApp, type AmberApp } from "../src/app.ts";
+import { buildApp, trustNearestProxy, type AmberApp } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import { openDb, type Db } from "../src/db/db.ts";
 import { migrate } from "../src/db/migrate.ts";
@@ -58,6 +58,52 @@ describe("buildApp", () => {
     const response = await app.inject({ method: "GET", url: "/api/repos" });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ rows: [], total: 0 });
+  });
+});
+
+describe("trustNearestProxy", () => {
+  it("believes exactly one hop, and only from a loopback or private peer", () => {
+    for (const peer of [
+      "127.0.0.1",
+      "::1",
+      "::ffff:127.0.0.1",
+      "172.18.0.2",
+      "10.1.2.3",
+      "fd00::5",
+    ]) {
+      expect(trustNearestProxy(peer, 0)).toBe(true);
+    }
+    // A direct client on a public address cannot hand us an X-Forwarded-For.
+    for (const peer of ["203.0.113.9", "8.8.8.8", "2606:4700::1", "not-an-ip"]) {
+      expect(trustNearestProxy(peer, 0)).toBe(false);
+    }
+    // Never a second hop, whatever it is.
+    expect(trustNearestProxy("127.0.0.1", 1)).toBe(false);
+    expect(trustNearestProxy("10.0.0.1", 2)).toBe(false);
+  });
+
+  it("makes request.ip the entry the nearest proxy appended, not the client's", async () => {
+    app.get("/whoami-test", { config: { authz: "public" } }, (request) => ({ ip: request.ip }));
+    const response = await app.inject({
+      method: "GET",
+      url: "/whoami-test",
+      headers: { "x-forwarded-for": "198.51.100.66, 203.0.113.5" },
+    });
+    expect(response.json()).toEqual({ ip: "203.0.113.5" });
+  });
+
+  it("ignores X-Forwarded-For from a peer on a public address", async () => {
+    app.get("/whoami-public-test", { config: { authz: "public" } }, (request) => ({
+      ip: request.ip,
+    }));
+    const response = await app.inject({
+      method: "GET",
+      url: "/whoami-public-test",
+      remoteAddress: "203.0.113.9",
+      headers: { "x-forwarded-for": "198.51.100.66, 10.0.0.1" },
+    });
+    // A direct client cannot pick its own address, spoofed or "private".
+    expect(response.json()).toEqual({ ip: "203.0.113.9" });
   });
 });
 

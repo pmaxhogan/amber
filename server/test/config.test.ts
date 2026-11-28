@@ -54,6 +54,22 @@ describe("loadConfig - authentication gate", () => {
       ConfigError,
     );
   });
+
+  it("rejects email addresses that are not plain ASCII, before case folding", () => {
+    // U+212A KELVIN SIGN lower-cases to "k"; it must not pass as kim@example.com.
+    for (const AMBER_ADMIN_EMAIL of ["\u212aim@example.com", "caf\u00e9@example.com"]) {
+      expect(() => loadConfig({ ...cfEnv, AMBER_ADMIN_EMAIL, DATA_DIR: "/d" })).toThrow(
+        /AMBER_ADMIN_EMAIL/,
+      );
+    }
+    expect(() =>
+      loadConfig({
+        INSECURE_ALLOW_PUBLIC_ACCESS: "1",
+        INSECURE_USER_EMAILS: "ok@example.com,\u212aok@example.com",
+        DATA_DIR: "/d",
+      }),
+    ).toThrow(/plain ASCII/);
+  });
 });
 
 describe("loadConfig - legacy CF_ACCESS_ALLOWED_EMAILS", () => {
