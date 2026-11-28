@@ -340,6 +340,20 @@ export function matchesVisibility(isPrivate: boolean, visibility: string): boole
  * private or deleted repository, so none of these may be read as "not a fork";
  * only rate limiting is told apart so the resolver can back off the forge.
  */
+/**
+ * What a FAILED single-repository GET says about visibility. A definitive
+ * refusal - 404, or 401/403 that is not a rate limit - means the repository
+ * is not visible to whoever asked, so it is private as far as Amber can
+ * tell (fail closed: a repo that went private upstream stops being shown).
+ * Anything else - rate limit, network, timeout, 5xx, a body that is not
+ * JSON - is no answer at all, and null leaves the stored flag alone.
+ */
+export function visibilityOnFailure(cause: unknown): boolean | null {
+  return cause instanceof ProviderError && (cause.kind === "not_found" || cause.kind === "auth")
+    ? true
+    : null;
+}
+
 export function forkLookupFailure(cause: unknown): { status: "unknown"; rateLimited: boolean } {
   return {
     status: "unknown",

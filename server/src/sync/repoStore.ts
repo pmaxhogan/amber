@@ -1,6 +1,7 @@
 import type { ForgeKind, ForgeProtocol, RepoState, SyncErrorKind, SyncRun } from "@amber/shared";
 import type { Db } from "../db/db.ts";
-import { getAccount, getDefaultAccount } from "../domain/accounts.ts";
+import { getAccount } from "../domain/accounts.ts";
+import { resolveRepoAccountId } from "../domain/credentials.ts";
 
 /**
  * The narrow slice of the data model the sync engine reads and writes. It is
@@ -23,6 +24,8 @@ export interface SyncRepoRow {
   defaultBranch: string | null;
   lastSuccessAt: number | null;
   goneAt: number | null;
+  /** The user who owns the repo. Decides which credential may be presented. */
+  ownerUserId: number | null;
 }
 
 export interface SyncForgeRow {
@@ -63,6 +66,7 @@ interface RepoDbRow {
   default_branch: string | null;
   last_success_at: number | null;
   gone_at: number | null;
+  owner_user_id: number | null;
   protocol: string;
   host: string;
   port: number | null;
@@ -72,7 +76,7 @@ interface RepoDbRow {
 const TARGET_SQL = `
   SELECT r.id, r.forge_id, r.path, r.display_name, r.slug, r.account_override_id,
          r.force_anonymous, r.state, r.next_sync_at, r.consecutive_failures,
-         r.default_branch, r.last_success_at, r.gone_at, f.protocol, f.host, f.port, f.kind
+         r.default_branch, r.last_success_at, r.gone_at, r.owner_user_id, f.protocol, f.host, f.port, f.kind
     FROM repos r
     JOIN forges f ON f.id = r.forge_id
    WHERE r.id = ?`;
@@ -97,6 +101,7 @@ export function loadSyncTarget(db: Db, repoId: number): SyncTarget | undefined {
       defaultBranch: row.default_branch,
       lastSuccessAt: row.last_success_at,
       goneAt: row.gone_at,
+      ownerUserId: row.owner_user_id,
     },
     forge: {
       id: row.forge_id,
@@ -153,28 +158,35 @@ export interface RepoAccount {
 }
 
 /**
- * The account whose credential a fetch should present: the repo override, or
- * the forge default. force_anonymous wins over both.
+ * The account whose credential a fetch should present, by the one rule in
+ * domain/credentials.ts: force_anonymous wins; then only the OWNER's own
+ * accounts, and only while the owner may use accounts at all.
  *
- * The forge check is the load bearing part. A credential is only ever
- * presented to its own forge, so an override that does not belong to the
- * repo's forge resolves to nothing rather than being used against a host it
- * was never registered for. repos.forge_id and accounts.forge_id are immutable
- * so that this stays true over a repo's lifetime.
+ * The forge check stays load bearing too: a credential is only ever presented
+ * to its own forge, so an account that does not belong to the repo's forge
+ * resolves to nothing. repos.forge_id and accounts.forge_id are immutable so
+ * that this stays true over a repo's lifetime.
  *
  * The secret itself is not read here: domain/accounts.ts getCredential owns
  * decryption, so there is exactly one place that turns secret_enc into a
  * password.
  */
 export function resolveRepoAccount(db: Db, target: SyncTarget): RepoAccount | undefined {
-  if (target.repo.forceAnonymous) {
+  const accountId = resolveRepoAccountId(db, {
+    forgeId: target.repo.forgeId,
+    ownerUserId: target.repo.ownerUserId,
+    accountOverrideId: target.repo.accountOverrideId,
+    forceAnonymous: target.repo.forceAnonymous,
+  });
+  if (accountId === null) {
     return undefined;
   }
-  const account =
-    target.repo.accountOverrideId === null
-      ? getDefaultAccount(db, target.repo.forgeId)
-      : getAccount(db, target.repo.accountOverrideId);
-  if (account === undefined || account.forgeId !== target.repo.forgeId) {
+  const account = getAccount(db, accountId);
+  if (
+    account === undefined ||
+    account.forgeId !== target.repo.forgeId ||
+    account.ownerUserId !== target.repo.ownerUserId
+  ) {
     return undefined;
   }
   return { id: account.id, username: account.username };

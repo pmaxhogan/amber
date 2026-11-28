@@ -21,7 +21,7 @@ import {
 } from "../browse/gitRun.ts";
 import { listCommits, readCommit } from "../browse/history.ts";
 import { listRefs, resolveRevision } from "../browse/refs.ts";
-import { getRepo } from "../domain/repos.ts";
+import { getRepoFor } from "../domain/repos.ts";
 import { repoDirFor } from "../repoDir.ts";
 import { sanitizeFilenamePart } from "./exports.ts";
 
@@ -51,13 +51,20 @@ export const browseRoutes: FastifyPluginAsync = async (app) => {
   const log = ctx.log.child({ mod: "browse" });
 
   /** Resolve the row, then the directory from the row, never from the URL. */
-  function locate(rawId: unknown, reply: FastifyReply): { repo: Repo; dir: string } | null {
+  function locate(
+    request: FastifyRequest,
+    rawId: unknown,
+    reply: FastifyReply,
+  ): { repo: Repo; dir: string } | null {
     const parsed = paramsSchema.safeParse({ id: rawId });
     if (!parsed.success) {
       reply.code(400).send({ error: "bad_request", message: "Invalid repository id" });
       return null;
     }
-    const repo = getRepo(ctx.db, parsed.data.id);
+    // One path for missing and invisible: a repo the caller cannot view gets
+    // exactly the answer a repo that does not exist gets.
+    const user = request.user;
+    const repo = user === undefined ? undefined : getRepoFor(ctx.db, parsed.data.id, user);
     if (repo === undefined) {
       reply.code(404).send({ error: "not_found", message: "Repository not found" });
       return null;
@@ -104,7 +111,7 @@ export const browseRoutes: FastifyPluginAsync = async (app) => {
 
   /** Params, then the repo row, shared by every endpoint. */
   function open(request: FastifyRequest, reply: FastifyReply): { repo: Repo; git: GitCtx } | null {
-    const located = locate((request.params as { id?: unknown }).id, reply);
+    const located = locate(request, (request.params as { id?: unknown }).id, reply);
     if (located === null) {
       return null;
     }

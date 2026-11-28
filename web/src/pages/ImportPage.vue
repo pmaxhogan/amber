@@ -9,7 +9,7 @@ import Textarea from "primevue/textarea";
 import type { ImportCommitResponse, ImportPreviewResponse } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
-import { pluralize } from "../lib/format.ts";
+import { IMPORT_FAILURE_LABELS, importFailureKind, pluralize } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
 import AppIcon from "../components/AppIcon.vue";
 import ErrorState from "../components/ErrorState.vue";
@@ -254,7 +254,18 @@ function statusIcon(status: string): string {
         </Column>
         <Column header="Notes">
           <template #body="{ data }">
-            <span v-if="data.message">{{ data.message }}</span>
+            <div
+              v-if="data.action === 'failed'"
+              class="import-failure"
+              data-testid="import-failure"
+            >
+              <Tag
+                :value="IMPORT_FAILURE_LABELS[importFailureKind(data.message)]"
+                severity="danger"
+              />
+              <span v-if="data.message">{{ data.message }}</span>
+            </div>
+            <span v-else-if="data.message">{{ data.message }}</span>
             <span v-else class="amber-muted">-</span>
           </template>
         </Column>
@@ -277,6 +288,13 @@ function statusIcon(status: string): string {
 .import-textarea {
   width: 100%;
   font-size: 0.85rem;
+}
+
+.import-failure {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
 
 .import-target-tag {

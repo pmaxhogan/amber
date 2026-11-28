@@ -1,6 +1,26 @@
 import type { AmberEvent, AmberEventType } from "@amber/shared";
 
-export type EventListener = (event: AmberEvent) => void;
+/**
+ * Server-side facts that travel WITH an event but are never serialized to a
+ * client. The SSE route writes only the AmberEvent itself, so anything here
+ * stays on the server.
+ */
+export interface EventMeta {
+  /**
+   * For `repo.deleted`: the ids of the users who could view the repository
+   * just before its row went away. Once the row is gone visibility can no
+   * longer be computed, so the publisher computes it first.
+   */
+  audience?: readonly number[];
+  /**
+   * For a sync that moved its owner from under to at-or-over their storage
+   * cap: that owner's user id, so the push notifier can tell them (and the
+   * admin).
+   */
+  capReachedUserId?: number;
+}
+
+export type EventListener = (event: AmberEvent, meta: EventMeta) => void;
 
 /**
  * In-process fan-out for live UI updates. routes/events.ts subscribes one
@@ -29,13 +49,13 @@ export class EventBus {
     };
   }
 
-  publish(type: AmberEventType, payload: Record<string, unknown> = {}): void {
+  publish(type: AmberEventType, payload: Record<string, unknown> = {}, meta: EventMeta = {}): void {
     const event: AmberEvent = { type, at: Date.now(), payload };
     for (const tap of this.#taps) {
-      tap(event);
+      tap(event, meta);
     }
     for (const listener of this.#listeners) {
-      listener(event);
+      listener(event, meta);
     }
   }
 

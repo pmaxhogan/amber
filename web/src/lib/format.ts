@@ -79,3 +79,25 @@ export function safeFileName(name: string): string {
 export function pluralize(count: number, singular: string, plural = `${singular}s`): string {
   return count === 1 ? `${count} ${singular}` : `${count} ${plural}`;
 }
+
+export type ImportFailureKind = "host_not_enabled" | "storage_cap_reached" | "not_imported";
+
+export const IMPORT_FAILURE_LABELS: Record<ImportFailureKind, string> = {
+  host_not_enabled: "Host not enabled",
+  storage_cap_reached: "Storage limit reached",
+  not_imported: "Could not import",
+};
+
+/**
+ * Name why an import line failed, from the line's message. The import results
+ * carry the server's wording and no machine-readable code, so this reads the
+ * wording; a line it does not recognise is the generic "could not import".
+ */
+export function importFailureKind(message: string | undefined): ImportFailureKind {
+  const text = (message ?? "").toLowerCase();
+  if (text.includes("host") && text.includes("not enabled")) return "host_not_enabled";
+  if (text.includes("storage") && (text.includes("cap") || text.includes("limit"))) {
+    return "storage_cap_reached";
+  }
+  return "not_imported";
+}

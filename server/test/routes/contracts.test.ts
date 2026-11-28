@@ -6,7 +6,10 @@ import {
   effectiveSettingsResponseSchema,
   eventPayloadSchemas,
   forgeSchema,
-  gitRemoteConfigSchema,
+  gitRemoteCredentialSchema,
+  gitRemoteMeSchema,
+  gitRemoteRevokeResponseSchema,
+  gitRemoteSwitchResponseSchema,
   pageSchema,
   repoSchema,
   scopeSettingsResponseSchema,
@@ -72,47 +75,54 @@ async function capture(run: () => Promise<unknown>): Promise<AmberEvent[]> {
 // Git remote config
 // ---------------------------------------------------------------------------
 
-describe("PATCH /api/git-remote", () => {
-  it("renames the user while the remote is disabled and mirrors GET", async () => {
-    const patched = await json("PATCH", "/api/git-remote", { username: "backups" });
-    expect(patched.statusCode).toBe(200);
+describe("/api/git-remote (the caller's own credential)", () => {
+  it("answers GET, rotate, revoke, enable and disable in the shared shapes", async () => {
+    const initial = gitRemoteMeSchema.parse((await json("GET", "/api/git-remote")).json());
+    expect(initial).toEqual({
+      enabled: false,
+      username: null,
+      hasPassword: false,
+      rotatedAt: null,
+      cloneUrlTemplate: null,
+    });
 
-    const body = gitRemoteConfigSchema.parse(patched.json());
-    expect(body.username).toBe("backups");
-    expect(body.enabled).toBe(false);
-    expect(body.cloneUrlTemplate).toContain("backups");
-
-    const fetched = await json("GET", "/api/git-remote");
-    expect(fetched.json()).toEqual(body);
-  });
-
-  it("renames the user while the remote is enabled without touching the password", async () => {
-    const enabled = await json("POST", "/api/git-remote/enable");
-    const before = enabled.json<{ password: string; rotatedAt: number }>();
-
-    const patched = await json("PATCH", "/api/git-remote", { username: "mirror" });
-    const body = gitRemoteConfigSchema.parse(patched.json());
-
-    expect(body.enabled).toBe(true);
-    expect(body.username).toBe("mirror");
-    // Renaming is not a rotation: the stored hash and its timestamp both stand.
-    expect(body.rotatedAt).toBe(before.rotatedAt);
-    expect(JSON.stringify(body)).not.toContain(before.password);
-  });
-
-  it("rejects a blank username instead of storing one nothing can authenticate as", async () => {
-    for (const username of ["", "   "]) {
-      const response = await json("PATCH", "/api/git-remote", { username });
-      expect(response.statusCode).toBe(400);
-    }
-    expect((await json("GET", "/api/git-remote")).json<{ username: string }>().username).toBe(
-      "amber",
+    const enabled = gitRemoteSwitchResponseSchema.parse(
+      (await json("POST", "/api/git-remote/enable")).json(),
     );
+    expect(enabled.enabled).toBe(true);
+
+    const minted = gitRemoteCredentialSchema.parse(
+      (await json("POST", "/api/git-remote/rotate")).json(),
+    );
+    expect(minted.username).toMatch(/^[a-z0-9]{10}$/);
+    expect(minted.password).toHaveLength(32);
+    expect(minted.hasPassword).toBe(true);
+    expect(minted.cloneUrlTemplate).toContain(`${minted.username}:{password}@`);
+
+    // GET mirrors the rotate answer minus the secret, and never carries it.
+    const after = await json("GET", "/api/git-remote");
+    const { password, ...rest } = minted;
+    expect(gitRemoteMeSchema.strict().parse(after.json())).toEqual(rest);
+    expect(after.body).not.toContain(password);
+
+    const revoked = gitRemoteRevokeResponseSchema.parse(
+      (await json("POST", "/api/git-remote/revoke")).json(),
+    );
+    expect(revoked).toMatchObject({
+      username: minted.username,
+      hasPassword: false,
+      rotatedAt: null,
+    });
+
+    const disabled = gitRemoteSwitchResponseSchema.parse(
+      (await json("POST", "/api/git-remote/disable")).json(),
+    );
+    expect(disabled.enabled).toBe(false);
   });
 
-  it("trims the username so a stray space cannot become part of the credential", async () => {
-    const patched = await json("PATCH", "/api/git-remote", { username: "  padded  " });
-    expect(gitRemoteConfigSchema.parse(patched.json()).username).toBe("padded");
+  it("no longer serves the instance-wide rename", async () => {
+    const response = await json("PATCH", "/api/git-remote", { username: "backups" });
+    expect(response.statusCode).toBe(404);
   });
 });
 

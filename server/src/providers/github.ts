@@ -2,6 +2,7 @@ import {
   encodeRepoPath,
   expectArray,
   forkLookupFailure,
+  visibilityOnFailure,
   getJson,
   matchesVisibility,
   normalizeRepoPath,
@@ -16,6 +17,7 @@ import type {
   ForkLookup,
   OwnerLookup,
   RepoAccess,
+  RepoInfo,
 } from "./types.ts";
 
 /**
@@ -64,6 +66,63 @@ interface GitHubRepo {
   description?: unknown;
   fork?: unknown;
   parent?: { full_name?: unknown } | null;
+  size?: unknown;
+}
+
+/**
+ * The visibility field, fail closed: public only when `private` is literally
+ * false and `visibility`, where present, says "public". Enterprise's
+ * "internal" is private for our purposes. Anything else is null (unknown).
+ */
+export function githubVisibility(raw: Pick<GitHubRepo, "private" | "visibility">): boolean | null {
+  if (raw.private === false && (raw.visibility === undefined || raw.visibility === "public")) {
+    return false;
+  }
+  if (raw.private === true || raw.visibility === "private" || raw.visibility === "internal") {
+    return true;
+  }
+  return null;
+}
+
+/** GitHub documents `size` in kilobytes; 0 is what a new repo reports before it is measured. */
+function githubSizeBytes(raw: Pick<GitHubRepo, "size">): number | null {
+  return typeof raw.size === "number" && Number.isFinite(raw.size) && raw.size > 0
+    ? Math.round(raw.size * 1024)
+    : null;
+}
+
+function githubFork(raw: GitHubRepo): ForkLookup {
+  if (raw.fork === true) {
+    const parent = parentPathOrNull(raw.parent?.full_name);
+    return parent === null ? { status: "unknown", rateLimited: false } : { status: "fork", parent };
+  }
+  return raw.fork === false ? { status: "not_fork" } : { status: "unknown", rateLimited: false };
+}
+
+async function githubRepoInfo(context: DiscoveryContext, path: string): Promise<RepoInfo> {
+  const encoded = encodeRepoPath(path);
+  if (encoded.split("/").length < 2) {
+    return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+  }
+  try {
+    const response = await getJson<GitHubRepo>(
+      context,
+      `${apiBase(context.baseUrl)}/repos/${encoded}`,
+      { headers: headers(context), notFoundHint: path },
+    );
+    return {
+      fork: githubFork(response.data),
+      // A 200 that does not say "public" is an answer: not public.
+      isPrivate: githubVisibility(response.data) ?? true,
+      sizeBytes: githubSizeBytes(response.data),
+    };
+  } catch (cause) {
+    return {
+      fork: forkLookupFailure(cause),
+      isPrivate: visibilityOnFailure(cause),
+      sizeBytes: null,
+    };
+  }
 }
 
 /** Cached per run: one GET /user answers "is this the account's own token". */
@@ -125,9 +184,8 @@ function toDiscovered(raw: GitHubRepo): DiscoveredRepo {
     path: normalizeRepoPath(raw.full_name),
     // Absent on the minimal-repository schema /users/{username}/repos returns.
     defaultBranch: typeof raw.default_branch === "string" ? raw.default_branch : null,
-    // visibility 'internal' (Enterprise) is private for our purposes.
-    isPrivate:
-      raw.private === true || raw.visibility === "private" || raw.visibility === "internal",
+    // Anything short of a confirmed "public" is private (githubVisibility).
+    isPrivate: githubVisibility(raw) !== false,
     archived: raw.archived === true,
     description: typeof raw.description === "string" ? raw.description : null,
     // List endpoints say `fork` but never `parent`; only GET /repos/{o}/{r} names it.
@@ -305,29 +363,10 @@ export const githubProvider: AccountSyncProvider = {
   },
 
   async getForkParent(context: DiscoveryContext, path: string): Promise<ForkLookup> {
-    const encoded = encodeRepoPath(path);
-    if (encoded.split("/").length < 2) {
-      return { status: "unknown", rateLimited: false };
-    }
-    try {
-      const response = await getJson<GitHubRepo>(
-        context,
-        `${apiBase(context.baseUrl)}/repos/${encoded}`,
-        { headers: headers(context), notFoundHint: path },
-      );
-      if (response.data.fork === true) {
-        const parent = parentPathOrNull(response.data.parent?.full_name);
-        return parent === null
-          ? { status: "unknown", rateLimited: false }
-          : { status: "fork", parent };
-      }
-      return response.data.fork === false
-        ? { status: "not_fork" }
-        : { status: "unknown", rateLimited: false };
-    } catch (cause) {
-      return forkLookupFailure(cause);
-    }
+    return (await githubRepoInfo(context, path)).fork;
   },
+
+  getRepoInfo: githubRepoInfo,
 
   async checkOwner(context: DiscoveryContext, owner: string): Promise<OwnerLookup> {
     const name = owner.trim();

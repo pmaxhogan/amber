@@ -7,7 +7,7 @@ import {
   type Repo,
   type TreePage,
 } from "@amber/shared";
-import type { FastifyPluginAsync, FastifyReply } from "fastify";
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
   ARCHIVE_EXTENSIONS,
@@ -20,7 +20,7 @@ import {
   streamSourceArchive,
   type ArchiveHandle,
 } from "../export/archive.ts";
-import { getRepo } from "../domain/repos.ts";
+import { getRepoFor } from "../domain/repos.ts";
 import { repoDirFor } from "../repoDir.ts";
 
 /** /api/repos/:id/export source and gitdir archives, tree, and blob. */
@@ -72,13 +72,20 @@ export const exportRoutes: FastifyPluginAsync = async (app) => {
   const log = ctx.log.child({ mod: "export" });
 
   /** Resolve the row, then the directory from the row, never from the URL. */
-  function locate(rawId: unknown, reply: FastifyReply): { repo: Repo; dir: string } | null {
+  function locate(
+    request: FastifyRequest,
+    rawId: unknown,
+    reply: FastifyReply,
+  ): { repo: Repo; dir: string } | null {
     const parsed = paramsSchema.safeParse({ id: rawId });
     if (!parsed.success) {
       reply.code(400).send({ error: "bad_request", message: "Invalid repository id" });
       return null;
     }
-    const repo = getRepo(ctx.db, parsed.data.id);
+    // One path for missing and invisible: a repo the caller cannot view gets
+    // exactly the answer a repo that does not exist gets.
+    const user = request.user;
+    const repo = user === undefined ? undefined : getRepoFor(ctx.db, parsed.data.id, user);
     if (repo === undefined) {
       reply.code(404).send({ error: "not_found", message: "Repository not found" });
       return null;
@@ -140,7 +147,7 @@ export const exportRoutes: FastifyPluginAsync = async (app) => {
       if (!query.success) {
         return reply.code(400).send({ error: "bad_request", message: "Invalid ref" });
       }
-      const located = locate(params.data.id, reply);
+      const located = locate(request, params.data.id, reply);
       if (located === null) {
         return reply;
       }
@@ -169,7 +176,7 @@ export const exportRoutes: FastifyPluginAsync = async (app) => {
     if (!params.success || !query.success) {
       return reply.code(400).send({ error: "bad_request", message: "Invalid tree request" });
     }
-    const located = locate(params.data.id, reply);
+    const located = locate(request, params.data.id, reply);
     if (located === null) {
       return reply;
     }
@@ -196,7 +203,7 @@ export const exportRoutes: FastifyPluginAsync = async (app) => {
     if (!params.success || !query.success) {
       return reply.code(400).send({ error: "bad_request", message: "Invalid blob request" });
     }
-    const located = locate(params.data.id, reply);
+    const located = locate(request, params.data.id, reply);
     if (located === null) {
       return reply;
     }

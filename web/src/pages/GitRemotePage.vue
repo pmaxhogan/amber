@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import Button from "primevue/button";
-import InputText from "primevue/inputtext";
 import Tag from "primevue/tag";
-import type { GitRemoteConfig } from "@amber/shared";
+import type { GitRemoteMe } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
 import { absoluteTime } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
+import { useMeStore } from "../stores/me.ts";
 import AppIcon from "../components/AppIcon.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import CopyField from "../components/CopyField.vue";
@@ -17,8 +17,9 @@ import ListSkeleton from "../components/ListSkeleton.vue";
 
 const api = useApi();
 const toast = useToaster();
+const me = useMeStore();
 
-const config = ref<GitRemoteConfig | null>(null);
+const config = ref<GitRemoteMe | null>(null);
 const loading = ref(false);
 const busy = ref(false);
 const error = ref<ApiClientError | null>(null);
@@ -33,17 +34,19 @@ const error = ref<ApiClientError | null>(null);
 const revealedPassword = ref<string | null>(null);
 
 const enabled = computed(() => config.value?.enabled === true);
+const hasPassword = computed(() => config.value?.hasPassword === true);
+const canSwitch = computed(() => me.can("manage_settings"));
 
-const username = ref("");
-const usernameDirty = computed(
-  () => username.value.trim() !== "" && username.value.trim() !== config.value?.username,
-);
+/**
+ * The template carries {password} and {slug}. Neither is filled in here: the
+ * password is only ever shown in the reveal box, and the slug is per repo.
+ */
+const cloneTemplate = computed(() => config.value?.cloneUrlTemplate ?? null);
 
 async function load(): Promise<void> {
   loading.value = true;
   try {
     config.value = await api.getGitRemote();
-    username.value = config.value.username;
     error.value = null;
   } catch (cause) {
     error.value = normalizeError(cause);
@@ -52,36 +55,56 @@ async function load(): Promise<void> {
   }
 }
 
-const enableVisible = ref(false);
 const rotateVisible = ref(false);
+const revokeVisible = ref(false);
 const disableVisible = ref(false);
 
-async function confirmEnable(): Promise<void> {
+async function confirmRotate(): Promise<void> {
+  const wasSet = hasPassword.value;
   busy.value = true;
   try {
-    const result = await api.enableGitRemote();
-    config.value = result;
-    username.value = result.username;
-    revealedPassword.value = result.password;
-    enableVisible.value = false;
-    toast.success("Read-only git remote enabled");
+    const result = await api.rotateGitRemote();
+    const { password, ...state } = result;
+    config.value = state;
+    revealedPassword.value = password;
+    rotateVisible.value = false;
+    toast.success(wasSet ? "Password rotated" : "Password created");
   } catch (cause) {
-    toast.failure("Could not enable the git remote", cause);
+    toast.failure("Could not create the password", cause);
   } finally {
     busy.value = false;
   }
 }
 
-async function confirmRotate(): Promise<void> {
+function askRotate(): void {
+  if (hasPassword.value) {
+    rotateVisible.value = true;
+  } else {
+    void confirmRotate();
+  }
+}
+
+async function confirmRevoke(): Promise<void> {
   busy.value = true;
   try {
-    const result = await api.rotateGitRemote();
-    config.value = result;
-    revealedPassword.value = result.password;
-    rotateVisible.value = false;
-    toast.success("Password rotated", "Every existing clone credential has stopped working.");
+    config.value = await api.revokeGitRemote();
+    revealedPassword.value = null;
+    revokeVisible.value = false;
+    toast.success("Password revoked", "Clones using it have stopped working.");
   } catch (cause) {
-    toast.failure("Could not rotate the password", cause);
+    toast.failure("Could not revoke the password", cause);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function switchOn(): Promise<void> {
+  busy.value = true;
+  try {
+    config.value = await api.enableGitRemote();
+    toast.success("Git remote turned on");
+  } catch (cause) {
+    toast.failure("Could not turn the git remote on", cause);
   } finally {
     busy.value = false;
   }
@@ -91,23 +114,10 @@ async function confirmDisable(): Promise<void> {
   busy.value = true;
   try {
     config.value = await api.disableGitRemote();
-    revealedPassword.value = null;
     disableVisible.value = false;
-    toast.success("Read-only git remote disabled", "Every /git route now returns 404.");
+    toast.success("Git remote turned off", "Every /git route now returns 404.");
   } catch (cause) {
-    toast.failure("Could not disable the git remote", cause);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function saveUsername(): Promise<void> {
-  busy.value = true;
-  try {
-    config.value = await api.setGitRemoteUsername(username.value.trim());
-    toast.success("Username updated");
-  } catch (cause) {
-    toast.failure("Could not update the username", cause);
+    toast.failure("Could not turn the git remote off", cause);
   } finally {
     busy.value = false;
   }
@@ -139,85 +149,95 @@ onMounted(() => void load());
     >
       <div class="reveal__head">
         <AppIcon name="alert" :size="18" />
-        <strong>This password will never be shown again.</strong>
+        <strong>You will not see this password again.</strong>
       </div>
       <p>
-        Amber stores only a scrypt hash of it. Copy it somewhere safe now. If you lose it, the only
-        way forward is to rotate, which invalidates every existing clone credential.
+        Amber stores only a hash of it. Copy it somewhere safe now. If you lose it, create a new
+        password, which stops the old one working.
       </p>
-      <CopyField label="Git remote password" :value="revealedPassword" monospace />
+      <CopyField label="Git password" :value="revealedPassword" monospace />
       <Button label="I have saved it" severity="secondary" size="small" @click="dismissReveal" />
     </div>
 
-    <ListSkeleton v-if="loading" :rows="3" label="Loading the git remote settings" />
+    <ListSkeleton v-if="loading && config === null" :rows="3" label="Loading the git remote" />
 
-    <div v-else-if="error === null" class="amber-stack remote-grid">
+    <div v-else-if="error === null && config" class="amber-stack remote-grid">
       <article class="amber-card">
         <header class="remote-status">
-          <h2>Status</h2>
+          <h2>Your git credential</h2>
           <Tag
-            :value="enabled ? 'enabled' : 'disabled'"
+            :value="enabled ? 'remote on' : 'remote off'"
             :severity="enabled ? 'success' : 'secondary'"
+            data-testid="remote-state"
           />
         </header>
+
+        <p v-if="!enabled" class="remote-off" data-testid="remote-off">
+          The git remote is switched off for the whole Amber, so nothing can be cloned right now.
+          You can still manage your password here.
+        </p>
 
         <dl class="remote-facts">
           <div>
             <dt>Username</dt>
-            <dd class="mono">{{ config?.username ?? "-" }}</dd>
+            <dd class="mono" data-testid="git-username">{{ config.username ?? "-" }}</dd>
           </div>
           <div>
-            <dt>Password last rotated</dt>
-            <dd>{{ absoluteTime(config?.rotatedAt ?? null) }}</dd>
+            <dt>Password</dt>
+            <dd>{{ hasPassword ? "set" : "not created yet" }}</dd>
           </div>
-          <div class="remote-facts__wide">
+          <div>
+            <dt>Password last changed</dt>
+            <dd>{{ absoluteTime(config.rotatedAt) }}</dd>
+          </div>
+          <div v-if="cloneTemplate" class="remote-facts__wide">
             <dt>Clone URL template</dt>
-            <dd class="mono">{{ config?.cloneUrlTemplate || "not configured" }}</dd>
+            <dd class="mono" data-testid="clone-template">{{ cloneTemplate }}</dd>
           </div>
         </dl>
 
         <div class="amber-row remote-actions">
           <Button
-            v-if="!enabled"
-            label="Enable read-only remote"
+            :label="hasPassword ? 'Rotate password' : 'Create password'"
             :disabled="busy"
-            @click="enableVisible = true"
-          />
-          <template v-else>
-            <Button
-              label="Rotate password"
-              severity="secondary"
-              :disabled="busy"
-              @click="rotateVisible = true"
-            />
-            <Button
-              label="Disable"
-              severity="danger"
-              outlined
-              :disabled="busy"
-              @click="disableVisible = true"
-            />
-          </template>
-        </div>
-      </article>
-
-      <article v-if="enabled" class="amber-card">
-        <h2>Username</h2>
-        <p class="amber-note">
-          Git sends this as the basic-auth user. Changing it does not change the password.
-        </p>
-        <div class="amber-row remote-username">
-          <InputText
-            v-model="username"
-            aria-label="Git remote username"
-            autocomplete="off"
-            spellcheck="false"
+            :severity="hasPassword ? 'secondary' : 'primary'"
+            @click="askRotate"
           />
           <Button
-            label="Save username"
-            size="small"
-            :disabled="!usernameDirty || busy"
-            @click="saveUsername"
+            v-if="hasPassword"
+            label="Revoke"
+            severity="danger"
+            outlined
+            :disabled="busy"
+            @click="revokeVisible = true"
+          />
+        </div>
+
+        <p class="amber-note">
+          Your credential stops working as soon as your access to Amber is removed.
+        </p>
+      </article>
+
+      <article v-if="canSwitch" class="amber-card">
+        <h2>Remote on or off</h2>
+        <p class="amber-note">
+          This switch is for everyone. When it is off, every
+          <span class="mono">/git</span> route returns 404 and nobody can clone.
+        </p>
+        <div class="amber-row remote-actions">
+          <Button
+            v-if="!enabled"
+            label="Turn the git remote on"
+            :disabled="busy"
+            @click="switchOn"
+          />
+          <Button
+            v-else
+            label="Turn the git remote off"
+            severity="danger"
+            outlined
+            :disabled="busy"
+            @click="disableVisible = true"
           />
         </div>
       </article>
@@ -236,32 +256,21 @@ onMounted(() => void load());
         </p>
         <p>
           So <span class="mono">/git</span> is protected by the username and password on this page,
-          not by Cloudflare. That is the whole reason the password is 32 random characters and is
-          stored only as a scrypt hash: it is the only thing standing in front of those routes.
-          Failed attempts are throttled per IP.
+          not by Cloudflare. Each person has their own, stored only as a hash, and it only reaches
+          the repositories that person can see. Failed attempts are throttled per IP.
         </p>
         <p>
           The remote is read-only by construction, not by configuration. Amber never spawns
           <span class="mono">git receive-pack</span> anywhere in its code, so a push is rejected no
-          matter what credentials are presented. When the remote is disabled, every
-          <span class="mono">/git</span> route returns 404.
+          matter what credentials are presented.
         </p>
       </article>
     </div>
 
     <ConfirmDialog
-      v-model:visible="enableVisible"
-      title="Enable the read-only git remote?"
-      message="Amber will generate a 32 character password and show it exactly once. Anyone with the URL, the username, and that password can clone every backup on this instance."
-      confirm-label="Enable and show the password"
-      :busy="busy"
-      @confirm="confirmEnable"
-    />
-
-    <ConfirmDialog
       v-model:visible="rotateVisible"
-      title="Rotate the git remote password?"
-      message="A new password is generated and shown once. Every clone credential using the old password stops working immediately."
+      title="Rotate your git password?"
+      message="A new password is generated and shown once. Every clone using the old password stops working immediately."
       confirm-label="Rotate and show the new password"
       danger
       :busy="busy"
@@ -269,10 +278,20 @@ onMounted(() => void load());
     />
 
     <ConfirmDialog
+      v-model:visible="revokeVisible"
+      title="Revoke your git password?"
+      message="Your password is deleted and every clone using it stops working. You can create a new one any time."
+      confirm-label="Revoke"
+      danger
+      :busy="busy"
+      @confirm="confirmRevoke"
+    />
+
+    <ConfirmDialog
       v-model:visible="disableVisible"
-      title="Disable the read-only git remote?"
-      message="Every /git route starts returning 404. Existing clones can no longer fetch. Backups themselves are untouched."
-      confirm-label="Disable"
+      title="Turn the git remote off for everyone?"
+      message="Every /git route starts returning 404 and existing clones can no longer fetch. Backups themselves are untouched."
+      confirm-label="Turn off"
       danger
       :busy="busy"
       @confirm="confirmDisable"
@@ -328,8 +347,13 @@ onMounted(() => void load());
   margin-top: 0.5rem;
 }
 
-.remote-username {
-  margin-top: 0.5rem;
+.remote-off {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 8px;
+  background: var(--amber-warn-bg);
+  color: var(--amber-warn);
+  font-size: 0.86rem;
 }
 
 .amber-card p {

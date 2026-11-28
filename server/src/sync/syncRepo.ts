@@ -12,9 +12,12 @@ import {
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
 import { getCredential, markAccountUsed } from "../domain/accounts.ts";
+import { refreshCapState } from "../domain/caps.ts";
 import { resolveSettings } from "../domain/settings.ts";
+import type { EventMeta } from "../events.ts";
 import { isPlausibleRef } from "../gitRef.ts";
 import { createConsoleLogger } from "../logging.ts";
+import { providerForKind } from "../providers/discovery.ts";
 import {
   backoffDelayMs,
   goneRecheckCapMs,
@@ -60,7 +63,7 @@ export interface GitCredentials {
 
 /** Structural subset of EventBus, so the sync engine never imports it. */
 export interface SyncEventPublisher {
-  publish(type: AmberEventType, payload?: Record<string, unknown>): void;
+  publish(type: AmberEventType, payload?: Record<string, unknown>, meta?: EventMeta): void;
 }
 
 export type SettingsResolver = (db: Db, repoId: number) => ResolvedSettings;
@@ -199,6 +202,8 @@ interface SyncStats {
   paranoidArchived: number | null;
   defaultBranch: string | null;
   lastFetchHead: string | null;
+  /** The fetch presented no credential: what it got, anyone could have. */
+  anonymous: boolean;
 }
 
 const EMPTY_STATS: SyncStats = {
@@ -207,7 +212,41 @@ const EMPTY_STATS: SyncStats = {
   paranoidArchived: null,
   defaultBranch: null,
   lastFetchHead: null,
+  anonymous: false,
 };
+
+/**
+ * What a successful fetch proves about visibility, written straight away so
+ * the fact is durable (docs/ARCHITECTURE.md "Private versus public"):
+ * - an ANONYMOUS success means anyone could have fetched it: public, on any
+ *   forge;
+ * - on a forge Amber cannot ask (no provider), an authenticated success
+ *   leaves the last successful fetch authenticated: private;
+ * - on a forge with a provider, an authenticated success proves nothing and
+ *   the visibility pass (providers/forks.ts) has the say.
+ */
+function recordFetchVisibility(db: Db, target: SyncTarget, anonymous: boolean, now: number): void {
+  // Guarded on the path the fetch actually used: a rename that landed while
+  // this sync was running names a different upstream, and must stay private
+  // until something proves otherwise about THAT one.
+  if (anonymous) {
+    db.run(
+      "UPDATE repos SET is_private = 0, updated_at = ? WHERE id = ? AND path = ?",
+      now,
+      target.repo.id,
+      target.repo.path,
+    );
+    return;
+  }
+  if (providerForKind(target.forge.kind)?.getRepoInfo === undefined) {
+    db.run(
+      "UPDATE repos SET is_private = 1, updated_at = ? WHERE id = ? AND path = ?",
+      now,
+      target.repo.id,
+      target.repo.path,
+    );
+  }
+}
 
 export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
   const { db, repoId } = deps;
@@ -315,20 +354,37 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
       goneAt: becameGone ? finishedAt : null,
     });
     enforceRunRetention(db, repoId, finishedAt);
+    if (outcome === "success") {
+      recordFetchVisibility(db, target, stats.anonymous, finishedAt);
+    }
     return finished;
   });
 
-  deps.events?.publish("sync.finished", {
-    repoId,
-    runId,
-    outcome,
-    errorKind,
-    durationMs: run.durationMs,
-    refsChanged: run.refsChanged,
-    paranoidArchived: run.paranoidArchived,
-    diskUsageBytes,
-    slug: target.repo.slug,
-  });
+  // Usage just changed: tell a user who crossed their cap, once.
+  const capTransition =
+    target.repo.ownerUserId === null
+      ? null
+      : refreshCapState(db, target.repo.ownerUserId, finishedAt);
+  const finishedMeta: EventMeta =
+    capTransition === "reached" && target.repo.ownerUserId !== null
+      ? { capReachedUserId: target.repo.ownerUserId }
+      : {};
+
+  deps.events?.publish(
+    "sync.finished",
+    {
+      repoId,
+      runId,
+      outcome,
+      errorKind,
+      durationMs: run.durationMs,
+      refsChanged: run.refsChanged,
+      paranoidArchived: run.paranoidArchived,
+      diskUsageBytes,
+      slug: target.repo.slug,
+    },
+    finishedMeta,
+  );
   if (becameGone) {
     log.warn(
       { runId, errorKind, reason: goneReason, path: target.repo.path, host: target.forge.host },
@@ -445,7 +501,14 @@ async function performSync(
   const lastFetchHead =
     defaultBranch === null ? null : (after.get(`refs/heads/${defaultBranch}`) ?? null);
 
-  return { refsChanged, bytesFetched, paranoidArchived, defaultBranch, lastFetchHead };
+  return {
+    refsChanged,
+    bytesFetched,
+    paranoidArchived,
+    defaultBranch,
+    lastFetchHead,
+    anonymous: credentials === undefined,
+  };
 }
 
 // ---------------------------------------------------------------------------

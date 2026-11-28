@@ -1,5 +1,16 @@
 import { vi } from "vitest";
-import type { Account, Forge, GitRemoteConfig, Status, SyncRun } from "@amber/shared";
+import {
+  allPermissions,
+  defaultPermissions,
+  type Account,
+  type Forge,
+  type GitRemoteMe,
+  type Me,
+  type Permissions,
+  type Status,
+  type SyncRun,
+  type UserRow,
+} from "@amber/shared";
 import type { ApiClient } from "../../src/api/client.ts";
 import type { AccountSyncRow, RepoRow } from "../../src/api/types.ts";
 
@@ -27,7 +38,9 @@ export function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
     deleteRepo: vi.fn().mockResolvedValue(undefined),
     syncRepo: vi.fn().mockResolvedValue(undefined),
     listRuns: vi.fn().mockResolvedValue({ rows: [], total: 0, page: 1, perPage: 20 }),
-    bulkRepos: vi.fn().mockResolvedValue({ affected: 0 }),
+    bulkRepos: vi
+      .fn()
+      .mockResolvedValue({ action: "pause", requested: 0, affected: 0, ids: [], missing: [] }),
     getSettings: vi.fn().mockResolvedValue({}),
     putSettings: vi.fn().mockResolvedValue({}),
     getEffectiveSettings: vi.fn().mockResolvedValue({}),
@@ -39,8 +52,14 @@ export function stubApi(overrides: Partial<ApiClient> = {}): ApiClient {
     getGitRemote: vi.fn().mockResolvedValue(makeGitRemote()),
     enableGitRemote: vi.fn(),
     rotateGitRemote: vi.fn(),
+    revokeGitRemote: vi.fn(),
     disableGitRemote: vi.fn(),
-    setGitRemoteUsername: vi.fn(),
+    me: vi.fn().mockResolvedValue(makeMe()),
+    listUsers: vi.fn().mockResolvedValue([]),
+    updateUser: vi.fn(),
+    refreshUsers: vi.fn(),
+    adoptUserRepos: vi.fn(),
+    revokeUserGit: vi.fn(),
     exportUrl: vi.fn().mockReturnValue("/api/repos/1/export/source.zip"),
     downloadExport: vi.fn(),
     listTree: vi.fn().mockResolvedValue({ rows: [], total: 0, page: 1, perPage: 200 }),
@@ -102,6 +121,7 @@ export function makeRepo(overrides: Partial<RepoRow> = {}): RepoRow {
     path: "nodejs/node",
     displayName: "node",
     slug: "nodejs-node-a1b2c3d4",
+    mine: true,
     shortId: "a1b2c3d4",
     accountOverrideId: null,
     forceAnonymous: false,
@@ -165,12 +185,75 @@ export function makeAccountSync(overrides: Partial<AccountSyncRow> = {}): Accoun
   };
 }
 
-export function makeGitRemote(overrides: Partial<GitRemoteConfig> = {}): GitRemoteConfig {
+export function makeGitRemote(overrides: Partial<GitRemoteMe> = {}): GitRemoteMe {
   return {
     enabled: false,
-    username: "amber",
-    cloneUrlTemplate: "https://amber:PASSWORD@amber.example.com/git/{slug}.git",
+    username: "k3j9x0abcd",
+    hasPassword: false,
     rotatedAt: null,
+    cloneUrlTemplate: "https://k3j9x0abcd:{password}@amber.example.com/git/{slug}.git",
+    ...overrides,
+  };
+}
+
+/** The admin by default; pass `permissions` for a limited user (`isAdmin: false`). */
+export function makeMe(
+  overrides: Partial<Omit<Me, "permissions">> & { permissions?: Partial<Permissions> } = {},
+): Me {
+  const { permissions, ...rest } = overrides;
+  const isAdmin = rest.isAdmin ?? true;
+  return {
+    id: 1,
+    email: "admin@example.com",
+    isAdmin,
+    permissions: isAdmin ? allPermissions() : { ...defaultPermissions(), ...permissions },
+    storage: { usedBytes: 0, capBytes: null, overCap: false },
+    policy: isAdmin
+      ? {
+          configured: true,
+          fetchedAt: 1_700_000_000_000,
+          stale: false,
+          editUrl: "https://dash.cloudflare.com/acct/one/access-controls/policies/pol/edit",
+          lastError: null,
+        }
+      : null,
+    ...rest,
+  };
+}
+
+/** A default user: the new-user permissions, nothing more. */
+export function makeUser(permissions: Partial<Permissions> = {}): Me {
+  return makeMe({
+    id: 2,
+    email: "friend@example.com",
+    isAdmin: false,
+    permissions,
+    storage: { usedBytes: 1_048_576, capBytes: 5 * 1024 ** 3, overCap: false },
+  });
+}
+
+/** A user with every permission off. */
+export function makeNobody(): Me {
+  const none = Object.fromEntries(Object.keys(defaultPermissions()).map((key) => [key, false]));
+  return makeUser(none as Partial<Permissions>);
+}
+
+export function makeUserRow(overrides: Partial<UserRow> = {}): UserRow {
+  return {
+    id: 2,
+    email: "friend@example.com",
+    isAdmin: false,
+    permissions: defaultPermissions(),
+    storageCapBytes: null,
+    capBytes: 5 * 1024 ** 3,
+    usedBytes: 1_048_576,
+    overCap: false,
+    repoCount: 3,
+    removedAt: null,
+    lastSeenAt: 1_700_000_000_000,
+    hasGitPassword: false,
+    capNotifiedAt: null,
+    createdAt: 1_690_000_000_000,
     ...overrides,
   };
 }

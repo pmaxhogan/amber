@@ -8,11 +8,13 @@ import InputText from "primevue/inputtext";
 import Password from "primevue/password";
 import Select from "primevue/select";
 import Tag from "primevue/tag";
+import ToggleSwitch from "primevue/toggleswitch";
 import { FORGE_KINDS, type Account, type Forge, type ForgeKind } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
 import { forgeOrigin } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
+import { useMeStore } from "../stores/me.ts";
 import AppIcon from "../components/AppIcon.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import CredentialHelp from "../components/CredentialHelp.vue";
@@ -23,6 +25,25 @@ import ListSkeleton from "../components/ListSkeleton.vue";
 
 const api = useApi();
 const toast = useToaster();
+const me = useMeStore();
+
+const canManageForges = computed(() => me.can("manage_forges"));
+const canUseAccounts = computed(() => me.can("import_private"));
+
+/** An account is the caller's own when it says so, or says nothing (older server). */
+function isMine(account: Account): boolean {
+  return account.ownerUserId === undefined || account.ownerUserId === me.userId;
+}
+
+/** Owner column: shown only when the API sent other people's accounts. */
+const showOwner = computed(() =>
+  accounts.value.some((account) => account.ownerEmail !== undefined),
+);
+
+/** Editing and defaults are the owner's; deleting is also for `manage_forges`. */
+function canDeleteAccount(account: Account): boolean {
+  return isMine(account) || canManageForges.value;
+}
 
 const forges = ref<Forge[]>([]);
 const accounts = ref<Account[]>([]);
@@ -89,7 +110,8 @@ const forgeForm = ref<{
   host: string;
   port: number | null;
   kind: ForgeKind | null;
-}>({ protocol: "https", host: "", port: null, kind: null });
+  allowPrivateNetwork: boolean;
+}>({ protocol: "https", host: "", port: null, kind: null, allowPrivateNetwork: false });
 
 const protocolOptions = [
   { label: "https", value: "https" },
@@ -101,7 +123,13 @@ const kindOptions = [
 ];
 
 function openForgeDialog(): void {
-  forgeForm.value = { protocol: "https", host: "", port: null, kind: null };
+  forgeForm.value = {
+    protocol: "https",
+    host: "",
+    port: null,
+    kind: null,
+    allowPrivateNetwork: false,
+  };
   forgeDialog.value = true;
 }
 
@@ -113,6 +141,8 @@ async function saveForge(): Promise<void> {
       host: forgeForm.value.host.trim(),
       port: forgeForm.value.port,
       kind: forgeForm.value.kind ?? undefined,
+      // Only the admin may set it; anyone else asking is refused, so it is not sent.
+      ...(me.isAdmin && forgeForm.value.allowPrivateNetwork ? { allowPrivateNetwork: true } : {}),
     });
     toast.success("Forge added");
     forgeDialog.value = false;
@@ -282,7 +312,7 @@ onMounted(() => void load());
       description="Forges are the web sites that host repos, add them and configure their accounts here. Some common providers (GitHub, etc) support additional features."
     >
       <template #actions>
-        <Button label="Add forge" size="small" @click="openForgeDialog" />
+        <Button v-if="canManageForges" label="Add forge" size="small" @click="openForgeDialog" />
       </template>
     </PageHeader>
 
@@ -296,7 +326,7 @@ onMounted(() => void load());
       title="No forges yet"
       description="A forge is added automatically the first time you import a repository from it. You can also add one up front to store credentials before importing."
     >
-      <Button label="Add a forge" @click="openForgeDialog" />
+      <Button v-if="canManageForges" label="Add a forge" @click="openForgeDialog" />
     </EmptyState>
 
     <div v-else class="forge-list">
@@ -317,7 +347,14 @@ onMounted(() => void load());
             </p>
           </div>
           <div class="amber-row">
+            <Tag
+              v-if="forge.allowPrivateNetwork === true"
+              value="private network allowed"
+              severity="warn"
+              title="Requests to this forge may reach non-public addresses."
+            />
             <Select
+              v-if="canManageForges"
               :model-value="forge.kind"
               :options="FORGE_KINDS.map((kind) => ({ label: kind, value: kind }))"
               option-label="label"
@@ -328,12 +365,14 @@ onMounted(() => void load());
               @update:model-value="changeForgeKind(forge, $event)"
             />
             <Button
+              v-if="canUseAccounts"
               label="Add account"
               size="small"
               severity="secondary"
               @click="openCreateAccount(forge)"
             />
             <Button
+              v-if="canManageForges"
               label="Remove forge"
               size="small"
               severity="danger"
@@ -347,6 +386,7 @@ onMounted(() => void load());
           <thead>
             <tr>
               <th>Username</th>
+              <th v-if="showOwner">Owner</th>
               <th>Secret</th>
               <th>Default</th>
               <th class="account-table__actions">Actions</th>
@@ -355,6 +395,9 @@ onMounted(() => void load());
           <tbody>
             <tr v-for="account in accountsByForge.get(forge.id) ?? []" :key="account.id">
               <td class="mono">{{ account.username }}</td>
+              <td v-if="showOwner" data-testid="account-owner">
+                <span class="mono">{{ account.ownerEmail ?? "-" }}</span>
+              </td>
               <td>
                 <span v-if="account.hasSecret" class="secret-state secret-state--set">
                   <AppIcon name="shield" :size="14" />
@@ -365,7 +408,7 @@ onMounted(() => void load());
               <td>
                 <Tag v-if="account.isDefault" value="default" severity="info" />
                 <Button
-                  v-else
+                  v-else-if="isMine(account)"
                   label="Make default"
                   size="small"
                   severity="secondary"
@@ -375,6 +418,7 @@ onMounted(() => void load());
               </td>
               <td class="account-table__actions">
                 <Button
+                  v-if="isMine(account)"
                   label="Edit"
                   size="small"
                   severity="secondary"
@@ -382,6 +426,7 @@ onMounted(() => void load());
                   @click="openEditAccount(forge, account)"
                 />
                 <Button
+                  v-if="canDeleteAccount(account)"
                   label="Delete"
                   size="small"
                   severity="danger"
@@ -443,6 +488,19 @@ onMounted(() => void load());
           <p class="amber-note">
             The kind decides which API amber uses for account discovery and which credential help it
             shows. It is detected from well-known hosts and editable afterwards.
+          </p>
+        </div>
+        <div v-if="me.isAdmin" class="amber-field">
+          <div class="amber-row">
+            <ToggleSwitch
+              v-model="forgeForm.allowPrivateNetwork"
+              input-id="forge-private-network"
+            />
+            <label for="forge-private-network">Allow requests to private network addresses</label>
+          </div>
+          <p class="amber-note">
+            Leave this off unless the forge really lives on your own network. Other forges are
+            checked on every request to make sure they resolve to a public address.
           </p>
         </div>
       </div>

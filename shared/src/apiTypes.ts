@@ -403,8 +403,13 @@ export const bulkRepoResponseSchema = z.object({
   requested: z.number().int().nonnegative(),
   affected: z.number().int().nonnegative(),
   ids: z.array(idSchema),
-  /** Requested ids that no longer exist. A stale multi-select is not an error. */
+  /**
+   * Requested ids that no longer exist, or that the caller cannot view (the
+   * two are indistinguishable). A stale multi-select is not an error.
+   */
   missing: z.array(idSchema),
+  /** Ids the caller can view but may not act on, and why. */
+  refused: z.array(z.object({ id: idSchema, error: z.string(), message: z.string() })).optional(),
 });
 export type BulkRepoResponse = z.infer<typeof bulkRepoResponseSchema>;
 
@@ -460,6 +465,11 @@ export const importLineResultSchema = z.object({
    * every repository it owns, now and later. Absent on a client-side parse.
    */
   target: z.enum(["repo", "namespace"]).optional(),
+  /**
+   * Set by the server on a refused line: `host_not_enabled` (the host is new
+   * and the caller may not add one) or `storage_cap_reached`.
+   */
+  code: z.string().optional(),
 });
 
 export const importPreviewResponseSchema = z.object({
@@ -827,41 +837,11 @@ export type AccountSyncRunResult = z.infer<typeof accountSyncRunResultSchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * LEGACY: the instance-wide git remote shapes, one shared credential for the
- * whole instance. Migration 010 deletes that credential and the per-user
- * shapes below replace these. Kept only until the git remote and the web UI
- * have moved over; nothing new should use them.
- */
-export const gitRemoteConfigSchema = z.object({
-  enabled: z.boolean(),
-  username: z.string().min(1),
-  cloneUrlTemplate: z.string(),
-  rotatedAt: epochMsSchema.nullable(),
-});
-export type GitRemoteConfig = z.infer<typeof gitRemoteConfigSchema>;
-
-/** Returned exactly once, on enable and on rotate. */
-export const gitRemoteSecretSchema = gitRemoteConfigSchema.extend({
-  password: z.string().min(1),
-});
-export type GitRemoteSecret = z.infer<typeof gitRemoteSecretSchema>;
-
-/**
- * PATCH /api/git-remote body. Only the username is editable; the password is
- * never user-supplied, so there is deliberately no field for one. Renaming
- * works whether the remote is enabled or disabled, so the new name is already
- * in place the next time it is turned on.
- */
-export const updateGitRemoteSchema = z.object({
-  username: z.string().trim().min(1).max(64),
-});
-export type UpdateGitRemote = z.infer<typeof updateGitRemoteSchema>;
-
-/**
  * GET /api/git-remote in the multi-user model: the CALLER'S own credential.
  * `enabled` is the instance-wide kill switch (`manage_settings`). `username`
  * is null until the caller first mints a password; once minted it is stable
- * across rotations. `cloneUrlTemplate` carries `{password}` and `{slug}`
+ * across rotations and survives a revoke. `rotatedAt` is null while there is
+ * no password. `cloneUrlTemplate` carries `{password}` and `{slug}`
  * placeholders and is null while there is no username.
  */
 export const gitRemoteMeSchema = z.object({

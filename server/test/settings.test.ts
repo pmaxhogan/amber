@@ -12,6 +12,7 @@ import {
   resolveSettings,
 } from "../src/domain/settings.ts";
 import { createTempDb, seedForge, TEST_SECRET_KEY, type TempDb } from "./helpers.ts";
+import { adminOf } from "./helpers/users.ts";
 
 const KEY = Buffer.from(TEST_SECRET_KEY, "hex");
 
@@ -25,13 +26,18 @@ beforeEach(() => {
   temp = createTempDb();
   db = temp.db;
   forgeId = seedForge(db, "github.com");
-  accountId = createAccount(db, KEY, {
-    forgeId,
-    username: "pmaxhogan",
-    secret: null,
-    isDefault: false,
-  }).id;
-  repoId = createRepo(db, { forgeId, path: "nodejs/node" }).id;
+  accountId = createAccount(
+    db,
+    KEY,
+    {
+      forgeId,
+      username: "pmaxhogan",
+      secret: null,
+      isDefault: false,
+    },
+    adminOf(db).id,
+  ).id;
+  repoId = createRepo(db, { ownerUserId: adminOf(db).id, forgeId, path: "nodejs/node" }).id;
 });
 
 afterEach(() => {
@@ -108,12 +114,17 @@ describe("the effective account layer", () => {
   });
 
   it("uses the override account rather than the forge default", () => {
-    const override = createAccount(db, KEY, {
-      forgeId,
-      username: "second",
-      secret: null,
-      isDefault: false,
-    }).id;
+    const override = createAccount(
+      db,
+      KEY,
+      {
+        forgeId,
+        username: "second",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    ).id;
     putScopeSettings(db, "account", accountId, { clone_mode: "mirror" });
     putScopeSettings(db, "account", override, { clone_mode: "full" });
     updateRepo(db, repoId, { accountOverrideId: override });
@@ -146,7 +157,11 @@ describe("the effective account layer", () => {
 
   it("skips the account layer when the forge has no accounts at all", () => {
     const bareForgeId = seedForge(db, "git.example.com", "generic");
-    const bareRepoId = createRepo(db, { forgeId: bareForgeId, path: "team/thing" }).id;
+    const bareRepoId = createRepo(db, {
+      ownerUserId: adminOf(db).id,
+      forgeId: bareForgeId,
+      path: "team/thing",
+    }).id;
     putScopeSettings(db, "account", accountId, { clone_mode: "full" });
     putScopeSettings(db, "forge", bareForgeId, { clone_mode: "mirror" });
     expect(resolveSettings(db, bareRepoId).clone_mode).toBe("mirror");
@@ -297,7 +312,11 @@ describe("putScopeSettings writes", () => {
   });
 
   it("keeps scopes and scope ids apart", () => {
-    const otherRepoId = createRepo(db, { forgeId, path: "facebook/react" }).id;
+    const otherRepoId = createRepo(db, {
+      ownerUserId: adminOf(db).id,
+      forgeId,
+      path: "facebook/react",
+    }).id;
     putScopeSettings(db, "repo", repoId, { clone_mode: "mirror" });
     putScopeSettings(db, "repo", otherRepoId, { clone_mode: "full" });
     putScopeSettings(db, "global", null, { clone_mode: "shallow" });

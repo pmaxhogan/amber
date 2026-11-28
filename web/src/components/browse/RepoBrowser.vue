@@ -9,6 +9,7 @@ import { isNotBackedUp, shortOid } from "../../lib/browse.ts";
 import { safeFileName } from "../../lib/format.ts";
 import { saveBlob } from "../../lib/folderDownload.ts";
 import { useToaster } from "../../lib/toast.ts";
+import { useMeStore } from "../../stores/me.ts";
 import AppIcon from "../AppIcon.vue";
 import EmptyState from "../EmptyState.vue";
 import ErrorState from "../ErrorState.vue";
@@ -34,6 +35,7 @@ type Mode = "files" | "history" | "commit";
 
 const api = useApi();
 const toast = useToaster();
+const me = useMeStore();
 
 const refs = ref<BrowseRefs | null>(null);
 const loading = ref(true);
@@ -186,6 +188,7 @@ const modeOptions = [
           @update:model-value="onModeChange"
         />
         <Button
+          v-if="me.can('export')"
           type="button"
           size="small"
           severity="secondary"

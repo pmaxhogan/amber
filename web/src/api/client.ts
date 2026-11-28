@@ -13,16 +13,26 @@ import {
   bulkRepoResponseSchema,
   effectiveSettingsResponseSchema,
   forgeSchema,
-  gitRemoteConfigSchema,
-  gitRemoteSecretSchema,
+  adoptReposResponseSchema,
+  gitRemoteCredentialSchema,
+  gitRemoteMeSchema,
+  gitRemoteRevokeResponseSchema,
+  gitRemoteSwitchResponseSchema,
   healthSchema,
   importCommitResponseSchema,
   importPreviewResponseSchema,
+  meSchema,
+  PERMISSIONS,
   pushConfigSchema,
   pushSendResultSchema,
   scopeSettingsResponseSchema,
+  revokeGitResponseSchema,
   statusSchema,
   treePageSchema,
+  userListResponseSchema,
+  userRefreshResponseSchema,
+  userRowSchema,
+  type AdoptReposResponse,
   type Account,
   type BrowseCommitDetail,
   type BrowseCommits,
@@ -38,11 +48,12 @@ import {
   type CreateForge,
   type Forge,
   type ForgeKind,
-  type GitRemoteConfig,
-  type GitRemoteSecret,
+  type GitRemoteCredential,
+  type GitRemoteMe,
   type Health,
   type ImportCommitResponse,
   type ImportPreviewResponse,
+  type Me,
   type PushConfig,
   type PushSendResult,
   type PushSubscribe,
@@ -52,6 +63,9 @@ import {
   type Status,
   type UpdateAccount,
   type UpdateRepo,
+  type UpdateUser,
+  type UserRefreshResponse,
+  type UserRow,
 } from "@amber/shared";
 import {
   accountListSchema,
@@ -118,6 +132,24 @@ const HTTP_MESSAGES: Record<number, string> = {
   502: "The server is unreachable.",
   503: "The server is not ready yet.",
 };
+
+/**
+ * A 403 `forbidden` always reads the same way wherever it surfaces. The server
+ * names the missing permission in `details.permission` (or `details.requires`
+ * is "admin"); the label comes from the shared permission list.
+ */
+export function forbiddenMessage(details: unknown): string {
+  const record =
+    details !== null && typeof details === "object" ? (details as Record<string, unknown>) : {};
+  if (record["requires"] === "admin") {
+    return "Only the Amber admin can do that.";
+  }
+  const key = record["permission"];
+  const entry = PERMISSIONS.find((permission) => permission.key === key);
+  return entry === undefined
+    ? "You do not have permission to do that. Ask the Amber admin for access."
+    : `You do not have permission to do that. It needs "${entry.label}"; ask the Amber admin for access.`;
+}
 
 function httpMessage(status: number, statusText: string): string {
   const known = HTTP_MESSAGES[status];
@@ -206,6 +238,14 @@ export function createApiClient(options: ApiClientOptions = {}) {
     }
     const parsed = apiErrorSchema.safeParse(payload);
     if (parsed.success) {
+      if (parsed.data.error === "forbidden") {
+        return new ApiClientError(
+          "forbidden",
+          forbiddenMessage(parsed.data.details),
+          response.status,
+          parsed.data.details,
+        );
+      }
       return new ApiClientError(
         parsed.data.error,
         parsed.data.message,
@@ -438,25 +478,49 @@ export function createApiClient(options: ApiClientOptions = {}) {
   // Git remote
   // -------------------------------------------------------------------------
 
-  const getGitRemote = (signal?: AbortSignal): Promise<GitRemoteConfig> =>
-    request("/api/git-remote", { schema: gitRemoteConfigSchema, signal });
+  /** The caller's own credential state. Never carries a password. */
+  const getGitRemote = (signal?: AbortSignal): Promise<GitRemoteMe> =>
+    request("/api/git-remote", { schema: gitRemoteMeSchema, signal });
 
-  /** Returns the plaintext password. It is never retrievable again. */
-  const enableGitRemote = (): Promise<GitRemoteSecret> =>
-    request("/api/git-remote/enable", { method: "POST", schema: gitRemoteSecretSchema });
+  /** Mint or rotate the caller's password. The password comes back once, here only. */
+  const rotateGitRemote = (): Promise<GitRemoteCredential> =>
+    request("/api/git-remote/rotate", { method: "POST", schema: gitRemoteCredentialSchema });
 
-  const rotateGitRemote = (): Promise<GitRemoteSecret> =>
-    request("/api/git-remote/rotate", { method: "POST", schema: gitRemoteSecretSchema });
+  /** Delete the caller's password. */
+  const revokeGitRemote = (): Promise<GitRemoteMe> =>
+    request("/api/git-remote/revoke", { method: "POST", schema: gitRemoteRevokeResponseSchema });
 
-  const disableGitRemote = (): Promise<GitRemoteConfig> =>
-    request("/api/git-remote/disable", { method: "POST", schema: gitRemoteConfigSchema });
+  /** The instance-wide kill switch. Needs `manage_settings`. */
+  const enableGitRemote = (): Promise<GitRemoteMe> =>
+    request("/api/git-remote/enable", { method: "POST", schema: gitRemoteSwitchResponseSchema });
 
-  const setGitRemoteUsername = (username: string): Promise<GitRemoteConfig> =>
-    request("/api/git-remote", {
-      method: "PATCH",
-      body: { username },
-      schema: gitRemoteConfigSchema,
+  const disableGitRemote = (): Promise<GitRemoteMe> =>
+    request("/api/git-remote/disable", { method: "POST", schema: gitRemoteSwitchResponseSchema });
+
+  // -------------------------------------------------------------------------
+  // Identity and users
+  // -------------------------------------------------------------------------
+
+  const me = (signal?: AbortSignal): Promise<Me> =>
+    request("/api/me", { schema: meSchema, signal });
+
+  const listUsers = (signal?: AbortSignal): Promise<UserRow[]> =>
+    request("/api/users", { schema: userListResponseSchema, signal }).then((body) => body.rows);
+
+  const updateUser = (id: number, input: UpdateUser): Promise<UserRow> =>
+    request(`/api/users/${id}`, { method: "PATCH", body: input, schema: userRowSchema });
+
+  const refreshUsers = (): Promise<UserRefreshResponse> =>
+    request("/api/users/refresh", { method: "POST", schema: userRefreshResponseSchema });
+
+  const adoptUserRepos = (id: number): Promise<AdoptReposResponse> =>
+    request(`/api/users/${id}/adopt-repos`, {
+      method: "POST",
+      schema: adoptReposResponseSchema,
     });
+
+  const revokeUserGit = (id: number): Promise<UserRow> =>
+    request(`/api/users/${id}/revoke-git`, { method: "POST", schema: revokeGitResponseSchema });
 
   // -------------------------------------------------------------------------
   // Export and file streaming
@@ -624,8 +688,14 @@ export function createApiClient(options: ApiClientOptions = {}) {
     getGitRemote,
     enableGitRemote,
     rotateGitRemote,
+    revokeGitRemote,
     disableGitRemote,
-    setGitRemoteUsername,
+    me,
+    listUsers,
+    updateUser,
+    refreshUsers,
+    adoptUserRepos,
+    revokeUserGit,
     exportUrl,
     downloadExport,
     listTree,

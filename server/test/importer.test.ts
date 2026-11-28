@@ -11,6 +11,7 @@ import {
 } from "../src/domain/importer.ts";
 import { getRepo, listRepos } from "../src/domain/repos.ts";
 import { createTempDb, TEST_SECRET_KEY, type TempDb } from "./helpers.ts";
+import { adminOf } from "./helpers/users.ts";
 
 const KEY = Buffer.from(TEST_SECRET_KEY, "hex");
 const NOW = 1_700_000_000_000;
@@ -18,7 +19,7 @@ const NOW = 1_700_000_000_000;
 let temp: TempDb;
 let db: Db;
 
-beforeEach(() => {
+beforeEach(async () => {
   temp = createTempDb();
   db = temp.db;
 });
@@ -27,7 +28,8 @@ afterEach(() => {
   temp.close();
 });
 
-const all = () => listRepos(db, { page: 1, perPage: 200, sort: "created_at", dir: "asc" });
+const all = () =>
+  listRepos(db, adminOf(db), { page: 1, perPage: 200, sort: "created_at", dir: "asc" });
 
 /** Migration 003 seeds these into every database before a test starts. */
 const SEEDED_HOSTS = new Set(["github.com", "gitlab.com"]);
@@ -36,9 +38,10 @@ const SEEDED_HOSTS = new Set(["github.com", "gitlab.com"]);
 const imported = () => listForges(db).filter((forge) => !SEEDED_HOSTS.has(forge.host));
 
 describe("previewImport", () => {
-  it("parses a mixed block and summarizes it", () => {
+  it("parses a mixed block and summarizes it", async () => {
     const preview = previewImport(
       db,
+      adminOf(db),
       [
         "https://github.com/nodejs/node",
         "github.com/facebook/react/",
@@ -56,48 +59,60 @@ describe("previewImport", () => {
     expect(preview.results[2]?.message).toMatch(/SSH remotes are not supported/);
   });
 
-  it("writes nothing", () => {
+  it("writes nothing", async () => {
     // Compared against the pre-call listing rather than zero: migration 003
     // seeds github.com, so a preview that did write would be invisible to a
     // bare length check.
     const before = listForges(db);
-    previewImport(db, "https://github.com/nodejs/node");
+    previewImport(db, adminOf(db), "https://github.com/nodejs/node");
     expect(listForges(db)).toEqual(before);
     expect(all().total).toBe(0);
   });
 
-  it("warns when a user prefix names an account that does not exist", () => {
-    const preview = previewImport(db, "pmaxhogan@github.com/pmaxhogan/mkvid");
+  it("warns when a user prefix names an account that does not exist", async () => {
+    const preview = previewImport(db, adminOf(db), "pmaxhogan@github.com/pmaxhogan/mkvid");
     expect(preview.results[0]?.status).toBe("warning");
-    expect(preview.results[0]?.message).toMatch(/No account named "pmaxhogan"/);
+    expect(preview.results[0]?.message).toMatch(/have no account named "pmaxhogan"/);
     expect(preview.summary.warning).toBe(1);
   });
 
-  it("does not warn when the account exists on that forge", () => {
-    commitImport(db, "https://github.com/nodejs/node", { now: NOW });
+  it("does not warn when the account exists on that forge", async () => {
+    await commitImport(db, adminOf(db), "https://github.com/nodejs/node", { now: NOW });
     const forgeId = listForges(db)[0]!.id;
-    createAccount(db, KEY, { forgeId, username: "pmaxhogan", secret: null, isDefault: false });
+    createAccount(
+      db,
+      KEY,
+      { forgeId, username: "pmaxhogan", secret: null, isDefault: false },
+      adminOf(db).id,
+    );
 
-    const preview = previewImport(db, "pmaxhogan@github.com/pmaxhogan/mkvid");
+    const preview = previewImport(db, adminOf(db), "pmaxhogan@github.com/pmaxhogan/mkvid");
     expect(preview.results[0]?.status).toBe("ok");
     expect(preview.results[0]?.message).toBeUndefined();
   });
 
-  it("warns when the account exists only on a different forge", () => {
-    commitImport(db, "https://gitlab.com/a/b", { now: NOW });
+  it("warns when the account exists only on a different forge", async () => {
+    await commitImport(db, adminOf(db), "https://gitlab.com/a/b", { now: NOW });
     const gitlabId = listForges(db).find((forge) => forge.host === "gitlab.com")!.id;
-    createAccount(db, KEY, {
-      forgeId: gitlabId,
-      username: "pmaxhogan",
-      secret: null,
-      isDefault: false,
-    });
+    createAccount(
+      db,
+      KEY,
+      {
+        forgeId: gitlabId,
+        username: "pmaxhogan",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
 
-    expect(previewImport(db, "pmaxhogan@github.com/x/y").results[0]?.status).toBe("warning");
+    expect(previewImport(db, adminOf(db), "pmaxhogan@github.com/x/y").results[0]?.status).toBe(
+      "warning",
+    );
   });
 
-  it("handles an empty blob", () => {
-    expect(previewImport(db, "")).toEqual({
+  it("handles an empty blob", async () => {
+    expect(previewImport(db, adminOf(db), "")).toEqual({
       results: [],
       summary: { total: 0, ok: 0, warning: 0, error: 0 },
     });
@@ -105,10 +120,10 @@ describe("previewImport", () => {
 });
 
 describe("commitImport creates forges and repos", () => {
-  it("auto creates the forge with a detected kind", () => {
+  it("auto creates the forge with a detected kind", async () => {
     // bitbucket.org has a detected kind and is not one of the seeded hosts, so
     // the import is what brings the row into being.
-    commitImport(db, "https://bitbucket.org/nodejs/node", { now: NOW });
+    await commitImport(db, adminOf(db), "https://bitbucket.org/nodejs/node", { now: NOW });
     const forges = imported();
     expect(forges).toHaveLength(1);
     expect(forges[0]).toMatchObject({
@@ -118,17 +133,23 @@ describe("commitImport creates forges and repos", () => {
     });
   });
 
-  it("creates one forge for many repos on the same host", () => {
-    commitImport(db, ["bitbucket.org/a/b", "bitbucket.org/c/d", "bitbucket.org/e/f"].join("\n"), {
-      now: NOW,
-    });
+  it("creates one forge for many repos on the same host", async () => {
+    await commitImport(
+      db,
+      adminOf(db),
+      ["bitbucket.org/a/b", "bitbucket.org/c/d", "bitbucket.org/e/f"].join("\n"),
+      {
+        now: NOW,
+      },
+    );
     expect(imported()).toHaveLength(1);
     expect(all().total).toBe(3);
   });
 
-  it("keeps hosts, protocols, and ports apart", () => {
-    commitImport(
+  it("keeps hosts, protocols, and ports apart", async () => {
+    await commitImport(
       db,
+      adminOf(db),
       [
         "https://bitbucket.org/a/b",
         "http://git.example.com/a/b",
@@ -140,9 +161,10 @@ describe("commitImport creates forges and repos", () => {
     expect(all().total).toBe(3);
   });
 
-  it("reports created, updated, and failed counts", () => {
-    const result = commitImport(
+  it("reports created, updated, and failed counts", async () => {
+    const result = await commitImport(
       db,
+      adminOf(db),
       ["github.com/a/b", "git@github.com:c/d.git", "github.com/a/b"].join("\n"),
       { now: NOW },
     );
@@ -154,12 +176,17 @@ describe("commitImport creates forges and repos", () => {
     expect(result.results[1]?.repoId).toBeUndefined();
   });
 
-  it("gives every repo its own slug and short id", () => {
+  it("gives every repo its own slug and short id", async () => {
     // a/b and a-b sanitize alike on one forge. A generic host, because a single
     // segment on github.com names a namespace rather than a repository.
-    commitImport(db, ["git.example.com/a/b", "gitlab.com/a/b", "git.example.com/a-b"].join("\n"), {
-      now: NOW,
-    });
+    await commitImport(
+      db,
+      adminOf(db),
+      ["git.example.com/a/b", "gitlab.com/a/b", "git.example.com/a-b"].join("\n"),
+      {
+        now: NOW,
+      },
+    );
     const repos = all().rows;
     expect(new Set(repos.map((repo) => repo.slug)).size).toBe(3);
     expect(new Set(repos.map((repo) => repo.shortId)).size).toBe(3);
@@ -167,36 +194,45 @@ describe("commitImport creates forges and repos", () => {
 });
 
 describe("account matching on import", () => {
-  it("sets the override when the named account exists on that forge", () => {
-    commitImport(db, "https://github.com/seed/seed", { now: NOW });
+  it("sets the override when the named account exists on that forge", async () => {
+    await commitImport(db, adminOf(db), "https://github.com/seed/seed", { now: NOW });
     const forgeId = listForges(db)[0]!.id;
-    const account = createAccount(db, KEY, {
-      forgeId,
-      username: "pmaxhogan",
-      secret: null,
-      isDefault: false,
-    });
+    const account = createAccount(
+      db,
+      KEY,
+      {
+        forgeId,
+        username: "pmaxhogan",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
 
-    const result = commitImport(db, "pmaxhogan@github.com/pmaxhogan/mkvid", { now: NOW });
+    const result = await commitImport(db, adminOf(db), "pmaxhogan@github.com/pmaxhogan/mkvid", {
+      now: NOW,
+    });
     expect(result.results[0]?.status).toBe("ok");
     expect(getRepo(db, result.results[0]!.repoId!)?.accountOverrideId).toBe(account.id);
   });
 
-  it("imports with a warning and no override when the account is unknown", () => {
-    const result = commitImport(db, "ghost@github.com/a/b", { now: NOW });
+  it("imports with a warning and no override when the account is unknown", async () => {
+    const result = await commitImport(db, adminOf(db), "ghost@github.com/a/b", { now: NOW });
     expect(result.created).toBe(1);
     expect(result.results[0]?.status).toBe("warning");
-    expect(result.results[0]?.message).toMatch(/No account named "ghost"/);
+    expect(result.results[0]?.message).toMatch(/have no account named "ghost"/);
     expect(getRepo(db, result.results[0]!.repoId!)?.accountOverrideId).toBeNull();
   });
 
-  it("never creates an account implicitly", () => {
-    commitImport(db, "ghost@github.com/a/b", { now: NOW });
+  it("never creates an account implicitly", async () => {
+    await commitImport(db, adminOf(db), "ghost@github.com/a/b", { now: NOW });
     expect(db.all("SELECT id FROM accounts")).toHaveLength(0);
   });
 
-  it("rejects a password in the URL rather than storing it", () => {
-    const result = commitImport(db, "https://user:hunter2@github.com/a/b", { now: NOW });
+  it("rejects a password in the URL rather than storing it", async () => {
+    const result = await commitImport(db, adminOf(db), "https://user:hunter2@github.com/a/b", {
+      now: NOW,
+    });
     expect(result.failed).toBe(1);
     expect(result.results[0]?.message).toMatch(/Passwords in URLs are not supported/);
     expect(result.results[0]?.message).not.toContain("hunter2");
@@ -205,7 +241,7 @@ describe("account matching on import", () => {
 });
 
 describe("password redaction in echoed lines", () => {
-  it("masks a password rather than echoing it back", () => {
+  it("masks a password rather than echoing it back", async () => {
     expect(redactLine("https://user:hunter2@github.com/a/b")).toBe(
       "https://user:***@github.com/a/b",
     );
@@ -214,7 +250,7 @@ describe("password redaction in echoed lines", () => {
     expect(redactLine("https://user:@github.com/a/b")).toBe("https://user:***@github.com/a/b");
   });
 
-  it("leaves lines with no password alone", () => {
+  it("leaves lines with no password alone", async () => {
     for (const line of [
       "https://github.com/nodejs/node",
       "github.com/nodejs/node",
@@ -227,21 +263,22 @@ describe("password redaction in echoed lines", () => {
     }
   });
 
-  it("redacts the echoed line in both preview and commit", () => {
+  it("redacts the echoed line in both preview and commit", async () => {
     const line = "https://user:hunter2@github.com/a/b";
 
-    const preview = previewImport(db, line);
+    const preview = previewImport(db, adminOf(db), line);
     expect(JSON.stringify(preview)).not.toContain("hunter2");
     expect(preview.results[0]?.line).toBe("https://user:***@github.com/a/b");
 
-    const committed = commitImport(db, line, { now: NOW });
+    const committed = await commitImport(db, adminOf(db), line, { now: NOW });
     expect(JSON.stringify(committed)).not.toContain("hunter2");
     expect(committed.results[0]?.line).toBe("https://user:***@github.com/a/b");
   });
 
-  it("redacts only the offending line in a mixed block", () => {
+  it("redacts only the offending line in a mixed block", async () => {
     const preview = previewImport(
       db,
+      adminOf(db),
       ["https://github.com/ok/one", "https://user:hunter2@github.com/a/b"].join("\n"),
     );
     expect(preview.results[0]?.line).toBe("https://github.com/ok/one");
@@ -250,19 +287,24 @@ describe("password redaction in echoed lines", () => {
 });
 
 describe("idempotent re-import", () => {
-  it("updates rather than duplicating", () => {
-    const first = commitImport(db, "https://github.com/nodejs/node", { now: NOW });
-    const second = commitImport(db, "https://github.com/nodejs/node", { now: NOW });
+  it("updates rather than duplicating", async () => {
+    const first = await commitImport(db, adminOf(db), "https://github.com/nodejs/node", {
+      now: NOW,
+    });
+    const second = await commitImport(db, adminOf(db), "https://github.com/nodejs/node", {
+      now: NOW,
+    });
     expect(second.created).toBe(0);
     expect(second.updated).toBe(1);
     expect(second.results[0]?.repoId).toBe(first.results[0]?.repoId);
     expect(all().total).toBe(1);
   });
 
-  it("treats a trailing .git and slash as the same repo", () => {
-    commitImport(db, "https://github.com/nodejs/node", { now: NOW });
-    const again = commitImport(
+  it("treats a trailing .git and slash as the same repo", async () => {
+    await commitImport(db, adminOf(db), "https://github.com/nodejs/node", { now: NOW });
+    const again = await commitImport(
       db,
+      adminOf(db),
       ["https://github.com/nodejs/node.git", "github.com/nodejs/node/"].join("\n"),
       { now: NOW },
     );
@@ -271,52 +313,79 @@ describe("idempotent re-import", () => {
     expect(all().total).toBe(1);
   });
 
-  it("sets the override on re-import once the account exists", () => {
-    const first = commitImport(db, "https://github.com/nodejs/node", { now: NOW });
+  // Multi-user: a re-import never changes anything, the override included
+  // ("Importing something Amber already has"). The override is set with
+  // PATCH /api/repos/:id by the owner instead.
+  it("leaves the override alone on re-import, even once the account exists", async () => {
+    const first = await commitImport(db, adminOf(db), "https://github.com/nodejs/node", {
+      now: NOW,
+    });
     const repoId = first.results[0]!.repoId!;
     expect(getRepo(db, repoId)?.accountOverrideId).toBeNull();
 
     const forgeId = listForges(db)[0]!.id;
-    const account = createAccount(db, KEY, {
-      forgeId,
-      username: "pmaxhogan",
-      secret: null,
-      isDefault: false,
-    });
+    const account = createAccount(
+      db,
+      KEY,
+      {
+        forgeId,
+        username: "pmaxhogan",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
 
-    commitImport(db, "pmaxhogan@github.com/nodejs/node", { now: NOW });
-    expect(getRepo(db, repoId)?.accountOverrideId).toBe(account.id);
+    const again = await commitImport(db, adminOf(db), "pmaxhogan@github.com/nodejs/node", {
+      now: NOW,
+    });
+    expect(again.results[0]).toMatchObject({ action: "updated", status: "ok", repoId });
+    expect(again.results[0]?.message).toMatch(/Already backed up/);
+    expect(getRepo(db, repoId)?.accountOverrideId).toBeNull();
+    expect(account.id).toBeGreaterThan(0);
   });
 
-  it("does not clear an existing override when the line carries no user prefix", () => {
-    const first = commitImport(db, "https://github.com/nodejs/node", { now: NOW });
+  it("does not clear an existing override when the line carries no user prefix", async () => {
+    const first = await commitImport(db, adminOf(db), "https://github.com/nodejs/node", {
+      now: NOW,
+    });
     const repoId = first.results[0]!.repoId!;
-    const account = createAccount(db, KEY, {
-      forgeId: listForges(db)[0]!.id,
-      username: "pmaxhogan",
-      secret: null,
-      isDefault: false,
-    });
-    commitImport(db, "pmaxhogan@github.com/nodejs/node", { now: NOW });
+    const account = createAccount(
+      db,
+      KEY,
+      {
+        forgeId: listForges(db)[0]!.id,
+        username: "pmaxhogan",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
+    db.run("UPDATE repos SET account_override_id = ? WHERE id = ?", account.id, repoId);
 
-    commitImport(db, "https://github.com/nodejs/node", { now: NOW });
+    await commitImport(db, adminOf(db), "https://github.com/nodejs/node", { now: NOW });
     expect(getRepo(db, repoId)?.accountOverrideId).toBe(account.id);
   });
 
-  it("does not reschedule an existing repo", () => {
-    const first = commitImport(db, "https://github.com/nodejs/node", { now: NOW });
+  it("does not reschedule an existing repo", async () => {
+    const first = await commitImport(db, adminOf(db), "https://github.com/nodejs/node", {
+      now: NOW,
+    });
     const repoId = first.results[0]!.repoId!;
     const scheduled = getRepo(db, repoId)!.nextSyncAt;
 
-    commitImport(db, "https://github.com/nodejs/node", { now: NOW + 10_000_000 });
+    await commitImport(db, adminOf(db), "https://github.com/nodejs/node", {
+      now: NOW + 10_000_000,
+    });
     expect(getRepo(db, repoId)?.nextSyncAt).toBe(scheduled);
   });
 });
 
 describe("staggering", () => {
-  it("spreads new repos a few seconds apart from the given clock", () => {
-    const result = commitImport(
+  it("spreads new repos a few seconds apart from the given clock", async () => {
+    const result = await commitImport(
       db,
+      adminOf(db),
       ["github.com/a/one", "github.com/b/two", "github.com/c/three"].join("\n"),
       { now: NOW, staggerStepMs: 3_000 },
     );
@@ -324,15 +393,16 @@ describe("staggering", () => {
     expect(times).toEqual([NOW, NOW + 3_000, NOW + 6_000]);
   });
 
-  it("does not stagger a single repo", () => {
-    const result = commitImport(db, "github.com/a/one", { now: NOW });
+  it("does not stagger a single repo", async () => {
+    const result = await commitImport(db, adminOf(db), "github.com/a/one", { now: NOW });
     expect(getRepo(db, result.results[0]!.repoId!)?.nextSyncAt).toBe(NOW);
   });
 
-  it("only advances the offset for repos that were actually created", () => {
-    commitImport(db, "github.com/a/one", { now: NOW });
-    const result = commitImport(
+  it("only advances the offset for repos that were actually created", async () => {
+    await commitImport(db, adminOf(db), "github.com/a/one", { now: NOW });
+    const result = await commitImport(
       db,
+      adminOf(db),
       ["github.com/a/one", "github.com/b/two", "github.com/c/three"].join("\n"),
       { now: NOW, staggerStepMs: 3_000 },
     );
@@ -343,7 +413,7 @@ describe("staggering", () => {
     ]);
   });
 
-  it("keeps the whole first wave inside the stagger window", () => {
+  it("keeps the whole first wave inside the stagger window", async () => {
     expect(staggerStepFor(0)).toBe(0);
     expect(staggerStepFor(1)).toBe(0);
     expect(staggerStepFor(2)).toBe(3_000);
@@ -353,9 +423,9 @@ describe("staggering", () => {
     expect(staggerStepFor(many) * (many - 1)).toBeLessThanOrEqual(MAX_STAGGER_WINDOW_MS);
   });
 
-  it("stays inside the window for a large import", () => {
+  it("stays inside the window for a large import", async () => {
     const lines = Array.from({ length: 400 }, (_, i) => `github.com/org/repo-${String(i)}`);
-    const result = commitImport(db, lines.join("\n"), { now: NOW });
+    const result = await commitImport(db, adminOf(db), lines.join("\n"), { now: NOW });
     expect(result.created).toBe(400);
 
     const times = result.results.map((line) => getRepo(db, line.repoId!)!.nextSyncAt!);
@@ -365,9 +435,10 @@ describe("staggering", () => {
 });
 
 describe("commitImport error handling", () => {
-  it("reports per line and keeps going", () => {
-    const result = commitImport(
+  it("reports per line and keeps going", async () => {
+    const result = await commitImport(
       db,
+      adminOf(db),
       [
         "https://github.com/ok/one",
         "ssh://git@github.com/bad/one",
@@ -389,9 +460,10 @@ describe("commitImport error handling", () => {
     expect(all().total).toBe(2);
   });
 
-  it("keeps the original line and line number on every result", () => {
-    const result = commitImport(
+  it("keeps the original line and line number on every result", async () => {
+    const result = await commitImport(
       db,
+      adminOf(db),
       ["", "github.com/a/b", "# comment", "bad line here"].join("\n"),
       {
         now: NOW,
@@ -401,8 +473,8 @@ describe("commitImport error handling", () => {
     expect(result.results[0]?.line).toBe("github.com/a/b");
   });
 
-  it("handles a blob of only comments and blanks", () => {
-    expect(commitImport(db, "\n# nothing\n\n   \n", { now: NOW })).toEqual({
+  it("handles a blob of only comments and blanks", async () => {
+    expect(await commitImport(db, adminOf(db), "\n# nothing\n\n   \n", { now: NOW })).toEqual({
       results: [],
       created: 0,
       updated: 0,
@@ -418,9 +490,10 @@ describe("namespace lines", () => {
       "SELECT id, forge_id, account_id, namespace FROM account_syncs WHERE source = 'namespace' ORDER BY id",
     );
 
-  it("previews a bare GitHub owner as a namespace and a repo URL as a repo", () => {
+  it("previews a bare GitHub owner as a namespace and a repo URL as a repo", async () => {
     const preview = previewImport(
       db,
+      adminOf(db),
       ["https://github.com/nodejs", "github.com/vuejs/", "https://github.com/nodejs/node"].join(
         "\n",
       ),
@@ -432,25 +505,26 @@ describe("namespace lines", () => {
     expect(syncs()).toEqual([]);
   });
 
-  it("treats a host GitHub detection would claim as a namespace even before the forge exists", () => {
+  it("treats a host GitHub detection would claim as a namespace even before the forge exists", async () => {
     db.run("DELETE FROM forges WHERE host = 'github.com'");
 
-    const preview = previewImport(db, "https://github.com/nodejs");
+    const preview = previewImport(db, adminOf(db), "https://github.com/nodejs");
 
     expect(preview.results[0]?.target).toBe("namespace");
   });
 
-  it("keeps a single segment on any other forge kind a repository", () => {
+  it("keeps a single segment on any other forge kind a repository", async () => {
     const preview = previewImport(
       db,
+      adminOf(db),
       ["https://git.example.com/solo", "gitlab.com/group"].join("\n"),
     );
 
     expect(preview.results.map((line) => line.target)).toEqual(["repo", "repo"]);
   });
 
-  it("commits a namespace line as an enabled namespace sync, not a repo", () => {
-    const result = commitImport(db, "https://github.com/nodejs", { now: NOW });
+  it("commits a namespace line as an enabled namespace sync, not a repo", async () => {
+    const result = await commitImport(db, adminOf(db), "https://github.com/nodejs", { now: NOW });
 
     expect(result.created).toBe(1);
     expect(result.results[0]).toMatchObject({ action: "created", target: "namespace" });
@@ -466,9 +540,10 @@ describe("namespace lines", () => {
     expect(due).toEqual({ enabled: 1, next_run_at: NOW });
   });
 
-  it("does not let namespace lines stretch the stagger of the repos around them", () => {
-    const result = commitImport(
+  it("does not let namespace lines stretch the stagger of the repos around them", async () => {
+    const result = await commitImport(
       db,
+      adminOf(db),
       ["github.com/nodejs", "github.com/a/one", "github.com/vuejs", "github.com/a/two"].join("\n"),
       { now: NOW, staggerStepMs: 1000 },
     );
@@ -478,54 +553,64 @@ describe("namespace lines", () => {
     expect(result.created).toBe(4);
   });
 
-  it("is idempotent, case-insensitively, and pins a named account on re-import", () => {
-    commitImport(db, "https://github.com/nodejs", { now: NOW });
-    const account = createAccount(db, KEY, {
-      forgeId: githubId(),
-      username: "org-bot",
-      secret: null,
-      isDefault: false,
-    });
+  it("is idempotent, case-insensitively, and pins a named account on re-import", async () => {
+    await commitImport(db, adminOf(db), "https://github.com/nodejs", { now: NOW });
+    const account = createAccount(
+      db,
+      KEY,
+      {
+        forgeId: githubId(),
+        username: "org-bot",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
 
-    const again = commitImport(db, "https://github.com/NodeJS", { now: NOW });
+    const again = await commitImport(db, adminOf(db), "https://github.com/NodeJS", { now: NOW });
     expect(again.results[0]?.action).toBe("updated");
     expect(syncs()[0]?.account_id).toBeNull();
 
-    const pinned = commitImport(db, "org-bot@github.com/nodejs", { now: NOW });
+    const pinned = await commitImport(db, adminOf(db), "org-bot@github.com/nodejs", { now: NOW });
     expect(pinned.results[0]).toMatchObject({ action: "updated", status: "ok" });
     expect(syncs()).toHaveLength(1);
     expect(syncs()[0]?.account_id).toBe(account.id);
 
     // A later prefix-less line never clears the pin.
-    commitImport(db, "github.com/nodejs", { now: NOW });
+    await commitImport(db, adminOf(db), "github.com/nodejs", { now: NOW });
     expect(syncs()[0]?.account_id).toBe(account.id);
   });
 
-  it("warns and falls back to the forge default when a user@ prefix names no account", () => {
-    const preview = previewImport(db, "ghost@github.com/nodejs");
-    const result = commitImport(db, "ghost@github.com/nodejs", { now: NOW });
+  it("warns and falls back to the forge default when a user@ prefix names no account", async () => {
+    const preview = previewImport(db, adminOf(db), "ghost@github.com/nodejs");
+    const result = await commitImport(db, adminOf(db), "ghost@github.com/nodejs", { now: NOW });
 
     // The preview has to say exactly what the commit then does.
     expect(preview.results[0]).toMatchObject({ status: "warning", target: "namespace" });
     expect(preview.results[0]?.message).toBe(result.results[0]?.message);
 
     expect(result.results[0]).toMatchObject({ action: "created", status: "warning" });
-    expect(result.results[0]?.message).toMatch(/forge default account/);
+    expect(result.results[0]?.message).toMatch(/default account/);
     expect(syncs()[0]?.account_id).toBeNull();
   });
 });
 
 describe("deleting an account a namespace sync is pinned to", () => {
-  it("keeps the sync and lets it fall back to the forge default", () => {
-    commitImport(db, "github.com/nodejs", { now: NOW });
+  it("keeps the sync and lets it fall back to the forge default", async () => {
+    await commitImport(db, adminOf(db), "github.com/nodejs", { now: NOW });
     const forgeId = listForges(db).find((forge) => forge.host === "github.com")!.id;
-    const account = createAccount(db, KEY, {
-      forgeId,
-      username: "org-bot",
-      secret: null,
-      isDefault: false,
-    });
-    commitImport(db, "org-bot@github.com/nodejs", { now: NOW });
+    const account = createAccount(
+      db,
+      KEY,
+      {
+        forgeId,
+        username: "org-bot",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
+    await commitImport(db, adminOf(db), "org-bot@github.com/nodejs", { now: NOW });
 
     deleteAccount(db, account.id);
 

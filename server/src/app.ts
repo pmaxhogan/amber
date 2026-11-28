@@ -172,8 +172,8 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
 
   // The sync engine only knows the bus; the notifier listens there for gone
   // repositories, so neither imports the other.
-  const stopPush = events.tap((event) => {
-    push.handleEvent(event);
+  const stopPush = events.tap((event, meta) => {
+    push.handleEvent(event, meta);
   });
   app.addHook("onClose", async () => {
     stopPush();

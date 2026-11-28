@@ -29,6 +29,7 @@ import {
   type OriginRepo,
 } from "./helpers/gitFixtures.ts";
 import type { ResolvedSettings } from "@amber/shared";
+import { adminOf } from "./helpers/users.ts";
 
 let root: string;
 let db: Db;
@@ -619,12 +620,17 @@ describe("credential lifecycle", () => {
     const forgeId = loadSyncTarget(db, repoId)?.repo.forgeId;
     expect(forgeId).toBeDefined();
     const now = Date.now();
-    const account = createAccount(db, SECRET_KEY, {
-      forgeId: forgeId!,
-      username: "octocat",
-      secret,
-      isDefault: true,
-    });
+    const account = createAccount(
+      db,
+      SECRET_KEY,
+      {
+        forgeId: forgeId!,
+        username: "octocat",
+        secret,
+        isDefault: true,
+      },
+      adminOf(db).id,
+    );
     db.run("UPDATE accounts SET last_used_at = NULL, updated_at = ? WHERE id = ?", now, account.id);
     return account.id;
   }

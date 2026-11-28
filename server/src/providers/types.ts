@@ -12,6 +12,10 @@ export interface DiscoveredRepo {
   path: string;
   /** Null for an empty repository that has no commits yet. */
   defaultBranch: string | null;
+  /**
+   * True unless the forge's visibility field CONFIRMED the repository is
+   * public: a missing or unrecognised field is private, never public.
+   */
   isPrivate: boolean;
   archived: boolean;
   /** Carried for logging and future use; the repos table has no column for it. */
@@ -42,6 +46,20 @@ export type ForkLookup =
  * Whether a user or organization still exists on the forge. Only "exists" and
  * "missing" are answers; every failure is "unknown".
  */
+/**
+ * What one single-repository GET says, beyond forkness: visibility (false
+ * only when the forge's own field confirmed public; true for any other 200
+ * and for a definitive refusal such as a 404; null only for a NON-answer:
+ * rate limit, network, 5xx) and the repository size in bytes where the
+ * forge reports one in a unit we have verified (null otherwise, which means
+ * "unknown", never "empty").
+ */
+export interface RepoInfo {
+  fork: ForkLookup;
+  isPrivate: boolean | null;
+  sizeBytes: number | null;
+}
+
 export type OwnerLookup =
   { status: "exists" } | { status: "missing" } | { status: "unknown"; rateLimited: boolean };
 
@@ -118,6 +136,12 @@ export interface AccountSyncProvider {
    * throws on a forge failure.
    */
   getForkParent?(context: DiscoveryContext, path: string): Promise<ForkLookup>;
+  /**
+   * The same single GET as getForkParent, with the visibility field and the
+   * size as well. Never throws on a forge failure: a failure is an unknown
+   * fork lookup with null visibility and size.
+   */
+  getRepoInfo?(context: DiscoveryContext, path: string): Promise<RepoInfo>;
   /**
    * Ask the forge whether the user or organization `owner` still exists. One
    * GET, never throws on a forge failure. Used to tell "this repository was

@@ -162,18 +162,41 @@ export interface TestServer {
   close: () => Promise<void>;
 }
 
-/** Boot the app on an ephemeral port in insecure mode, which skips CF Access. */
-export async function startTestServer(): Promise<TestServer> {
+export interface TestServerOptions {
+  /** Extra environment, e.g. INSECURE_USER_EMAILS or a secure-mode set. */
+  env?: Record<string, string>;
+  /** The identity seams, for a secure-mode server. */
+  cfAccessGetKey?: Parameters<typeof buildApp>[0]["cfAccessGetKey"];
+  accessPolicyFetch?: Parameters<typeof buildApp>[0]["accessPolicyFetch"];
+  now?: () => number;
+}
+
+/**
+ * Boot the app on an ephemeral port. Insecure mode by default, which skips CF
+ * Access; `options.env` can switch to a secure-mode configuration.
+ */
+export async function startTestServer(options: TestServerOptions = {}): Promise<TestServer> {
   const dataDir = tempDir("server");
   const config = loadConfig({
     INSECURE_ALLOW_PUBLIC_ACCESS: "1",
     DATA_DIR: dataDir,
     PUBLIC_ORIGIN: "https://amber.example.com",
+    ...options.env,
   });
   const log = createConsoleLogger("silent");
   const db = openDb(join(dataDir, "state", "amber.db"));
   migrate(db, log);
-  const app = await buildApp({ config, log, db, version: "test" });
+  const app = await buildApp({
+    config,
+    log,
+    db,
+    version: "test",
+    ...(options.cfAccessGetKey === undefined ? {} : { cfAccessGetKey: options.cfAccessGetKey }),
+    ...(options.accessPolicyFetch === undefined
+      ? {}
+      : { accessPolicyFetch: options.accessPolicyFetch }),
+    ...(options.now === undefined ? {} : { now: options.now }),
+  });
   await app.listen({ port: 0, host: "127.0.0.1" });
   const address = app.server.address();
   if (address === null || typeof address === "string") {
@@ -227,14 +250,36 @@ export function insertRepoRow(
   return result.lastInsertRowid;
 }
 
-/** Enable the git remote through the real admin API and return the password. */
-export async function enableRemote(server: TestServer): Promise<{
+/**
+ * Turn the git remote on and mint a credential through the real API, as the
+ * insecure-mode admin, or as `headers` say (asUser(email) for another user).
+ */
+export async function enableRemote(
+  server: TestServer,
+  headers: Record<string, string> = {},
+): Promise<{
   username: string;
   password: string;
 }> {
-  const response = await server.app.inject({ method: "POST", url: "/api/git-remote/enable" });
+  const enable = await server.app.inject({ method: "POST", url: "/api/git-remote/enable" });
+  if (enable.statusCode !== 200) {
+    throw new Error(`enable failed: ${String(enable.statusCode)} ${enable.body}`);
+  }
+  return await mintRemoteCredential(server, headers);
+}
+
+/** POST /api/git-remote/rotate and return the one-time credential. */
+export async function mintRemoteCredential(
+  server: TestServer,
+  headers: Record<string, string> = {},
+): Promise<{ username: string; password: string }> {
+  const response = await server.app.inject({
+    method: "POST",
+    url: "/api/git-remote/rotate",
+    headers,
+  });
   if (response.statusCode !== 200) {
-    throw new Error(`enable failed: ${String(response.statusCode)} ${response.body}`);
+    throw new Error(`rotate failed: ${String(response.statusCode)} ${response.body}`);
   }
   const body = response.json() as { username: string; password: string };
   return { username: body.username, password: body.password };

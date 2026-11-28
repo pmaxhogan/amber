@@ -1,81 +1,70 @@
-import { updateGitRemoteSchema, type GitRemoteConfig, type GitRemoteSecret } from "@amber/shared";
+import type { GitRemoteCredential, GitRemoteMe } from "@amber/shared";
 import type { FastifyPluginAsync } from "fastify";
-import {
-  disableGitRemote,
-  enableGitRemote,
-  GitRemoteDisabledError,
-  readGitRemoteState,
-  rotateGitRemotePassword,
-  setGitRemoteUsername,
-  toGitRemoteConfig,
-} from "../gitremote/config.ts";
-import { parseBody } from "./validate.ts";
+import { requireUser, revokeGitPassword } from "../domain/users.ts";
+import { setGitRemoteEnabled } from "../gitremote/config.ts";
+import { mintGitCredential, toGitRemoteMe } from "../gitremote/credentials.ts";
+import { requireRequestUser } from "../security/authz.ts";
 
 /**
- * /api/git-remote enable, disable, and rotate.
+ * /api/git-remote: the CALLER'S own git credential, plus the instance-wide
+ * kill switch.
  *
- * GIT-REMOTE-WAVE: these are still the INSTANCE-WIDE routes, one shared
- * credential that can clone every repository. Migration 010 deleted the
- * stored credential (so an upgraded instance starts disabled), and until the
- * per-user remote replaces this file every route here is `admin` only: the
- * admin can already read every repository, so a credential only the admin can
- * mint grants nothing new. The per-user shapes are pinned in shared
- * (gitRemoteMeSchema, gitRemoteCredentialSchema): GET/rotate/revoke for the
- * caller's own credential under `git`, enable/disable under
- * `manage_settings`, and PATCH (rename) goes away.
+ * - GET, rotate and revoke act on the caller's own row only and need `git`.
+ *   There is no path parameter, so no request can name someone else's
+ *   credential; the admin revokes other people's with
+ *   POST /api/users/:id/revoke-git.
+ * - enable and disable flip the kill switch and need `manage_settings`.
  *
- * The plaintext password exists in exactly one place in the system: the body of
- * the enable and rotate responses. It is never logged, never stored, and never
+ * The plaintext password exists in exactly one place in the system: the body
+ * of the rotate response. It is never logged, never stored, and never
  * returned by GET.
  */
 export const gitRemoteConfigRoutes: FastifyPluginAsync = async (app) => {
   const ctx = app.amber;
   const log = ctx.log.child({ mod: "gitremote" });
 
-  const view = (): GitRemoteConfig =>
-    toGitRemoteConfig(readGitRemoteState(ctx.db), ctx.config.publicOrigin);
+  /** Re-read so the answer reflects the write the handler just made. */
+  const me = (userId: number): GitRemoteMe =>
+    toGitRemoteMe(ctx.db, requireUser(ctx.db, userId), ctx.config.publicOrigin);
 
-  app.get("/git-remote", { config: { authz: "admin" } }, (): GitRemoteConfig => view());
-
-  /**
-   * Renames the basic-auth user. Works enabled or disabled, and never touches
-   * the password: existing clones keep working only if their stored URL is
-   * updated too, which is why the response carries the fresh clone template.
-   */
-  app.patch("/git-remote", { config: { authz: "admin" } }, (request): GitRemoteConfig => {
-    const { username } = parseBody(updateGitRemoteSchema, request);
-    const state = setGitRemoteUsername(ctx.db, username);
-    log.info({ enabled: state.enabled }, "git remote username changed");
-    return toGitRemoteConfig(state, ctx.config.publicOrigin);
+  app.get("/git-remote", { config: { authz: "git" } }, (request): GitRemoteMe => {
+    return me(requireRequestUser(request).id);
   });
 
-  app.post("/git-remote/enable", { config: { authz: "admin" } }, (): GitRemoteSecret => {
-    const { state, password } = enableGitRemote(ctx.db);
-    log.info("git remote enabled and a new password minted");
-    return { ...toGitRemoteConfig(state, ctx.config.publicOrigin), password };
+  app.post("/git-remote/rotate", { config: { authz: "git" } }, (request): GitRemoteCredential => {
+    const user = requireRequestUser(request);
+    const minted = mintGitCredential(ctx.db, user.id, { now: ctx.now() });
+    // The user id only: neither the username nor the secret goes to the log.
+    log.info({ userId: user.id, first: user.gitUsername === null }, "git credential minted");
+    return { ...me(user.id), username: minted.username, password: minted.password };
+  });
+
+  app.post("/git-remote/revoke", { config: { authz: "git" } }, (request): GitRemoteMe => {
+    const user = requireRequestUser(request);
+    revokeGitPassword(ctx.db, user.id, ctx.now());
+    log.info({ userId: user.id }, "git credential revoked by its owner");
+    return me(user.id);
   });
 
   app.post(
-    "/git-remote/rotate",
-    { config: { authz: "admin" } },
-    (_request, reply): GitRemoteSecret | void => {
-      try {
-        const { state, password } = rotateGitRemotePassword(ctx.db);
-        log.info("git remote password rotated");
-        return { ...toGitRemoteConfig(state, ctx.config.publicOrigin), password };
-      } catch (error) {
-        if (error instanceof GitRemoteDisabledError) {
-          reply.code(409).send({ error: "git_remote_disabled", message: error.message });
-          return;
-        }
-        throw error;
-      }
+    "/git-remote/enable",
+    { config: { authz: "manage_settings" } },
+    (request): GitRemoteMe => {
+      const user = requireRequestUser(request);
+      setGitRemoteEnabled(ctx.db, true, ctx.now());
+      log.info({ userId: user.id }, "git remote enabled");
+      return me(user.id);
     },
   );
 
-  app.post("/git-remote/disable", { config: { authz: "admin" } }, (): GitRemoteConfig => {
-    const state = disableGitRemote(ctx.db);
-    log.info("git remote disabled and its password destroyed");
-    return toGitRemoteConfig(state, ctx.config.publicOrigin);
-  });
+  app.post(
+    "/git-remote/disable",
+    { config: { authz: "manage_settings" } },
+    (request): GitRemoteMe => {
+      const user = requireRequestUser(request);
+      setGitRemoteEnabled(ctx.db, false, ctx.now());
+      log.info({ userId: user.id }, "git remote disabled");
+      return me(user.id);
+    },
+  );
 };

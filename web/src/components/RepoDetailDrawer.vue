@@ -13,7 +13,7 @@ import TabPanel from "primevue/tabpanel";
 import TabPanels from "primevue/tabpanels";
 import Tabs from "primevue/tabs";
 import ToggleSwitch from "primevue/toggleswitch";
-import type { Account, Forge, GitRemoteConfig, SettingKey, SyncRun } from "@amber/shared";
+import type { Account, Forge, GitRemoteMe, SettingKey, SyncRun } from "@amber/shared";
 import { settingsRegistry } from "@amber/shared";
 import { SCOPE_LABELS, normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
@@ -42,7 +42,9 @@ import {
   saveBlob,
   supportsDirectoryPicker,
 } from "../lib/folderDownload.ts";
+import { accountsOfOwner, repoOwnerId } from "../lib/ownership.ts";
 import { useToaster } from "../lib/toast.ts";
+import { useMeStore } from "../stores/me.ts";
 import AppIcon from "./AppIcon.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import CopyField from "./CopyField.vue";
@@ -65,6 +67,7 @@ const emit = defineEmits<{
 
 const api = useApi();
 const toast = useToaster();
+const me = useMeStore();
 
 const activeTab = ref("overview");
 
@@ -116,8 +119,29 @@ const forkParentUrl = computed(() => {
   if (parent === null || origin.value === "") return null;
   return `${origin.value}/${parent.split("/").map(encodeURIComponent).join("/")}`;
 });
+const ownerId = computed(() => (props.repo === null ? null : repoOwnerId(props.repo, me.userId)));
+
+/**
+ * Whether the caller may change this repository: their own, or anyone's with
+ * `modify_others`. The API enforces it; this only hides what would be refused.
+ */
+const canModify = computed(
+  () => me.isAdmin || props.repo?.mine === true || me.can("modify_others"),
+);
+
+/**
+ * The path and the account override decide what the OWNER'S token fetches, so
+ * only the owner and the admin may touch them.
+ */
+const canEditOwnerFields = computed(
+  () => me.isAdmin || (props.repo?.mine === true && ownerId.value !== null),
+);
+
+/** The repository owner's accounts on its forge, never anyone else's. */
 const forgeAccounts = computed(() =>
-  props.accounts.filter((account) => account.forgeId === props.repo?.forgeId),
+  accountsOfOwner(props.accounts, ownerId.value).filter(
+    (account) => account.forgeId === props.repo?.forgeId,
+  ),
 );
 const defaultAccount = computed(
   () => forgeAccounts.value.find((account) => account.isDefault) ?? null,
@@ -404,7 +428,7 @@ async function downloadToFolder(): Promise<void> {
 
 // -- Clone ------------------------------------------------------------------
 
-const gitRemote = ref<GitRemoteConfig | null>(null);
+const gitRemote = ref<GitRemoteMe | null>(null);
 const gitRemoteError = ref<ApiClientError | null>(null);
 
 async function loadGitRemote(): Promise<void> {
@@ -417,15 +441,15 @@ async function loadGitRemote(): Promise<void> {
 }
 
 /**
- * The template carries a {slug} placeholder. Older templates may not, in which
- * case the slug is appended so the command is still copy-pasteable.
+ * The template carries {slug} and {password}. The slug is filled in here; the
+ * password is the caller's own and is only ever shown once, when it is made,
+ * so it stays a placeholder.
  */
 const cloneUrl = computed(() => {
   const template = gitRemote.value?.cloneUrlTemplate ?? "";
   const slug = props.repo?.slug ?? "";
   if (template === "") return "";
-  if (template.includes("{slug}")) return template.replace("{slug}", slug);
-  return `${template.replace(/\/$/, "")}/${slug}.git`;
+  return template.replace("{slug}", slug);
 });
 
 const cloneCommand = computed(() => (cloneUrl.value === "" ? "" : `git clone ${cloneUrl.value}`));
@@ -485,7 +509,7 @@ watch(activeTab, (tab) => {
     <div v-if="repo" class="repo-drawer__body">
       <p class="repo-drawer__path mono">{{ origin }}/{{ repo.path }}</p>
 
-      <div class="amber-row repo-drawer__actions">
+      <div v-if="canModify" class="amber-row repo-drawer__actions">
         <Button label="Sync now" size="small" :loading="busy" :disabled="busy" @click="syncNow" />
         <Button
           :label="repo.state === 'paused' ? 'Resume' : 'Pause'"
@@ -508,10 +532,10 @@ watch(activeTab, (tab) => {
         <TabList>
           <Tab value="overview">Overview</Tab>
           <Tab value="history">History</Tab>
-          <Tab value="settings">Settings</Tab>
-          <Tab value="export">Export</Tab>
-          <Tab value="clone">Clone</Tab>
-          <Tab value="browse">Browse</Tab>
+          <Tab v-if="canModify" value="settings">Settings</Tab>
+          <Tab v-if="me.can('export')" value="export">Export</Tab>
+          <Tab v-if="me.can('git')" value="clone">Clone</Tab>
+          <Tab v-if="me.can('browse')" value="browse">Browse</Tab>
         </TabList>
 
         <TabPanels>
@@ -606,7 +630,7 @@ watch(activeTab, (tab) => {
               {{ repo.lastError }}
             </p>
 
-            <section class="repo-drawer__section">
+            <section v-if="canModify || canEditOwnerFields" class="repo-drawer__section">
               <h3>Credentials</h3>
               <div class="amber-field">
                 <label for="repo-account-override">Account override</label>
@@ -616,9 +640,12 @@ watch(activeTab, (tab) => {
                   :options="accountOptions"
                   option-label="label"
                   option-value="value"
-                  :disabled="busy || repo.forceAnonymous"
+                  :disabled="busy || repo.forceAnonymous || !canEditOwnerFields"
                   @update:model-value="patchRepo({ accountOverrideId: $event })"
                 />
+                <p v-if="!canEditOwnerFields" class="amber-note">
+                  Only the owner can pick which account fetches this repository.
+                </p>
                 <p class="amber-note">
                   Amber authenticates as
                   <strong>{{
@@ -633,7 +660,7 @@ watch(activeTab, (tab) => {
                 <ToggleSwitch
                   input-id="repo-force-anonymous"
                   :model-value="repo.forceAnonymous"
-                  :disabled="busy"
+                  :disabled="busy || !canModify"
                   @update:model-value="patchRepo({ forceAnonymous: $event })"
                 />
                 <label for="repo-force-anonymous">Always fetch anonymously</label>
@@ -723,7 +750,7 @@ watch(activeTab, (tab) => {
           </TabPanel>
 
           <!-- Settings -->
-          <TabPanel value="settings">
+          <TabPanel v-if="canModify" value="settings">
             <ErrorState :error="settingsError" @retry="loadSettings" />
             <p v-if="settingsLoading" class="amber-muted">Loading settings...</p>
             <SettingsScopeEditor
@@ -737,7 +764,7 @@ watch(activeTab, (tab) => {
           </TabPanel>
 
           <!-- Export -->
-          <TabPanel value="export">
+          <TabPanel v-if="me.can('export')" value="export">
             <div class="amber-stack">
               <div class="amber-field">
                 <label for="export-kind">What to export</label>
@@ -784,13 +811,16 @@ watch(activeTab, (tab) => {
           </TabPanel>
 
           <!-- Clone -->
-          <TabPanel value="clone">
+          <TabPanel v-if="me.can('git')" value="clone">
             <ErrorState :error="gitRemoteError" @retry="loadGitRemote" />
             <div v-if="gitRemoteError === null" class="amber-stack">
               <template v-if="gitRemote?.enabled">
                 <p class="amber-muted">
                   Amber serves this backup as a read-only git remote. Clone it with the command
-                  below; git will ask for the password shown when the remote was enabled.
+                  below, replacing <span class="mono">{password}</span> with your own git password.
+                  <span v-if="!gitRemote.hasPassword">
+                    You have not created one yet; do that on the Git Remote page.
+                  </span>
                 </p>
                 <CopyField label="Clone command" :value="cloneCommand" monospace />
                 <CopyField label="Remote URL" :value="cloneUrl" monospace />
@@ -798,13 +828,13 @@ watch(activeTab, (tab) => {
               <template v-else>
                 <p class="amber-muted">
                   The read-only git remote is turned off, so this backup cannot be cloned over HTTP
-                  yet. Turn it on from the Git Remote page.
+                  right now.
                 </p>
               </template>
             </div>
           </TabPanel>
           <!-- Browse -->
-          <TabPanel value="browse">
+          <TabPanel v-if="me.can('browse')" value="browse">
             <RepoBrowser v-if="browseOpened" :key="repo.id" :repo="repo" />
           </TabPanel>
         </TabPanels>

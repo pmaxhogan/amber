@@ -3,6 +3,7 @@ import {
   encodeRepoPath,
   expectArray,
   forkLookupFailure,
+  visibilityOnFailure,
   getJson,
   MAX_PAGES,
   matchesVisibility,
@@ -10,7 +11,13 @@ import {
   parentPathOrNull,
   ProviderError,
 } from "./http.ts";
-import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext, ForkLookup } from "./types.ts";
+import type {
+  AccountSyncProvider,
+  DiscoveredRepo,
+  DiscoveryContext,
+  ForkLookup,
+  RepoInfo,
+} from "./types.ts";
 
 /**
  * Bitbucket Cloud REST 2.0 client. Verified against the live OpenAPI spec
@@ -47,6 +54,46 @@ interface BitbucketRepo {
   mainbranch?: { name?: unknown } | null;
   description?: unknown;
   parent?: { full_name?: unknown } | null;
+}
+
+/** `is_private`, fail closed: only a literal false is public. */
+export function bitbucketVisibility(raw: Pick<BitbucketRepo, "is_private">): boolean | null {
+  if (raw.is_private === true) {
+    return true;
+  }
+  return raw.is_private === false ? false : null;
+}
+
+/** Size is left unknown: its unit has not been verified, and unknown lets a clone proceed. */
+async function bitbucketRepoInfo(context: DiscoveryContext, path: string): Promise<RepoInfo> {
+  const encoded = encodeRepoPath(path);
+  if (encoded.split("/").length !== 2) {
+    return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+  }
+  try {
+    const response = await getJson<BitbucketRepo>(
+      context,
+      `${apiBase(context.baseUrl)}/repositories/${encoded}`,
+      { headers: headers(context), notFoundHint: path },
+    );
+    if (typeof response.data.full_name !== "string") {
+      // An answer, but not a recognisable one: not public.
+      return { fork: { status: "unknown", rateLimited: false }, isPrivate: true, sizeBytes: null };
+    }
+    const parent = parentPathOrNull(response.data.parent?.full_name);
+    return {
+      fork: parent === null ? { status: "not_fork" } : { status: "fork", parent },
+      // A 200 that does not say "public" is an answer: not public.
+      isPrivate: bitbucketVisibility(response.data) ?? true,
+      sizeBytes: null,
+    };
+  } catch (cause) {
+    return {
+      fork: forkLookupFailure(cause),
+      isPrivate: visibilityOnFailure(cause),
+      sizeBytes: null,
+    };
+  }
 }
 
 interface BitbucketPage {
@@ -90,7 +137,7 @@ function toDiscovered(raw: BitbucketRepo): DiscoveredRepo {
     path: normalizeRepoPath(raw.full_name),
     // mainbranch is absent on an empty repository: Bitbucket has no empty flag.
     defaultBranch: typeof branch === "string" && branch !== "" ? branch : null,
-    isPrivate: raw.is_private === true,
+    isPrivate: bitbucketVisibility(raw) !== false,
     // Bitbucket Cloud has no archived concept.
     archived: false,
     description:
@@ -201,23 +248,8 @@ export const bitbucketProvider: AccountSyncProvider = {
   },
 
   async getForkParent(context: DiscoveryContext, path: string): Promise<ForkLookup> {
-    const encoded = encodeRepoPath(path);
-    if (encoded.split("/").length !== 2) {
-      return { status: "unknown", rateLimited: false };
-    }
-    try {
-      const response = await getJson<BitbucketRepo>(
-        context,
-        `${apiBase(context.baseUrl)}/repositories/${encoded}`,
-        { headers: headers(context), notFoundHint: path },
-      );
-      if (typeof response.data.full_name !== "string") {
-        return { status: "unknown", rateLimited: false };
-      }
-      const parent = parentPathOrNull(response.data.parent?.full_name);
-      return parent === null ? { status: "not_fork" } : { status: "fork", parent };
-    } catch (cause) {
-      return forkLookupFailure(cause);
-    }
+    return (await bitbucketRepoInfo(context, path)).fork;
   },
+
+  getRepoInfo: bitbucketRepoInfo,
 };

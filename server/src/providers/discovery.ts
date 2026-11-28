@@ -14,7 +14,8 @@ import {
   type DeleteRepoOptions,
   type RepoFileRemover,
 } from "../domain/repos.ts";
-import { OWNER_OR_ADMIN_SQL } from "../domain/users.ts";
+import { ownedAccountId, ownerMayUseAccounts } from "../domain/credentials.ts";
+import { getUser, isAtOrOverCap } from "../domain/users.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
 import { bitbucketProvider } from "./bitbucket.ts";
@@ -101,6 +102,7 @@ interface AccountSyncRow {
   last_run_at: number | null;
   last_error: string | null;
   repos_discovered: number | null;
+  owner_user_id: number;
   created_at: number;
   updated_at: number;
 }
@@ -110,6 +112,7 @@ interface AccountRow {
   forge_id: number;
   username: string;
   secret_enc: Uint8Array | null;
+  owner_user_id: number;
 }
 
 interface ForgeRow {
@@ -181,6 +184,7 @@ export function mapAccountSync(row: AccountSyncRow): AccountSync {
     lastRunAt: row.last_run_at,
     lastError: row.last_error,
     reposDiscovered: row.repos_discovered,
+    ownerUserId: row.owner_user_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -190,14 +194,22 @@ export function getAccountSyncRow(db: Db, id: number): AccountSyncRow | undefine
   return db.get<AccountSyncRow>("SELECT * FROM account_syncs WHERE id = ?", id);
 }
 
-/** The namespace sync for this forge and name, compared case-insensitively. */
+/**
+ * The user's namespace sync for this forge and name, compared
+ * case-insensitively. Per owner, like the unique index: another user's sync
+ * of the same namespace is theirs, and never found (or edited) through here.
+ */
 export function findNamespaceSync(
   db: Db,
+  ownerUserId: number,
   forgeId: number,
   namespace: string,
 ): AccountSyncRow | undefined {
   return db.get<AccountSyncRow>(
-    "SELECT * FROM account_syncs WHERE forge_id = ? AND source = 'namespace' AND namespace = ? COLLATE NOCASE",
+    `SELECT * FROM account_syncs
+      WHERE owner_user_id = ? AND forge_id = ? AND source = 'namespace'
+        AND namespace = ? COLLATE NOCASE`,
+    ownerUserId,
     forgeId,
     namespace,
   );
@@ -215,8 +227,12 @@ export interface NewAccountSync {
   visibility: AccountSyncVisibility;
   enabled: boolean;
   intervalMinutes: number;
-  /** The user the sync belongs to. Absent, the admin row: never NULL. */
-  ownerUserId?: number | null;
+  /**
+   * The user the sync belongs to, and the owner of every repository it
+   * creates. Required: the database would quietly fill in the admin for a
+   * forgotten one.
+   */
+  ownerUserId: number;
 }
 
 /** Insert one sync. An enabled one is due at once, so the next timer tick runs it. */
@@ -229,7 +245,7 @@ export function insertAccountSync(
     `INSERT INTO account_syncs (
        forge_id, account_id, source, namespace, top_n, window_days, visibility, enabled,
        interval_minutes, next_run_at, owner_user_id, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${OWNER_OR_ADMIN_SQL}, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     input.forgeId,
     input.accountId,
     input.source,
@@ -240,7 +256,7 @@ export function insertAccountSync(
     input.enabled ? 1 : 0,
     input.intervalMinutes,
     input.enabled ? now : null,
-    input.ownerUserId ?? null,
+    input.ownerUserId,
     now,
     now,
   );
@@ -255,8 +271,11 @@ export function insertAccountSync(
 export function listDueAccountSyncs(db: Db, now: number = Date.now()): AccountSync[] {
   return db
     .all<AccountSyncRow>(
+      // A sync whose owner was removed does not run: their accounts are never
+      // used, and nothing new should be created in their name.
       `SELECT * FROM account_syncs
         WHERE enabled = 1 AND (next_run_at IS NULL OR next_run_at <= ?)
+          AND owner_user_id IN (SELECT id FROM users WHERE removed_at IS NULL)
         ORDER BY next_run_at IS NULL DESC, next_run_at ASC, id ASC`,
       now,
     )
@@ -339,21 +358,42 @@ export async function runAccountSyncDetailed(
     if (forge === undefined) {
       throw new Error(`Forge ${String(row.forge_id)} does not exist`);
     }
-    // A namespace sync without an account follows the forge default, read
-    // fresh every run so changing the default takes effect; with no account at
-    // all it runs anonymously and sees public repositories only.
-    const account =
-      row.account_id === null
-        ? db.get<AccountRow>(
-            "SELECT id, forge_id, username, secret_enc FROM accounts WHERE forge_id = ? AND is_default = 1",
-            forge.id,
-          )
-        : db.get<AccountRow>(
-            "SELECT id, forge_id, username, secret_enc FROM accounts WHERE id = ?",
-            row.account_id,
-          );
-    if (account === undefined && row.account_id !== null) {
-      throw new Error(`Account ${String(row.account_id)} does not exist`);
+    const owner = getUser(db, row.owner_user_id);
+    if (owner === undefined || owner.removedAt !== null) {
+      // Not an error the forge can fix: the owner left, so nothing runs in
+      // their name and none of their accounts is used.
+      throw new Error("The owner of this sync was removed, so it does not run.");
+    }
+    const mayUseAccounts = ownerMayUseAccounts(owner);
+    // The account a run presents is always the sync OWNER's own: the pinned
+    // one when it really is theirs and on this forge, else (namespace and
+    // trending syncs) their default there, read fresh every run so changing
+    // the default takes effect. An owner without import_private runs
+    // anonymously and sees public repositories only.
+    let account: AccountRow | undefined;
+    if (row.account_id !== null) {
+      account = db.get<AccountRow>(
+        "SELECT id, forge_id, username, secret_enc, owner_user_id FROM accounts WHERE id = ?",
+        row.account_id,
+      );
+      if (
+        account === undefined ||
+        account.owner_user_id !== owner.id ||
+        account.forge_id !== forge.id
+      ) {
+        // Fail closed: never fall back to some other account for a sync that
+        // names one, and never use one its owner does not own.
+        throw new Error(`Account ${String(row.account_id)} is not usable by this sync`);
+      }
+    } else if (mayUseAccounts) {
+      const defaultId = ownedAccountId(db, owner.id, forge.id, null);
+      account =
+        defaultId === null
+          ? undefined
+          : db.get<AccountRow>(
+              "SELECT id, forge_id, username, secret_enc, owner_user_id FROM accounts WHERE id = ?",
+              defaultId,
+            );
     }
 
     const provider = providerFor(forge.kind);
@@ -377,7 +417,10 @@ export async function runAccountSyncDetailed(
       username: account?.username ?? "",
       // An "anonymous" owned or starred sync is simply an accounts row with no
       // stored secret; a namespace sync may also have no account at all.
-      token: account === undefined ? null : resolveToken(account, deps.secretKey ?? null, decrypt),
+      token:
+        account === undefined || !mayUseAccounts
+          ? null
+          : resolveToken(account, deps.secretKey ?? null, decrypt),
       // Visibility is an owned-sync concept; a starred list is whatever it is.
       visibility: row.source === "starred" || row.source === "trending" ? "all" : row.visibility,
       fetch: deps.fetch,
@@ -394,21 +437,35 @@ export async function runAccountSyncDetailed(
     const upsert = upsertDiscoveredRepos(db, {
       forgeId: forge.id,
       accountSyncId: row.id,
+      ownerUserId: owner.id,
+      // At or over the storage cap, a user's syncs skip NEW discoveries.
+      // Repositories they already have keep syncing.
+      skipNew: isAtOrOverCap(db, owner),
       repos: [...byPath.values()],
       helpers,
       now: now(),
       // A namespace sync pinned to a specific account fetches what it found
       // with that account, which need not be the forge default. Owned and
       // starred syncs keep their historical behaviour of no override.
+      // The pinned account was checked above to be the owner's own.
       accountOverrideId: row.source === "namespace" ? row.account_id : null,
     });
     created = upsert.created;
     linked = upsert.linked;
+    if (upsert.skippedForCap > 0) {
+      log.info(
+        { accountSyncId: row.id, skipped: upsert.skippedForCap },
+        "owner is at or over their storage cap, skipping new repositories",
+      );
+    }
 
     const stale = db
+      // Only the sync owner's repositories: starred auto-removal must never
+      // reach a repository someone else owns, whatever links it.
       .all<ManagedRepoRow>(
-        "SELECT id, path, origin FROM repos WHERE managed_by_account_sync_id = ?",
+        "SELECT id, path, origin FROM repos WHERE managed_by_account_sync_id = ? AND owner_user_id = ?",
         row.id,
+        owner.id,
       )
       .filter((repo) => !byPath.has(repo.path));
     // Yesterday's trending repositories are all "stale" today, by design. That
@@ -580,6 +637,10 @@ function jitteredInterval(intervalMinutes: number, random: () => number): number
 interface UpsertArgs {
   forgeId: number;
   accountSyncId: number;
+  /** The sync's owner: creates are theirs, and only their rows are linked. */
+  ownerUserId: number;
+  /** The owner is at or over their storage cap: create nothing new. */
+  skipNew?: boolean;
   repos: readonly DiscoveredRepo[];
   helpers: DiscoveryRepoHelpers;
   now: number;
@@ -590,6 +651,8 @@ interface UpsertArgs {
 interface UpsertOutcome {
   created: number;
   linked: number;
+  /** Repositories not created because the owner is at or over their cap. */
+  skippedForCap: number;
 }
 
 /**
@@ -598,30 +661,44 @@ interface UpsertOutcome {
  * its origin: per-repo configuration always wins over account-level sync.
  */
 export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
-  const existing = new Map<string, { id: number; managed: number | null }>();
+  const existing = new Map<string, { id: number; managed: number | null; mine: boolean }>();
   for (const repo of args.repos) {
-    const found = db.get<{ id: number; managed_by_account_sync_id: number | null }>(
-      "SELECT id, managed_by_account_sync_id FROM repos WHERE forge_id = ? AND path = ?",
+    const found = db.get<{
+      id: number;
+      managed_by_account_sync_id: number | null;
+      owner_user_id: number | null;
+    }>(
+      "SELECT id, managed_by_account_sync_id, owner_user_id FROM repos WHERE forge_id = ? AND path = ?",
       args.forgeId,
       repo.path,
     );
     if (found !== undefined) {
-      existing.set(repo.path, { id: found.id, managed: found.managed_by_account_sync_id });
+      existing.set(repo.path, {
+        id: found.id,
+        managed: found.managed_by_account_sync_id,
+        mine: found.owner_user_id === args.ownerUserId,
+      });
     }
   }
 
-  const fresh = args.repos.filter((repo) => !existing.has(repo.path));
+  const fresh = args.skipNew === true ? [] : args.repos.filter((repo) => !existing.has(repo.path));
   const step =
     fresh.length === 0 ? 0 : Math.min(STAGGER_STEP_MAX_MS, STAGGER_WINDOW_MS / fresh.length);
 
   let created = 0;
   let linked = 0;
+  let skippedForCap = 0;
 
   db.tx(() => {
     let index = 0;
     for (const repo of args.repos) {
       const found = existing.get(repo.path);
       if (found !== undefined) {
+        if (!found.mine) {
+          // Someone else's repository: one sync never links, relabels or
+          // otherwise touches a row another user owns.
+          continue;
+        }
         // Listed means it exists upstream, whichever sync manages the row.
         // Only an unmanaged row is linked to this sync.
         db.run(
@@ -636,14 +713,20 @@ export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
           found.id,
         );
         writeListedForkKnowledge(db, found.id, repo, args.now);
+        writeListedVisibility(db, found.id, repo, args.now);
         if (found.managed === null) {
           linked += 1;
         }
         continue;
       }
+      if (args.skipNew === true) {
+        skippedForCap += 1;
+        continue;
+      }
       insertDiscoveredRepo(db, {
         forgeId: args.forgeId,
         accountSyncId: args.accountSyncId,
+        ownerUserId: args.ownerUserId,
         repo,
         helpers: args.helpers,
         now: args.now,
@@ -655,12 +738,13 @@ export function upsertDiscoveredRepos(db: Db, args: UpsertArgs): UpsertOutcome {
     }
   });
 
-  return { created, linked };
+  return { created, linked, skippedForCap };
 }
 
 interface InsertArgs {
   forgeId: number;
   accountSyncId: number;
+  ownerUserId: number;
   repo: DiscoveredRepo;
   helpers: DiscoveryRepoHelpers;
   now: number;
@@ -679,11 +763,9 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
         `INSERT INTO repos (
            forge_id, path, display_name, slug, short_id, managed_by_account_sync_id,
            account_override_id, origin, state, next_sync_at, consecutive_failures,
-           default_branch, last_seen_at, owner_user_id, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'account_sync', 'active', ?, 0, ?, ?,
-                   COALESCE((SELECT owner_user_id FROM account_syncs WHERE id = ?),
-                            (SELECT id FROM users WHERE is_admin = 1)),
-                   ?, ?)`,
+           default_branch, last_seen_at, owner_user_id, is_private, visibility_checked_at,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'account_sync', 'active', ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
         args.forgeId,
         args.repo.path,
         displayName,
@@ -695,7 +777,10 @@ function insertDiscoveredRepo(db: Db, args: InsertArgs): void {
         args.repo.defaultBranch,
         args.now,
         // A discovered repo belongs to whoever owns the sync that found it.
-        args.accountSyncId,
+        args.ownerUserId,
+        // The listing is the forge's own answer about visibility.
+        args.repo.isPrivate ? 1 : 0,
+        args.now,
         args.now,
         args.now,
       );
@@ -733,6 +818,20 @@ function writeListedForkKnowledge(db: Db, repoId: number, repo: DiscoveredRepo, 
   db.run(
     "UPDATE repos SET fork_parent = ?, fork_known = 1, fork_checked_at = ? WHERE id = ?",
     repo.forkParent,
+    now,
+    repoId,
+  );
+}
+
+/**
+ * The listing's visibility field is the forge's own answer, so it is written
+ * down as such. Providers map anything short of a confirmed "public" to
+ * private, so this can only ever expose what the forge said is public.
+ */
+function writeListedVisibility(db: Db, repoId: number, repo: DiscoveredRepo, now: number): void {
+  db.run(
+    "UPDATE repos SET is_private = ?, visibility_checked_at = ? WHERE id = ?",
+    repo.isPrivate ? 1 : 0,
     now,
     repoId,
   );

@@ -4,7 +4,11 @@ import type { Db } from "./db/db.ts";
 import type { RepoFileRemover } from "./domain/repos.ts";
 import type { EventBus } from "./events.ts";
 import { runDueAccountSyncs, type DiscoveryDeps } from "./providers/discovery.ts";
-import { resolvePendingForks, type ForkResolverDeps } from "./providers/forks.ts";
+import {
+  processLookupLimits,
+  resolvePendingForks,
+  type ForkResolverDeps,
+} from "./providers/forks.ts";
 import { resolveGoneOwners, type OwnerResolverDeps } from "./providers/owners.ts";
 
 /**
@@ -55,8 +59,11 @@ export function startAccountSyncTimer(options: AccountSyncTimerOptions): Account
     // would put two "mod" keys on every line it logs.
     log: options.log,
     secretKey: options.secretKey,
-    // Lives as long as the timer so a rate limit cooldown outlasts its pass.
-    cooldowns: new Map<number, number>(),
+    // Process-wide, so a rate limit cooldown outlasts its pass, the anonymous
+    // budget is counted over the hour rather than per pass, and the scheduler's
+    // first-clone cap gate draws on the very same budget.
+    cooldowns: processLookupLimits.cooldowns,
+    anonymousBudget: processLookupLimits.anonymousBudget,
     onResolved: (repoId) => {
       options.events?.publish("repo.updated", { repoId });
     },

@@ -132,7 +132,9 @@ describe("resolvePendingForks", () => {
   });
 
   it("never asks about a repo that already has an answer", async () => {
-    repo(github, "me/known", { known: 1, parent: "a/b", checkedAt: 5 });
+    const id = repo(github, "me/known", { known: 1, parent: "a/b", checkedAt: 5 });
+    // Its visibility was asked just now too, so nothing about it is due.
+    db.run("UPDATE repos SET visibility_checked_at = ? WHERE id = ?", NOW, id);
 
     await resolvePendingForks(db, deps());
 
@@ -198,10 +200,11 @@ describe("resolvePendingForks", () => {
   it("keeps the cooldown across passes for an hour, then asks again", async () => {
     repo(github, "me/a");
     answers.set("me/a", { status: "unknown", rateLimited: true });
-    const cooldowns = new Map<number, number>();
+    const cooldowns = new Map<string, number>();
 
     await resolvePendingForks(db, deps({ cooldowns }));
-    expect(cooldowns.get(github)).toBe(NOW + FORK_RATE_LIMIT_COOLDOWN_MS);
+    // Keyed by forge AND credential: an anonymous limit must not stall a token.
+    expect(cooldowns.get(`${String(github)}:anon`)).toBe(NOW + FORK_RATE_LIMIT_COOLDOWN_MS);
 
     clock = NOW + FORK_RATE_LIMIT_COOLDOWN_MS - 1;
     await resolvePendingForks(db, deps({ cooldowns }));
@@ -211,7 +214,7 @@ describe("resolvePendingForks", () => {
     answers.set("me/a", { status: "fork", parent: "x/y" });
     await resolvePendingForks(db, deps({ cooldowns }));
     expect(calls).toHaveLength(2);
-    expect(cooldowns.has(github)).toBe(false);
+    expect(cooldowns.has(`${String(github)}:anon`)).toBe(false);
   });
 
   it("only asks forges whose provider can answer", async () => {

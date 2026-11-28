@@ -15,10 +15,11 @@ import type {
 } from "@amber/shared";
 import { parseImportLine } from "@amber/shared";
 import type { Db } from "../db/db.ts";
-import { conflict, invalid, isUniqueViolation, notFound } from "./errors.ts";
+import { canView, hasPermission, isRepoOwner, visibleRepoSqlFilter } from "../security/authz.ts";
+import { conflict, forbidden, invalid, isUniqueViolation, notFound } from "./errors.ts";
 import { requireForge } from "./forges.ts";
 import { resolveSettingsForRepos } from "./settings.ts";
-import { OWNER_OR_ADMIN_SQL } from "./users.ts";
+import { getUser, type User } from "./users.ts";
 
 /**
  * `forge_id` is IMMUTABLE. A repo cannot be re-pointed at another forge, which
@@ -52,6 +53,8 @@ interface RepoRow {
   default_branch: string | null;
   last_fetch_head: string | null;
   origin: string;
+  owner_user_id: number | null;
+  is_private: number;
   created_at: number;
   updated_at: number;
 }
@@ -62,7 +65,7 @@ const REPO_COLUMNS = `repos.id, repos.forge_id, repos.path, repos.display_name, 
   repos.last_sync_at, repos.last_success_at, repos.last_seen_at, repos.gone_at,
   repos.fork_parent, repos.owner_gone, repos.owner_checked_at, repos.last_error,
   repos.disk_usage_bytes, repos.default_branch, repos.last_fetch_head, repos.origin,
-  repos.created_at, repos.updated_at`;
+  repos.owner_user_id, repos.is_private, repos.created_at, repos.updated_at`;
 
 /**
  * Whether the owner is gone too, as of this repo's current gone episode. A
@@ -104,9 +107,48 @@ function toRepo(row: RepoRow): Repo {
     defaultBranch: row.default_branch,
     lastFetchHead: row.last_fetch_head,
     origin: row.origin as RepoOrigin,
+    isPrivate: row.is_private !== 0,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/**
+ * The fields that depend on who is asking: `mine` for everyone, and the
+ * owner's identity for the admin only. Nobody else learns who owns a
+ * repository they did not import.
+ */
+function viewerFields(
+  row: RepoRow,
+  viewer: User,
+  owners: ReadonlyMap<number, User>,
+): Pick<Repo, "mine" | "owner"> {
+  const mine = row.owner_user_id !== null && row.owner_user_id === viewer.id;
+  if (!viewer.isAdmin || row.owner_user_id === null) {
+    return { mine };
+  }
+  const owner = owners.get(row.owner_user_id);
+  return owner === undefined
+    ? { mine }
+    : { mine, owner: { id: owner.id, email: owner.email, removed: owner.removedAt !== null } };
+}
+
+/** The owners of a page of rows, for the admin's owner column. One read per distinct owner. */
+function ownersOf(db: Db, rows: readonly RepoRow[], viewer: User): Map<number, User> {
+  const out = new Map<number, User>();
+  if (!viewer.isAdmin) {
+    return out;
+  }
+  for (const id of new Set(rows.map((row) => row.owner_user_id))) {
+    if (id === null) {
+      continue;
+    }
+    const user = getUser(db, id);
+    if (user !== undefined) {
+      out.set(id, user);
+    }
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +248,11 @@ export function displayNameFor(path: string): string {
  * repos.path keeps whatever spelling the import used. Repos that are not forks
  * are left out of the map.
  */
-function forkParentRepoIds(db: Db, children: readonly RepoRow[]): Map<number, number | null> {
+function forkParentRepoIds(
+  db: Db,
+  children: readonly RepoRow[],
+  viewer?: User,
+): Map<number, number | null> {
   const forks = children.filter((row) => row.fork_parent !== null);
   const found = new Map<number, number | null>();
   for (const row of forks) {
@@ -216,6 +262,10 @@ function forkParentRepoIds(db: Db, children: readonly RepoRow[]): Map<number, nu
     return found;
   }
   const marks = forks.map(() => "?").join(", ");
+  // A derived reference obeys visibility too: a parent the viewer cannot see
+  // reads exactly like a parent Amber does not have.
+  const visible =
+    viewer === undefined ? { sql: "(1)", params: [] } : visibleRepoSqlFilter(viewer, "parent");
   const matches = db.all<{ child_id: number; parent_id: number }>(
     `SELECT child.id AS child_id, MIN(parent.id) AS parent_id
        FROM repos child
@@ -223,8 +273,10 @@ function forkParentRepoIds(db: Db, children: readonly RepoRow[]): Map<number, nu
          ON parent.forge_id = child.forge_id
         AND parent.path = child.fork_parent COLLATE NOCASE
         AND parent.id <> child.id
+        AND ${visible.sql}
       WHERE child.id IN (${marks})
       GROUP BY child.id`,
+    ...visible.params,
     ...forks.map((row) => row.id),
   );
   for (const match of matches) {
@@ -242,6 +294,32 @@ export function getRepo(db: Db, id: number): Repo | undefined {
   const parentId = forkParentRepoIds(db, [row]).get(row.id);
   // Only forks carry the key: the single read has to agree with the listing.
   return parentId === undefined ? repo : { ...repo, forkParentRepoId: parentId };
+}
+
+/**
+ * The repo as `viewer` may see it: undefined when it does not exist OR the
+ * viewer cannot view it, so the two are indistinguishable to the caller.
+ */
+export function getRepoFor(db: Db, id: number, viewer: User): Repo | undefined {
+  const row = db.get<RepoRow>(`SELECT ${REPO_COLUMNS} FROM repos WHERE repos.id = ?`, id);
+  if (
+    row === undefined ||
+    !canView(viewer, { ownerUserId: row.owner_user_id, isPrivate: row.is_private !== 0 })
+  ) {
+    return undefined;
+  }
+  const repo = { ...toRepo(row), ...viewerFields(row, viewer, ownersOf(db, [row], viewer)) };
+  const parentId = forkParentRepoIds(db, [row], viewer).get(row.id);
+  return parentId === undefined ? repo : { ...repo, forkParentRepoId: parentId };
+}
+
+/** getRepoFor, or the same 404 a nonexistent id gets. */
+export function requireRepoFor(db: Db, id: number, viewer: User): Repo {
+  const repo = getRepoFor(db, id, viewer);
+  if (repo === undefined) {
+    throw notFound("Repository", id);
+  }
+  return repo;
 }
 
 export function requireRepo(db: Db, id: number): Repo {
@@ -344,9 +422,45 @@ export function parseSearchUrl(term: string): { host: string; path: string } | n
   return { host: parsed.host, path: parsed.path };
 }
 
-export function listRepos(db: Db, query: RepoListQuery): Page<Repo> {
-  const where: string[] = [];
-  const params: (string | number)[] = [];
+/**
+ * The repo list as `viewer` may see it. Visibility is part of the WHERE
+ * clause, so the page AND its total only ever count what the viewer can see.
+ *
+ * - `mine`: the viewer's own repositories, for everyone.
+ * - `ownerId`, `ownerRemoved`: the admin only; anyone else asking is refused
+ *   rather than silently given a different list.
+ * - `gone=true` (the Removed page) needs `view_removed`, and is still limited
+ *   to what the viewer can see.
+ */
+export function listRepos(db: Db, viewer: User, query: RepoListQuery): Page<Repo> {
+  if ((query.ownerId !== undefined || query.ownerRemoved !== undefined) && !viewer.isAdmin) {
+    throw forbidden("Only the admin can filter repositories by owner.", { requires: "admin" });
+  }
+  if (query.gone === true && !hasPermission(viewer, "view_removed")) {
+    throw forbidden('The Removed page needs the "view_removed" permission.', {
+      permission: "view_removed",
+    });
+  }
+
+  const visible = visibleRepoSqlFilter(viewer, "repos");
+  const where: string[] = [visible.sql];
+  const params: (string | number)[] = [...visible.params];
+
+  if (query.mine === true) {
+    where.push("repos.owner_user_id = ?");
+    params.push(viewer.id);
+  }
+  if (query.ownerId !== undefined) {
+    where.push("repos.owner_user_id = ?");
+    params.push(query.ownerId);
+  }
+  if (query.ownerRemoved !== undefined) {
+    where.push(
+      query.ownerRemoved
+        ? "repos.owner_user_id IN (SELECT id FROM users WHERE removed_at IS NOT NULL)"
+        : "repos.owner_user_id IN (SELECT id FROM users WHERE removed_at IS NULL)",
+    );
+  }
 
   if (query.q !== undefined && query.q.trim() !== "") {
     const pattern = likePattern(query.q.trim());
@@ -389,7 +503,7 @@ export function listRepos(db: Db, query: RepoListQuery): Page<Repo> {
     params.push(query.outcome);
   }
 
-  const whereSql = where.length === 0 ? "" : `WHERE ${where.join(" AND ")}`;
+  const whereSql = `WHERE ${where.join(" AND ")}`;
 
   const totalRow = db.get<{ count: number }>(
     `SELECT COUNT(*) AS count FROM repos ${whereSql}`,
@@ -421,13 +535,15 @@ export function listRepos(db: Db, query: RepoListQuery): Page<Repo> {
     rows.map((row) => row.id),
   );
 
-  const parentIds = forkParentRepoIds(db, rows);
+  const parentIds = forkParentRepoIds(db, rows, viewer);
+  const owners = ownersOf(db, rows, viewer);
 
   const listed = rows.map((row): Repo => {
     const resolved = settings.get(row.id);
     const parentId = parentIds.get(row.id);
     return {
       ...toRepo(row),
+      ...viewerFields(row, viewer, owners),
       ...(parentId === undefined ? {} : { forkParentRepoId: parentId }),
       cloneMode: resolved?.clone_mode,
       syncEnabled: resolved?.sync_enabled,
@@ -440,22 +556,34 @@ export function listRepos(db: Db, query: RepoListQuery): Page<Repo> {
   return { rows: listed, total, page: query.page, perPage: query.perPage };
 }
 
-export function countRepos(db: Db): number {
-  return db.get<{ count: number }>("SELECT COUNT(*) AS count FROM repos")?.count ?? 0;
-}
-
-/** Repositories currently judged gone upstream. */
-export function countGoneRepos(db: Db): number {
+/** Repositories the viewer can see. */
+export function countRepos(db: Db, viewer: User): number {
+  const visible = visibleRepoSqlFilter(viewer, "repos");
   return (
-    db.get<{ count: number }>("SELECT COUNT(*) AS count FROM repos WHERE gone_at IS NOT NULL")
-      ?.count ?? 0
+    db.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM repos WHERE ${visible.sql}`,
+      ...visible.params,
+    )?.count ?? 0
   );
 }
 
-/** COALESCE keeps an empty table from reporting null bytes used. */
-export function totalDiskUsageBytes(db: Db): number {
+/** Repositories currently judged gone upstream, of those the viewer can see. */
+export function countGoneRepos(db: Db, viewer: User): number {
+  const visible = visibleRepoSqlFilter(viewer, "repos");
+  return (
+    db.get<{ count: number }>(
+      `SELECT COUNT(*) AS count FROM repos WHERE gone_at IS NOT NULL AND ${visible.sql}`,
+      ...visible.params,
+    )?.count ?? 0
+  );
+}
+
+/** COALESCE keeps an empty set from reporting null bytes used. Viewable repos only. */
+export function totalDiskUsageBytes(db: Db, viewer: User): number {
+  const visible = visibleRepoSqlFilter(viewer, "repos");
   const row = db.get<{ total: number }>(
-    "SELECT COALESCE(SUM(disk_usage_bytes), 0) AS total FROM repos",
+    `SELECT COALESCE(SUM(disk_usage_bytes), 0) AS total FROM repos WHERE ${visible.sql}`,
+    ...visible.params,
   );
   return row?.total ?? 0;
 }
@@ -474,10 +602,12 @@ export interface CreateRepoInput {
   nextSyncAt?: number | null;
   state?: RepoState;
   /**
-   * The user who imported it. Every repo has exactly one owner, so an absent
-   * value falls back to the admin row rather than leaving the column NULL.
+   * The user who imported it, and its only owner. Required: the database
+   * would quietly fill in the admin for a forgotten one, which would give the
+   * repository (and the right to fetch it with the admin's token) to the
+   * wrong person.
    */
-  ownerUserId?: number | null;
+  ownerUserId: number;
 }
 
 /** Retries only guard against an astronomically unlikely short id collision. */
@@ -493,7 +623,7 @@ export function createRepo(db: Db, input: CreateRepoInput): Repo {
     requireForge(db, input.forgeId);
     const overrideId = input.accountOverrideId ?? null;
     if (overrideId !== null) {
-      assertAccountBelongsToForge(db, overrideId, input.forgeId);
+      assertAccountUsableForRepo(db, overrideId, input.forgeId, input.ownerUserId);
     }
 
     const now = Date.now();
@@ -508,7 +638,7 @@ export function createRepo(db: Db, input: CreateRepoInput): Repo {
              (forge_id, path, display_name, slug, short_id, account_override_id,
               force_anonymous, managed_by_account_sync_id, state, next_sync_at,
               consecutive_failures, owner_user_id, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ${OWNER_OR_ADMIN_SQL}, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
           input.forgeId,
           path,
           displayNameFor(path),
@@ -519,7 +649,7 @@ export function createRepo(db: Db, input: CreateRepoInput): Repo {
           input.managedByAccountSyncId ?? null,
           input.state ?? "active",
           nextSyncAt,
-          input.ownerUserId ?? null,
+          input.ownerUserId,
           now,
           now,
         ).lastInsertRowid;
@@ -542,10 +672,22 @@ export function createRepo(db: Db, input: CreateRepoInput): Repo {
   });
 }
 
-/** An override account must live on the repo's own forge. */
-function assertAccountBelongsToForge(db: Db, accountId: number, forgeId: number): void {
-  const row = db.get<{ forge_id: number }>("SELECT forge_id FROM accounts WHERE id = ?", accountId);
-  if (row === undefined) {
+/**
+ * An override account must be the repo OWNER's own account, on the repo's own
+ * forge. Someone else's account reads exactly like an account that does not
+ * exist: an override is never a way to learn which account ids are real.
+ */
+function assertAccountUsableForRepo(
+  db: Db,
+  accountId: number,
+  forgeId: number,
+  ownerUserId: number | null,
+): void {
+  const row = db.get<{ forge_id: number; owner_user_id: number }>(
+    "SELECT forge_id, owner_user_id FROM accounts WHERE id = ?",
+    accountId,
+  );
+  if (row === undefined || ownerUserId === null || row.owner_user_id !== ownerUserId) {
     throw notFound("Account", accountId);
   }
   if (row.forge_id !== forgeId) {
@@ -557,14 +699,31 @@ function assertAccountBelongsToForge(db: Db, accountId: number, forgeId: number)
   }
 }
 
+export interface UpdateRepoOptions {
+  /**
+   * Who is asking. A path clash with a repository they cannot see is
+   * reported without naming it, so a rename is never a way to probe for
+   * repositories that exist.
+   */
+  viewer?: User;
+}
+
 /**
  * State, account override, force_anonymous, and path. The forge is never part
  * of the update, and the slug deliberately stays fixed across a path edit so
  * the on-disk backup directory does not have to move.
  */
-export function updateRepo(db: Db, id: number, patch: UpdateRepo): Repo {
+export function updateRepo(
+  db: Db,
+  id: number,
+  patch: UpdateRepo,
+  options: UpdateRepoOptions = {},
+): Repo {
   return db.tx(() => {
     const existing = requireRepo(db, id);
+    const ownerUserId =
+      db.get<{ owner_user_id: number | null }>("SELECT owner_user_id FROM repos WHERE id = ?", id)
+        ?.owner_user_id ?? null;
     const sets: string[] = [];
     const params: (string | number | null)[] = [];
 
@@ -579,7 +738,7 @@ export function updateRepo(db: Db, id: number, patch: UpdateRepo): Repo {
 
     if (patch.accountOverrideId !== undefined) {
       if (patch.accountOverrideId !== null) {
-        assertAccountBelongsToForge(db, patch.accountOverrideId, existing.forgeId);
+        assertAccountUsableForRepo(db, patch.accountOverrideId, existing.forgeId, ownerUserId);
       }
       sets.push("account_override_id = ?");
       params.push(patch.accountOverrideId);
@@ -596,11 +755,27 @@ export function updateRepo(db: Db, id: number, patch: UpdateRepo): Repo {
         throw invalid("A repository needs a path.");
       }
       if (path !== existing.path) {
-        const clash = findRepoByPath(db, existing.forgeId, path);
+        const clash = db.get<{ owner_user_id: number | null; is_private: number }>(
+          "SELECT owner_user_id, is_private FROM repos WHERE forge_id = ? AND path = ?",
+          existing.forgeId,
+          path,
+        );
         if (clash !== undefined) {
-          throw conflict(`"${path}" is already backed up from this forge.`);
+          const visible =
+            options.viewer === undefined ||
+            canView(options.viewer, {
+              ownerUserId: clash.owner_user_id,
+              isPrivate: clash.is_private !== 0,
+            });
+          throw conflict(
+            visible
+              ? `"${path}" is already backed up from this forge.`
+              : "This repository cannot be renamed to that path.",
+          );
         }
-        sets.push("path = ?", "display_name = ?");
+        // The row now names a different upstream and nothing is known about
+        // it: back to private until the forge says otherwise.
+        sets.push("path = ?", "display_name = ?", "is_private = 1", "visibility_checked_at = NULL");
         params.push(path, displayNameFor(path));
       }
     }
@@ -657,34 +832,65 @@ export async function deleteRepo(
   }
 }
 
+export interface BulkRepoRefusal {
+  id: number;
+  error: string;
+  message: string;
+}
+
 export interface BulkRepoResult {
   action: BulkRepoAction;
   requested: number;
   affected: number;
-  /** The ids that were actually acted on; missing ids are skipped silently. */
+  /** The ids that were actually acted on. */
   ids: number[];
-  /** Ids that were requested but no longer exist. */
+  /**
+   * Ids that do not exist, or that the caller cannot view: the two are
+   * reported identically, so a bulk action is never a way to probe.
+   */
   missing: number[];
+  /** Ids the caller can view but may not act on, with why. Absent when none were. */
+  refused?: BulkRepoRefusal[];
 }
 
 /**
- * Bulk pause, resume, sync, or delete. Missing ids are reported rather than
- * failing the whole batch, because a stale multi-select in the UI is normal.
+ * Bulk pause, resume, sync, or delete, with the single-repo rules applied per
+ * repo: the owner and the admin always may; anyone else needs modify_others
+ * on a repo they can view. Missing and invisible ids are reported rather
+ * than failing the whole batch, because a stale multi-select in the UI is
+ * normal.
  */
 export async function bulkRepoAction(
   db: Db,
+  viewer: User,
   ids: readonly number[],
   action: BulkRepoAction,
   options: DeleteRepoOptions = {},
 ): Promise<BulkRepoResult> {
   const acted: number[] = [];
   const missing: number[] = [];
+  const refused: BulkRepoRefusal[] = [];
   const now = Date.now();
 
   for (const id of ids) {
-    const repo = getRepo(db, id);
-    if (repo === undefined) {
+    const facts = db.get<{ owner_user_id: number | null; is_private: number }>(
+      "SELECT owner_user_id, is_private FROM repos WHERE id = ?",
+      id,
+    );
+    const access =
+      facts === undefined
+        ? undefined
+        : { ownerUserId: facts.owner_user_id, isPrivate: facts.is_private !== 0 };
+    if (access === undefined || !canView(viewer, access)) {
       missing.push(id);
+      continue;
+    }
+    if (!viewer.isAdmin && !isRepoOwner(viewer, access) && !viewer.permissions.modify_others) {
+      refused.push({
+        id,
+        error: "forbidden",
+        message: 'This needs the "modify_others" permission.',
+      });
       continue;
     }
     switch (action) {
@@ -711,7 +917,16 @@ export async function bulkRepoAction(
     acted.push(id);
   }
 
-  return { action, requested: ids.length, affected: acted.length, ids: acted, missing };
+  return {
+    action,
+    requested: ids.length,
+    affected: acted.length,
+    ids: acted,
+    missing,
+    // Only present when something was refused, so the answer to a batch that
+    // was entirely allowed keeps its original shape.
+    ...(refused.length === 0 ? {} : { refused }),
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -21,10 +21,18 @@ import {
   listRepos,
   listSyncRuns,
   requestSyncNow,
-  requireRepo,
+  requireRepoFor,
   updateRepo,
   type RepoFileRemover,
 } from "../domain/repos.ts";
+import { refreshCapState } from "../domain/caps.ts";
+import { repoAudience } from "../security/audience.ts";
+import {
+  requireRepoEdit,
+  requireRepoOwnerOrAdmin,
+  requireRepoView,
+  requireRequestUser,
+} from "../security/authz.ts";
 import { repoDirFor } from "../repoDir.ts";
 import { parseBody, parseParams, parseQuery } from "./validate.ts";
 
@@ -46,13 +54,24 @@ export function createBackupFileRemover(config: Config): RepoFileRemover {
   };
 }
 
-/** /api/repos listing, detail, patch, delete, sync now, runs, and bulk actions. */
+/**
+ * /api/repos listing, detail, patch, delete, sync now, runs, and bulk actions.
+ *
+ * Object-level rules (docs/ARCHITECTURE.md "Multi-user access control"):
+ * - Every route first requires that the caller can VIEW the repo; one they
+ *   cannot answers exactly like one that does not exist.
+ * - Pause, resume, sync now, force_anonymous, clearing the override and
+ *   delete: the owner, the admin, or modify_others (requireRepoEdit).
+ * - Changing `path` or SETTING an override decides what the owner's token
+ *   fetches: the owner or the admin only (requireRepoOwnerOrAdmin), and the
+ *   override must be an account the repo's owner owns (domain/repos.ts).
+ */
 export const repoRoutes: FastifyPluginAsync = async (app) => {
   const { db, config, events, scheduler } = app.amber;
   const removeFiles = createBackupFileRemover(config);
 
   app.get("/repos", { config: { authz: "user" } }, (request): Page<Repo> =>
-    listRepos(db, parseQuery(repoListQuerySchema, request)),
+    listRepos(db, requireRequestUser(request), parseQuery(repoListQuerySchema, request)),
   );
 
   // Registered before /repos/:id so the static segment wins the match.
@@ -60,8 +79,24 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
     "/repos/bulk",
     { config: { authz: "user" } },
     async (request): Promise<BulkRepoResponse> => {
+      const user = requireRequestUser(request);
       const body = parseBody(bulkRepoRequestSchema, request);
-      const result = await bulkRepoAction(db, body.ids, body.action, {
+      // Who could see each repo, while the rows still exist to decide it on.
+      const audiences = new Map<number, number[]>();
+      const owners = new Map<number, number | null>();
+      if (body.action === "delete") {
+        for (const id of body.ids) {
+          audiences.set(id, repoAudience(db, id));
+          owners.set(
+            id,
+            db.get<{ owner_user_id: number | null }>(
+              "SELECT owner_user_id FROM repos WHERE id = ?",
+              id,
+            )?.owner_user_id ?? null,
+          );
+        }
+      }
+      const result = await bulkRepoAction(db, user, body.ids, body.action, {
         withFiles: body.files,
         removeFiles,
       });
@@ -72,9 +107,18 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
         }
       }
       for (const id of result.ids) {
-        events.publish(body.action === "delete" ? "repo.deleted" : "repo.updated", {
-          repoId: id,
-        });
+        if (body.action === "delete") {
+          events.publish("repo.deleted", { repoId: id }, { audience: audiences.get(id) ?? [] });
+        } else {
+          events.publish("repo.updated", { repoId: id });
+        }
+      }
+      if (body.action === "delete") {
+        for (const owner of new Set(result.ids.map((id) => owners.get(id) ?? null))) {
+          if (owner !== null) {
+            refreshCapState(db, owner);
+          }
+        }
       }
       return result;
     },
@@ -82,21 +126,44 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
 
   app.get("/repos/:id", { config: { authz: "user" } }, (request): Repo => {
     const { id } = parseParams(idParamsSchema, request);
-    return requireRepo(db, id);
+    return requireRepoFor(db, id, requireRequestUser(request));
   });
 
   app.patch("/repos/:id", { config: { authz: "user" } }, (request): Repo => {
     const { id } = parseParams(idParamsSchema, request);
-    const repo = updateRepo(db, id, parseBody(updateRepoSchema, request));
-    events.publish("repo.updated", { repoId: repo.id });
-    return repo;
+    const user = requireRequestUser(request);
+    // Visibility first, so an invisible id is a 404 whatever the body says.
+    requireRepoView(request, id);
+    const patch = parseBody(updateRepoSchema, request);
+    if (
+      patch.path !== undefined ||
+      (patch.accountOverrideId !== undefined && patch.accountOverrideId !== null)
+    ) {
+      requireRepoOwnerOrAdmin(request, id);
+    }
+    if (
+      patch.state !== undefined ||
+      patch.forceAnonymous !== undefined ||
+      patch.accountOverrideId === null
+    ) {
+      requireRepoEdit(request, id);
+    }
+    updateRepo(db, id, patch, { viewer: user });
+    events.publish("repo.updated", { repoId: id });
+    return requireRepoFor(db, id, user);
   });
 
   app.delete("/repos/:id", { config: { authz: "user" } }, async (request, reply): Promise<null> => {
     const { id } = parseParams(idParamsSchema, request);
+    const facts = requireRepoEdit(request, id);
     const { files } = parseQuery(deleteRepoQuerySchema, request);
+    const audience = repoAudience(db, id);
     await deleteRepo(db, id, { withFiles: files, removeFiles });
-    events.publish("repo.deleted", { repoId: id });
+    events.publish("repo.deleted", { repoId: id }, { audience });
+    if (facts.ownerUserId !== null) {
+      // Usage just dropped; a user back under their cap loses the banner.
+      refreshCapState(db, facts.ownerUserId);
+    }
     void reply.code(204);
     return null;
   });
@@ -108,14 +175,17 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
    */
   app.post("/repos/:id/sync", { config: { authz: "user" } }, (request): Repo => {
     const { id } = parseParams(idParamsSchema, request);
-    const repo = requestSyncNow(db, id);
+    requireRepoEdit(request, id);
+    requestSyncNow(db, id);
     scheduler?.enqueueNow(id);
     events.publish("repo.updated", { repoId: id });
-    return repo;
+    return requireRepoFor(db, id, requireRequestUser(request));
   });
 
+  /** Run history is a read: anyone who can view the repo may see it. */
   app.get("/repos/:id/runs", { config: { authz: "user" } }, (request): Page<SyncRun> => {
     const { id } = parseParams(idParamsSchema, request);
+    requireRepoView(request, id);
     return listSyncRuns(db, id, parseQuery(paginationQuerySchema, request));
   });
 };

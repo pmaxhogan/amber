@@ -360,7 +360,7 @@ describe("drawer clone tab", () => {
     const { wrapper } = await mountDrawer(api);
     await openTab(wrapper, "clone");
 
-    expect(wrapper.text()).toContain("Turn it on from the Git Remote page");
+    expect(wrapper.text()).toContain("cannot be cloned over HTTP right now");
   });
 });
 

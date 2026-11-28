@@ -6,10 +6,13 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import type { AppContext } from "../app.ts";
 import { DEFAULT_UPLOAD_PACK_TIMEOUT_MS, spawnGit } from "../gitSpawn.ts";
 import { getRepoBySlug } from "../domain/repos.ts";
+import type { User } from "../domain/users.ts";
 import { repoDirFor } from "../repoDir.ts";
-import { safeEqualString, verifyGitPassword } from "../security/gitPassword.ts";
-import { readGitRemoteState } from "./config.ts";
+import { canView, loadRepoAccessFacts } from "../security/authz.ts";
+import { authenticateGitRequest, dummyGitPasswordHash, type GitAuthDeps } from "./auth.ts";
 import { AuthThrottle } from "./throttle.ts";
+
+export { parseBasicAuth, type BasicCredentials } from "./auth.ts";
 
 /**
  * Smart HTTP v2, read only. Pushes are impossible by construction rather than
@@ -18,9 +21,14 @@ import { AuthThrottle } from "./throttle.ts";
  * module will act on is the upload side, matched against a literal allow list
  * before any process is created.
  *
- * Everything else under /git/ falls through to a 403 handler that never
- * inspects what was asked for, so no block list has to name the write service
- * either.
+ * Everything else under /git/ falls through to a handler that authenticates
+ * like every other /git request and then answers 403 without inspecting what
+ * was asked for, so no block list has to name the write service either.
+ *
+ * /git is the one surface outside Cloudflare Access. Who may read what is
+ * decided per user: auth.ts authenticates (kill switch, throttle, credential,
+ * permission, membership), then canView decides each repository, and a
+ * repository the caller cannot view is answered exactly like an unknown slug.
  */
 
 /** The one and only service Amber will ever run for a client. */
@@ -65,45 +73,57 @@ export function sanitizeGitProtocol(raw: unknown): string | undefined {
   return /^version=[0-9]+(:[A-Za-z0-9_.:=-]*)?$/.test(raw) ? raw : undefined;
 }
 
-export interface BasicCredentials {
-  username: string;
-  password: string;
-}
-
-export function parseBasicAuth(header: unknown): BasicCredentials | null {
-  if (typeof header !== "string") {
-    return null;
-  }
-  const match = /^Basic\s+([A-Za-z0-9+/=]+)$/i.exec(header.trim());
-  if (match === null) {
-    return null;
-  }
-  const decoded = Buffer.from(match[1] as string, "base64").toString("utf8");
-  const separator = decoded.indexOf(":");
-  if (separator < 0) {
-    return null;
-  }
-  return { username: decoded.slice(0, separator), password: decoded.slice(separator + 1) };
-}
-
 function noCache(reply: FastifyReply): void {
   reply.header("expires", "Fri, 01 Jan 1980 00:00:00 GMT");
   reply.header("pragma", "no-cache");
   reply.header("cache-control", "no-cache, max-age=0, must-revalidate");
 }
 
+/**
+ * Every refusal body is fixed text. The 401 in particular is byte for byte
+ * the same for a wrong password, an unknown user, a removed user, a missing
+ * permission and a non-member, so none of them can be told apart.
+ */
+const NOT_FOUND_BODY = "Not found.\n";
+const REPO_NOT_FOUND_BODY = "Repository not found.\n";
+const UNAUTHORIZED_BODY = "Authentication required.\n";
+const THROTTLED_BODY = "Too many failed authentication attempts.\n";
+/**
+ * Git prints a text/plain error body to the user as "remote: ...", so this is
+ * what someone sees when the access policy cannot be read and Amber fails
+ * closed rather than guessing.
+ */
+export const POLICY_UNAVAILABLE_BODY =
+  "Amber cannot confirm your access right now. Try again in a minute.\n";
+
 function unauthorized(reply: FastifyReply): void {
   reply
     .code(401)
     .header("www-authenticate", 'Basic realm="Amber", charset="UTF-8"')
     .type("text/plain; charset=utf-8")
-    .send("Authentication required.\n");
+    .send(UNAUTHORIZED_BODY);
 }
 
-export const gitRemotePlugin: FastifyPluginAsync<{ ctx: AppContext }> = async (app, options) => {
+export interface GitRemotePluginOptions {
+  ctx: AppContext;
+  /** Test seams; production uses the defaults. */
+  throttle?: AuthThrottle;
+  verifyPassword?: GitAuthDeps["verifyPassword"];
+}
+
+export const gitRemotePlugin: FastifyPluginAsync<GitRemotePluginOptions> = async (app, options) => {
   const { ctx } = options;
   const log = ctx.log.child({ mod: "gitremote" });
-  const throttle = new AuthThrottle();
+  const throttle = options.throttle ?? new AuthThrottle();
+  const authDeps: GitAuthDeps = {
+    db: ctx.db,
+    policy: ctx.policy,
+    throttle,
+    ...(options.verifyPassword === undefined ? {} : { verifyPassword: options.verifyPassword }),
+  };
+  // Built now rather than on the first unknown username, which would
+  // otherwise pay one extra derivation and stand out by its timing.
+  dummyGitPasswordHash();
 
   // Pass the request body through untouched: upload-pack negotiation is piped
   // straight into the child's stdin and is never buffered in memory or on disk.
@@ -118,53 +138,66 @@ export const gitRemotePlugin: FastifyPluginAsync<{ ctx: AppContext }> = async (a
   });
 
   /**
-   * Guard order matters. Disabled comes first so a disabled instance never
-   * prompts for a password, and authentication comes before the slug lookup so
-   * an anonymous caller cannot probe which repositories exist.
+   * Guard order matters, and lives in auth.ts: kill switch, throttle, Basic,
+   * credential, permission, membership. Authentication comes before the slug
+   * lookup so an anonymous caller cannot probe which repositories exist.
+   * Answers the request itself and returns null on any refusal.
    */
-  function authorize(request: FastifyRequest, reply: FastifyReply): boolean {
-    const state = readGitRemoteState(ctx.db);
-    if (!state.enabled || state.passwordHash === null) {
-      reply.code(404).type("text/plain; charset=utf-8").send("Not found.\n");
-      return false;
-    }
-
+  async function authorize(request: FastifyRequest, reply: FastifyReply): Promise<User | null> {
     const ip = request.ip;
-    if (!throttle.allow(ip)) {
-      const retryAfter = throttle.retryAfterSeconds(ip);
-      log.warn({ ip }, "git remote auth throttled");
-      reply
-        .code(429)
-        .header("retry-after", String(retryAfter))
-        .type("text/plain; charset=utf-8")
-        .send("Too many failed authentication attempts.\n");
-      return false;
+    const result = await authenticateGitRequest(authDeps, {
+      authorization: request.headers.authorization,
+      ip,
+    });
+    if (result.ok) {
+      return result.user;
     }
-
-    const credentials = parseBasicAuth(request.headers.authorization);
-    if (credentials === null) {
-      unauthorized(reply);
-      return false;
+    switch (result.status) {
+      case 404:
+        reply.code(404).type("text/plain; charset=utf-8").send(NOT_FOUND_BODY);
+        break;
+      case 429:
+        log.warn({ ip }, "git remote auth throttled");
+        reply
+          .code(429)
+          .header("retry-after", String(result.retryAfterSeconds))
+          .type("text/plain; charset=utf-8")
+          .send(THROTTLED_BODY);
+        break;
+      case 503:
+        log.warn({ ip, userId: result.userId }, "git remote refused: access policy unavailable");
+        reply
+          .code(503)
+          .header("retry-after", "30")
+          .type("text/plain; charset=utf-8")
+          .send(POLICY_UNAVAILABLE_BODY);
+        break;
+      case 401:
+        if (result.reason !== "no_credentials") {
+          // The reason and the user id only: never the username, the
+          // password, or the Authorization header.
+          log.warn(
+            { ip, reason: result.reason, userId: result.userId },
+            "git remote authentication failed",
+          );
+        }
+        unauthorized(reply);
+        break;
     }
-
-    const userOk = safeEqualString(credentials.username, state.username);
-    const passwordOk = verifyGitPassword(credentials.password, state.passwordHash);
-    if (!userOk || !passwordOk) {
-      throttle.recordFailure(ip);
-      log.warn({ ip }, "git remote authentication failed");
-      unauthorized(reply);
-      return false;
-    }
-
-    throttle.recordSuccess(ip);
-    return true;
+    return null;
   }
 
-  /** Resolve the slug to a row, then to a directory built from the row. */
-  function locate(slug: string, reply: FastifyReply): Repo | null {
+  /**
+   * Resolve the slug to a row the caller may see, then to a directory built
+   * from the row. A repository the caller cannot view gets exactly the answer
+   * an unknown slug gets, and is decided before anything else about the row
+   * (such as whether it has been backed up yet) can show through.
+   */
+  function locate(user: User, slug: string, reply: FastifyReply): Repo | null {
     const repo = getRepoBySlug(ctx.db, slug);
-    if (repo === undefined) {
-      reply.code(404).type("text/plain; charset=utf-8").send("Repository not found.\n");
+    const facts = repo === undefined ? undefined : loadRepoAccessFacts(ctx.db, repo.id);
+    if (repo === undefined || facts === undefined || !canView(user, facts)) {
+      reply.code(404).type("text/plain; charset=utf-8").send(REPO_NOT_FOUND_BODY);
       return null;
     }
     if (!existsSync(repoDirFor(ctx.config, repo))) {
@@ -181,10 +214,11 @@ export const gitRemotePlugin: FastifyPluginAsync<{ ctx: AppContext }> = async (a
   app.get<{ Params: { slug: string }; Querystring: { service?: string } }>(
     "/git/:slug/info/refs",
     async (request, reply) => {
-      if (!authorize(request, reply)) {
+      const user = await authorize(request, reply);
+      if (user === null) {
         return reply;
       }
-      const repo = locate(request.params.slug, reply);
+      const repo = locate(user, request.params.slug, reply);
       if (repo === null) {
         return reply;
       }
@@ -251,10 +285,11 @@ export const gitRemotePlugin: FastifyPluginAsync<{ ctx: AppContext }> = async (a
   );
 
   app.post<{ Params: { slug: string } }>(`/git/:slug/${UPLOAD_PACK}`, async (request, reply) => {
-    if (!authorize(request, reply)) {
+    const user = await authorize(request, reply);
+    if (user === null) {
       return reply;
     }
-    const repo = locate(request.params.slug, reply);
+    const repo = locate(user, request.params.slug, reply);
     if (repo === null) {
       return reply;
     }
@@ -321,19 +356,21 @@ export const gitRemotePlugin: FastifyPluginAsync<{ ctx: AppContext }> = async (a
   /**
    * Catch all for every other path and method in the /git namespace. It
    * deliberately never looks at what was requested: there is no write service
-   * to name, only an explanation that this remote does not accept one.
+   * to name, only an explanation that this remote does not accept one. It
+   * authenticates like every other /git request, so the explanation is only
+   * ever given to someone holding a working credential.
    */
   const namespaceFallback = async (
     request: FastifyRequest,
     reply: FastifyReply,
   ): Promise<FastifyReply> => {
-    const state = readGitRemoteState(ctx.db);
-    if (!state.enabled || state.passwordHash === null) {
-      return reply.code(404).type("text/plain; charset=utf-8").send("Not found.\n");
-    }
     // Drain anything the client streamed at us so the socket closes cleanly.
     if (request.body instanceof Readable) {
       request.body.resume();
+    }
+    const user = await authorize(request, reply);
+    if (user === null) {
+      return reply;
     }
     return reply.code(403).type("text/plain; charset=utf-8").send(READ_ONLY_MESSAGE);
   };

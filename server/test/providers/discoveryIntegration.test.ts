@@ -8,6 +8,7 @@ import { getRepo, listRepos, SHORT_ID_LENGTH } from "../../src/domain/repos.ts";
 import { createConsoleLogger } from "../../src/logging.ts";
 import { runAccountSync } from "../../src/providers/discovery.ts";
 import { JSON_HEADERS, mockHttp, type MockHttp } from "./support.ts";
+import { adminOf } from "../helpers/users.ts";
 
 /**
  * The unit suite drives discovery with the repo helpers stubbed out so it can
@@ -90,7 +91,7 @@ describe("discovery against the real domain layer", () => {
 
     await runAccountSync(db, syncId, { log, fetch: http.fetch });
 
-    const page = listRepos(db, { page: 1, perPage: 50, sort: "path", dir: "asc" });
+    const page = listRepos(db, adminOf(db), { page: 1, perPage: 50, sort: "path", dir: "asc" });
     expect(page.total).toBe(2);
 
     for (const repo of page.rows) {
@@ -124,7 +125,12 @@ describe("discovery against the real domain layer", () => {
 
     await runAccountSync(db, syncId, { log, fetch: http.fetch });
 
-    const created = listRepos(db, { page: 1, perPage: 50, sort: "path", dir: "asc" }).rows;
+    const created = listRepos(db, adminOf(db), {
+      page: 1,
+      perPage: 50,
+      sort: "path",
+      dir: "asc",
+    }).rows;
     expect(created).toHaveLength(2);
     const repo = created.find((row) => row.path === "octocat/Hello-World");
     expect(repo).toBeDefined();
@@ -158,7 +164,9 @@ describe("discovery against the real domain layer", () => {
     expect(getRepo(db, repo!.id)).toBeUndefined();
     expect(existsSync(dir)).toBe(false);
     // The repo that is still starred is untouched.
-    expect(listRepos(db, { page: 1, perPage: 50, sort: "path", dir: "asc" }).total).toBe(1);
+    expect(
+      listRepos(db, adminOf(db), { page: 1, perPage: 50, sort: "path", dir: "asc" }).total,
+    ).toBe(1);
   });
 
   it("keeps the backup when the forge cannot confirm the repo is still there", async () => {
@@ -173,9 +181,12 @@ describe("discovery against the real domain layer", () => {
       });
 
     await runAccountSync(db, syncId, { log, fetch: http.fetch });
-    const repo = listRepos(db, { page: 1, perPage: 50, sort: "path", dir: "asc" }).rows.find(
-      (row) => row.path === "octocat/Hello-World",
-    );
+    const repo = listRepos(db, adminOf(db), {
+      page: 1,
+      perPage: 50,
+      sort: "path",
+      dir: "asc",
+    }).rows.find((row) => row.path === "octocat/Hello-World");
     expect(repo).toBeDefined();
 
     // Absent from a still-populated list, so the mass-unstar guard does not

@@ -14,7 +14,9 @@ import {
   type PushSender,
   type StoredSubscription,
 } from "../src/notify/push.ts";
-import { createTempApp, createTempDb, type TempApp, type TempDb } from "./helpers.ts";
+import { createRepo } from "../src/domain/repos.ts";
+import { createTempApp, createTempDb, seedForge, type TempApp, type TempDb } from "./helpers.ts";
+import { adminOf } from "./helpers/users.ts";
 
 const log = createConsoleLogger("silent");
 
@@ -48,6 +50,7 @@ function recorder(fail: Record<string, unknown> = {}): { sent: Sent[]; send: Pus
 function subscribe(db: Db, name: string): string {
   const endpoint = `https://push.example/${name}`;
   savePushSubscription(db, {
+    userId: adminOf(db).id,
     endpoint,
     p256dh: `key-${name}`,
     auth: `auth-${name}`,
@@ -56,8 +59,16 @@ function subscribe(db: Db, name: string): string {
   return endpoint;
 }
 
-function gone(path: string, host = "github.com"): AmberEvent {
-  return { type: "repo.gone", at: 1, payload: { repoId: 1, path, host } };
+/** A repo.gone event for a real repo row (created on first use), owned by the admin. */
+function gone(db: Db, path: string, host = "github.com"): AmberEvent {
+  const forgeId = seedForge(db, host);
+  const existing = db.get<{ id: number }>(
+    "SELECT id FROM repos WHERE forge_id = ? AND path = ?",
+    forgeId,
+    path,
+  );
+  const repoId = existing?.id ?? createRepo(db, { forgeId, path, ownerUserId: adminOf(db).id }).id;
+  return { type: "repo.gone", at: 1, payload: { repoId, path, host } };
 }
 
 describe("vapid", () => {
@@ -150,7 +161,9 @@ describe("push notifier", () => {
     const { sent, send } = recorder();
     const push = notifier(send);
 
-    const result = await push.send({ title: "t", body: "b", url: "/removed", tag: "x" });
+    const result = await push.send({ title: "t", body: "b", url: "/removed", tag: "x" }, [
+      adminOf(temp.db).id,
+    ]);
 
     expect(result).toEqual({ sent: 2, failed: 0 });
     expect(sent.map((s) => s.endpoint).sort()).toEqual([a, b]);
@@ -159,12 +172,18 @@ describe("push notifier", () => {
       publicKey: push.publicKey(),
       payload: { title: "t", url: "/removed" },
     });
-    expect(listPushDevices(temp.db).every((d) => d.lastSuccessAt === 1_000)).toBe(true);
+    expect(
+      listPushDevices(temp.db, adminOf(temp.db).id).every((d) => d.lastSuccessAt === 1_000),
+    ).toBe(true);
   });
 
   it("does nothing, and generates no keys, when nobody is subscribed", async () => {
     const { sent, send } = recorder();
-    expect(await notifier(send).send({ title: "t", body: "b", url: "/", tag: "x" })).toEqual({
+    expect(
+      await notifier(send).send({ title: "t", body: "b", url: "/", tag: "x" }, [
+        adminOf(temp.db).id,
+      ]),
+    ).toEqual({
       sent: 0,
       failed: 0,
     });
@@ -181,10 +200,12 @@ describe("push notifier", () => {
       [flaky]: Object.assign(new Error("push service is on fire"), { statusCode: 503 }),
     });
 
-    const result = await notifier(send).send({ title: "t", body: "b", url: "/", tag: "x" });
+    const result = await notifier(send).send({ title: "t", body: "b", url: "/", tag: "x" }, [
+      adminOf(temp.db).id,
+    ]);
 
     expect(result).toEqual({ sent: 1, failed: 2 });
-    const devices = listPushDevices(temp.db);
+    const devices = listPushDevices(temp.db, adminOf(temp.db).id);
     expect(devices.map((d) => d.userAgent)).toEqual(["flaky", "fine"]);
     expect(devices[0]?.lastError).toBe("HTTP 503: push service is on fire");
     expect(devices[1]?.lastError).toBeNull();
@@ -194,9 +215,11 @@ describe("push notifier", () => {
     const offline = subscribe(temp.db, "offline");
     const { send } = recorder({ [offline]: new Error("getaddrinfo ENOTFOUND") });
 
-    await notifier(send).send({ title: "t", body: "b", url: "/", tag: "x" });
+    await notifier(send).send({ title: "t", body: "b", url: "/", tag: "x" }, [adminOf(temp.db).id]);
 
-    expect(listPushDevices(temp.db)[0]?.lastError).toBe("getaddrinfo ENOTFOUND");
+    expect(listPushDevices(temp.db, adminOf(temp.db).id)[0]?.lastError).toBe(
+      "getaddrinfo ENOTFOUND",
+    );
   });
 
   it("batches repositories that go gone close together into one notification", async () => {
@@ -204,8 +227,8 @@ describe("push notifier", () => {
     const { sent, send } = recorder();
     const push = notifier(send);
 
-    push.handleEvent(gone("o/one"));
-    push.handleEvent(gone("o/two"));
+    push.handleEvent(gone(temp.db, "o/one"));
+    push.handleEvent(gone(temp.db, "o/two"));
     push.handleEvent({ type: "sync.finished", at: 1, payload: { repoId: 1, outcome: "error" } });
     push.handleEvent({ type: "repo.gone", at: 1, payload: { repoId: 3 } });
     expect(sent).toEqual([]);
@@ -217,7 +240,7 @@ describe("push notifier", () => {
     expect(sent[0]?.payload.title).toBe("2 repositories are gone upstream");
     expect(sent[0]?.payload.body).toContain("github.com/o/one, github.com/o/two");
 
-    push.handleEvent(gone("o/three"));
+    push.handleEvent(gone(temp.db, "o/three"));
     await vi.advanceTimersByTimeAsync(30_000);
     await push.flush();
     expect(sent).toHaveLength(2);
@@ -229,7 +252,7 @@ describe("push notifier", () => {
     const { sent, send } = recorder();
     const push = notifier(send);
 
-    push.handleEvent(gone("o/one"));
+    push.handleEvent(gone(temp.db, "o/one"));
     await push.close();
 
     expect(sent).toHaveLength(1);
@@ -239,15 +262,21 @@ describe("push notifier", () => {
 
   it("re-subscribing the same endpoint refreshes its keys instead of duplicating", () => {
     const endpoint = subscribe(temp.db, "a");
-    savePushSubscription(temp.db, { endpoint, p256dh: "new", auth: "new", userAgent: "a2" });
+    savePushSubscription(temp.db, {
+      userId: adminOf(temp.db).id,
+      endpoint,
+      p256dh: "new",
+      auth: "new",
+      userAgent: "a2",
+    });
 
-    expect(listPushDevices(temp.db)).toHaveLength(1);
-    expect(listPushDevices(temp.db)[0]).toMatchObject({
+    expect(listPushDevices(temp.db, adminOf(temp.db).id)).toHaveLength(1);
+    expect(listPushDevices(temp.db, adminOf(temp.db).id)[0]).toMatchObject({
       service: "push.example",
       userAgent: "a2",
     });
-    expect(deletePushSubscription(temp.db, endpoint)).toBe(true);
-    expect(deletePushSubscription(temp.db, endpoint)).toBe(false);
+    expect(deletePushSubscription(temp.db, endpoint, adminOf(temp.db).id)).toBe(true);
+    expect(deletePushSubscription(temp.db, endpoint, adminOf(temp.db).id)).toBe(false);
   });
 });
 
@@ -302,7 +331,7 @@ describe("/api/push", () => {
       });
       expect(saved.statusCode).toBe(204);
     }
-    expect(listPushDevices(temp.db)).toHaveLength(1);
+    expect(listPushDevices(temp.db, adminOf(temp.db).id)).toHaveLength(1);
 
     const test = await temp.app.inject({ method: "POST", url: "/api/push/test" });
     expect(test.json()).toEqual({ sent: 1, failed: 0 });
@@ -319,7 +348,7 @@ describe("/api/push", () => {
       });
       expect(removed.statusCode).toBe(204);
     }
-    expect(listPushDevices(temp.db)).toEqual([]);
+    expect(listPushDevices(temp.db, adminOf(temp.db).id)).toEqual([]);
     expect((await temp.app.inject({ method: "POST", url: "/api/push/test" })).json()).toEqual({
       sent: 0,
       failed: 0,
@@ -342,7 +371,7 @@ describe("/api/push", () => {
       });
       expect(response.statusCode, JSON.stringify(payload)).toBe(400);
     }
-    expect(listPushDevices(temp.db)).toEqual([]);
+    expect(listPushDevices(temp.db, adminOf(temp.db).id)).toEqual([]);
     expect(
       (await temp.app.inject({ method: "POST", url: "/api/push/unsubscribe", payload: {} }))
         .statusCode,
@@ -357,7 +386,13 @@ describe("/api/push", () => {
     });
     expect(temp.events.subscriberCount).toBe(0);
 
-    temp.events.publish("repo.gone", { repoId: 4, path: "o/vanished", host: "github.com" });
+    const imported = await temp.app.inject({
+      method: "POST",
+      url: "/api/import",
+      payload: { text: "https://github.com/o/vanished" },
+    });
+    const repoId = imported.json<{ results: { repoId: number }[] }>().results[0]?.repoId;
+    temp.events.publish("repo.gone", { repoId, path: "o/vanished", host: "github.com" });
     await temp.app.amber.push.flush();
 
     expect(sent).toHaveLength(1);

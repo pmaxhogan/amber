@@ -2,7 +2,9 @@ import type { AmberEvent, PushDevice, PushPayload, PushSendResult } from "@amber
 import type { Logger } from "pino";
 import { generateVAPIDKeys, sendNotification } from "web-push";
 import type { Db } from "../db/db.ts";
-import { OWNER_OR_ADMIN_SQL } from "../domain/users.ts";
+import { getAdminUser, getUser, listUsers } from "../domain/users.ts";
+import type { EventMeta } from "../events.ts";
+import { canView, loadRepoAccessFacts } from "../security/authz.ts";
 
 /**
  * Web push: tells subscribed browsers when a repository goes gone upstream.
@@ -18,6 +20,11 @@ import { OWNER_OR_ADMIN_SQL } from "../domain/users.ts";
  * token that expires makes every private repository on that forge look gone
  * one after another, and those that cross the line together are one
  * notification, not two hundred.
+ *
+ * Every subscription belongs to the user whose browser made it, and every
+ * notification goes to an explicit audience: a gone repository only to the
+ * users who can view it (decided when the batch is sent, from fresh rows), a
+ * storage cap crossing to that user and the admin, a test to the caller.
  */
 
 export const KV_VAPID_PUBLIC = "push.vapid_public";
@@ -58,6 +65,7 @@ interface SubscriptionRow extends StoredSubscription {
 }
 
 interface GoneRepo {
+  repoId: number;
   path: string;
   host: string;
   /** A GoneReason off the repo.gone event; absent on older or partial payloads. */
@@ -119,18 +127,29 @@ function serviceOf(endpoint: string): string {
   }
 }
 
-export function listPushDevices(db: Db): PushDevice[] {
-  return db.all<SubscriptionRow>("SELECT * FROM push_subscriptions ORDER BY id ASC").map((row) => ({
-    id: row.id,
-    service: serviceOf(row.endpoint),
-    userAgent: row.user_agent,
-    createdAt: row.created_at,
-    lastSuccessAt: row.last_success_at,
-    lastError: row.last_error,
-  }));
+/** The caller's own browsers. Nobody sees another user's devices. */
+export function listPushDevices(db: Db, userId: number): PushDevice[] {
+  return db
+    .all<SubscriptionRow>(
+      "SELECT * FROM push_subscriptions WHERE user_id = ? ORDER BY id ASC",
+      userId,
+    )
+    .map((row) => ({
+      id: row.id,
+      service: serviceOf(row.endpoint),
+      userAgent: row.user_agent,
+      createdAt: row.created_at,
+      lastSuccessAt: row.last_success_at,
+      lastError: row.last_error,
+    }));
 }
 
-/** Idempotent: a browser re-announcing itself refreshes its keys. */
+/**
+ * Idempotent: a browser re-announcing itself refreshes its keys. The browser
+ * belongs to whoever announced it LAST: a shared machine whose next user
+ * subscribes the same push endpoint moves it to them, so the previous user's
+ * notifications stop reaching a browser they no longer sit at.
+ */
 export function savePushSubscription(
   db: Db,
   input: {
@@ -138,30 +157,34 @@ export function savePushSubscription(
     p256dh: string;
     auth: string;
     userAgent: string | null;
-    /** The user whose browser this is. Absent, the admin row: never NULL. */
-    userId?: number | null;
+    /** The user whose browser this is. Required: never guessed. */
+    userId: number;
   },
   now: number = Date.now(),
 ): void {
   db.run(
     `INSERT INTO push_subscriptions
        (endpoint, p256dh, auth, user_agent, user_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ${OWNER_OR_ADMIN_SQL}, ?, ?)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (endpoint) DO UPDATE SET
        p256dh = excluded.p256dh, auth = excluded.auth, user_agent = excluded.user_agent,
-       last_error = NULL, updated_at = excluded.updated_at`,
+       user_id = excluded.user_id, last_error = NULL, updated_at = excluded.updated_at`,
     input.endpoint,
     input.p256dh,
     input.auth,
     input.userAgent,
-    input.userId ?? null,
+    input.userId,
     now,
     now,
   );
 }
 
-export function deletePushSubscription(db: Db, endpoint: string): boolean {
-  return db.run("DELETE FROM push_subscriptions WHERE endpoint = ?", endpoint).changes > 0;
+/** Only the caller's own subscription; someone else's endpoint is left alone. */
+export function deletePushSubscription(db: Db, endpoint: string, userId: number): boolean {
+  return (
+    db.run("DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?", endpoint, userId)
+      .changes > 0
+  );
 }
 
 const defaultSender: PushSender = async (subscription, payload, vapid) => {
@@ -193,7 +216,7 @@ function statusOf(cause: unknown): number | null {
 }
 
 /** What a batch of gone repositories says on a lock screen. */
-export function goneNotification(repos: readonly GoneRepo[]): PushPayload {
+export function goneNotification(repos: readonly Omit<GoneRepo, "repoId">[]): PushPayload {
   const names = repos.map((repo) => `${repo.host}/${repo.path}`);
   if (names.length === 1 && repos[0]?.reason === "dmca_takedown") {
     return {
@@ -231,12 +254,29 @@ export interface PushNotifierOptions {
   now?: () => number;
 }
 
+/** What a storage cap crossing says, to the user and to the admin. */
+export function capNotification(email: string, forAdmin: boolean): PushPayload {
+  return forAdmin
+    ? {
+        title: "A user reached their storage cap",
+        body: `${email} is at or over their storage cap. New repositories are refused until they are under it again.`,
+        url: "/users",
+        tag: "amber-cap",
+      }
+    : {
+        title: "You reached your storage cap",
+        body: "New repositories are refused until you are under it again. Your existing backups keep syncing.",
+        url: "/",
+        tag: "amber-cap",
+      };
+}
+
 export interface PushNotifier {
   publicKey(): string;
-  /** Feed it every bus event; it only reacts to repo.gone. */
-  handleEvent(event: AmberEvent): void;
-  /** Send to every subscribed browser. Never throws. */
-  send(payload: PushPayload): Promise<PushSendResult>;
+  /** Feed it every bus event; it reacts to repo.gone and to cap crossings. */
+  handleEvent(event: AmberEvent, meta?: EventMeta): void;
+  /** Send to the subscribed browsers of exactly these users. Never throws. */
+  send(payload: PushPayload, userIds: readonly number[]): Promise<PushSendResult>;
   /** Send whatever is batched right now. Resolves once it has gone out. */
   flush(): Promise<void>;
   /** Stops the batch timer; anything still batched is sent first. */
@@ -254,9 +294,19 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
   let timer: NodeJS.Timeout | null = null;
   let inFlight: Promise<void> = Promise.resolve();
 
-  const send = async (payload: PushPayload): Promise<PushSendResult> => {
+  const send = async (
+    payload: PushPayload,
+    userIds: readonly number[],
+  ): Promise<PushSendResult> => {
+    const ids = [...new Set(userIds)];
+    if (ids.length === 0) {
+      return { sent: 0, failed: 0 };
+    }
     const subscriptions = db.all<StoredSubscription>(
-      "SELECT id, endpoint, p256dh, auth FROM push_subscriptions ORDER BY id ASC",
+      `SELECT id, endpoint, p256dh, auth FROM push_subscriptions
+        WHERE user_id IN (${ids.map(() => "?").join(", ")})
+        ORDER BY id ASC`,
+      ...ids,
     );
     if (subscriptions.length === 0) {
       return { sent: 0, failed: 0 };
@@ -322,8 +372,26 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
     pending = [];
     inFlight = inFlight.then(async () => {
       try {
-        const result = await send(goneNotification(batch));
-        log.info({ repos: batch.length, ...result }, "sent the gone notification");
+        // Per user: only the repositories that user can view right now. A
+        // user who can see none of the batch gets nothing at all.
+        let sent = 0;
+        let failed = 0;
+        for (const user of listUsers(db)) {
+          if (user.removedAt !== null) {
+            continue;
+          }
+          const theirs = batch.filter((repo) => {
+            const facts = loadRepoAccessFacts(db, repo.repoId);
+            return facts !== undefined && canView(user, facts);
+          });
+          if (theirs.length === 0) {
+            continue;
+          }
+          const result = await send(goneNotification(theirs), [user.id]);
+          sent += result.sent;
+          failed += result.failed;
+        }
+        log.info({ repos: batch.length, sent, failed }, "sent the gone notification");
       } catch (cause) {
         // A notification must never take the process down.
         log.error({ err: cause }, "could not send the gone notification");
@@ -332,18 +400,49 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
     return inFlight;
   };
 
+  const notifyCap = (userId: number): void => {
+    inFlight = inFlight.then(async () => {
+      try {
+        const user = getUser(db, userId);
+        if (user === undefined) {
+          return;
+        }
+        const admin = getAdminUser(db);
+        const own = await send(capNotification(user.email, false), [user.id]);
+        const toAdmin =
+          admin.id === user.id
+            ? { sent: 0, failed: 0 }
+            : await send(capNotification(user.email, true), [admin.id]);
+        log.info(
+          { userId, sent: own.sent + toAdmin.sent, failed: own.failed + toAdmin.failed },
+          "sent the storage cap notification",
+        );
+      } catch (cause) {
+        log.error({ err: cause }, "could not send the storage cap notification");
+      }
+    });
+  };
+
   return {
     publicKey: () => ensureVapidKeys(db, now()).publicKey,
 
-    handleEvent(event: AmberEvent): void {
+    handleEvent(event: AmberEvent, meta: EventMeta = {}): void {
+      if (meta.capReachedUserId !== undefined) {
+        notifyCap(meta.capReachedUserId);
+      }
       if (event.type !== "repo.gone") {
         return;
       }
-      const { path, host, reason } = event.payload;
-      if (typeof path !== "string" || typeof host !== "string") {
+      const { repoId, path, host, reason } = event.payload;
+      if (typeof repoId !== "number" || typeof path !== "string" || typeof host !== "string") {
         return;
       }
-      pending.push({ path, host, reason: typeof reason === "string" ? reason : undefined });
+      pending.push({
+        repoId,
+        path,
+        host,
+        reason: typeof reason === "string" ? reason : undefined,
+      });
       if (timer === null) {
         timer = setTimeout(() => {
           timer = null;

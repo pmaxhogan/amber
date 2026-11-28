@@ -1,7 +1,17 @@
 import type { ResolvedSettings, SyncErrorKind, SyncRun } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
+import {
+  CAP_REACHED_ERROR,
+  CAP_WOULD_NOT_FIT_ERROR,
+  firstCloneFacts,
+  markFirstCloneRefused,
+  remainingAllowanceBytes,
+} from "../domain/caps.ts";
 import { resolveGlobalSettings, resolveSettings } from "../domain/settings.ts";
+import { isAtOrOverCap } from "../domain/users.ts";
+import { lookupRepoInfo } from "../providers/forks.ts";
+import type { RepoInfo } from "../providers/types.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { jitteredIntervalMs } from "./backoff.ts";
 import { shutdownGit } from "./gitCli.ts";
@@ -51,6 +61,12 @@ export interface SchedulerOptions {
   /** How long stop() waits for running syncs before killing git. */
   shutdownGraceMs?: number;
   allowFileProtocol?: boolean;
+  /**
+   * Asks the forge about one repository right before a capped owner's first
+   * clone, for its size (and, while at it, its visibility). Injectable so the
+   * tests never reach a forge. Null: nothing could be learned.
+   */
+  repoInfo?: (db: Db, repoId: number) => Promise<RepoInfo | null>;
 }
 
 /** Five failed attempts across different forges mean the problem is local. */
@@ -184,6 +200,8 @@ export class Scheduler {
   readonly #queued = new Set<number>();
   readonly #running = new Map<number, Promise<void>>();
   readonly #runningForge = new Map<number, number>();
+  /** Capped owners with a first clone in flight: theirs run one at a time. */
+  readonly #firstCloneOwners = new Set<number>();
   #seq = 0;
   #timer: NodeJS.Timeout | undefined;
   #started = false;
@@ -370,6 +388,13 @@ export class Scheduler {
         deferred.push(entry);
         continue;
       }
+      const cappedOwner = this.#cappedFirstCloneOwner(entry.repoId);
+      if (cappedOwner !== null && this.#firstCloneOwners.has(cappedOwner)) {
+        // A capped user's first clones run one at a time: sizes are only
+        // known after a clone, so a batch would otherwise all pass the cap.
+        deferred.push(entry);
+        continue;
+      }
       this.#queued.delete(entry.repoId);
       this.#start(entry);
     }
@@ -391,9 +416,17 @@ export class Scheduler {
     }
 
     this.#runningForge.set(entry.repoId, entry.forgeId);
-    const run = this.#execute(entry)
-      .then((outcome) => {
-        this.#recordOutcome(entry.forgeId, outcome);
+    const cappedOwner = this.#cappedFirstCloneOwner(entry.repoId);
+    if (cappedOwner !== null) {
+      this.#firstCloneOwners.add(cappedOwner);
+    }
+    const run = this.#firstCloneGate(entry.repoId, settings)
+      .then(async (allowed) => {
+        if (!allowed) {
+          // Not a sync and not a failure: it must not feed the breaker.
+          return;
+        }
+        this.#recordOutcome(entry.forgeId, await this.#execute(entry));
       })
       .catch((cause: unknown) => {
         this.#log.error({ repoId: entry.repoId, err: cause }, "sync threw outside the run record");
@@ -402,6 +435,9 @@ export class Scheduler {
       .finally(() => {
         this.#running.delete(entry.repoId);
         this.#runningForge.delete(entry.repoId);
+        if (cappedOwner !== null) {
+          this.#firstCloneOwners.delete(cappedOwner);
+        }
         if (!this.#stopping) {
           this.#pump();
           this.#arm();
@@ -409,6 +445,65 @@ export class Scheduler {
       });
     this.#running.set(entry.repoId, run);
   }
+
+  /** The owner, when this repo's next sync is a capped (non-admin) owner's first clone. */
+  #cappedFirstCloneOwner(repoId: number): number | null {
+    const facts = firstCloneFacts(this.#options.db, repoId);
+    return facts.firstClone && facts.cappedOwner !== null ? facts.cappedOwner.id : null;
+  }
+
+  /**
+   * THE FIRST-CLONE GATE (docs/ARCHITECTURE.md "Storage caps"). Right before
+   * a capped owner's never-synced repo starts its first clone: at or over the
+   * cap, it does not start; where the forge reports a size that would not fit
+   * the remaining allowance, it does not start either. Both mark the repo
+   * "storage cap reached" and retry on its normal schedule. Manual syncs go
+   * through here too. An unknown size lets the clone proceed.
+   */
+  async #firstCloneGate(repoId: number, settings: ResolvedSettings): Promise<boolean> {
+    const { db } = this.#options;
+    const facts = firstCloneFacts(db, repoId);
+    const owner = facts.cappedOwner;
+    if (!facts.firstClone || owner === null) {
+      return true;
+    }
+    const refuse = (message: string): false => {
+      const now = this.#now();
+      const retryAt =
+        now + jitteredIntervalMs(settings.sync_interval_minutes * 60_000, this.#options.random);
+      markFirstCloneRefused(db, repoId, message, retryAt, now);
+      this.#log.info({ repoId, ownerUserId: owner.id }, "first clone refused by the storage cap");
+      this.#options.events?.publish("repo.updated", { repoId });
+      return false;
+    };
+    if (isAtOrOverCap(db, owner)) {
+      return refuse(CAP_REACHED_ERROR);
+    }
+    let info: RepoInfo | null = null;
+    try {
+      info = await (this.#options.repoInfo ?? this.#defaultRepoInfo)(db, repoId);
+    } catch (error) {
+      // Not knowing the size is not a reason to refuse.
+      this.#log.debug({ repoId, err: error }, "could not ask the forge for a repository size");
+    }
+    const remaining = remainingAllowanceBytes(db, owner);
+    if (
+      info !== null &&
+      info.sizeBytes !== null &&
+      remaining !== null &&
+      info.sizeBytes > remaining
+    ) {
+      return refuse(CAP_WOULD_NOT_FIT_ERROR);
+    }
+    return true;
+  }
+
+  readonly #defaultRepoInfo = (db: Db, repoId: number): Promise<RepoInfo | null> =>
+    lookupRepoInfo(db, repoId, {
+      secretKey: this.#options.secretKey ?? null,
+      ...(this.#options.logger === undefined ? {} : { log: this.#options.logger }),
+      ...(this.#options.now === undefined ? {} : { now: this.#options.now }),
+    });
 
   async #execute(entry: QueueEntry): Promise<SyncErrorKind | null> {
     const runner = this.#options.runSync ?? syncRepo;

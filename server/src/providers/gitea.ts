@@ -3,6 +3,7 @@ import {
   encodeRepoPath,
   expectArray,
   forkLookupFailure,
+  visibilityOnFailure,
   getJson,
   MAX_PAGES,
   matchesVisibility,
@@ -17,6 +18,7 @@ import type {
   DiscoveryContext,
   ForkLookup,
   OwnerLookup,
+  RepoInfo,
 } from "./types.ts";
 
 /**
@@ -53,6 +55,60 @@ interface GiteaRepo {
   parent?: { full_name?: unknown } | null;
 }
 
+/**
+ * The visibility fields, fail closed: public only when `private` is literally
+ * false and `internal` (visible to any signed-in user) is not true. Anything
+ * else is null (unknown).
+ */
+export function giteaVisibility(raw: Pick<GiteaRepo, "private" | "internal">): boolean | null {
+  if (raw.private === true || raw.internal === true) {
+    return true;
+  }
+  if (raw.private === false) {
+    return false;
+  }
+  return null;
+}
+
+function giteaFork(raw: GiteaRepo): ForkLookup {
+  if (raw.fork === true) {
+    const parent = parentPathOrNull(raw.parent?.full_name);
+    return parent === null ? { status: "unknown", rateLimited: false } : { status: "fork", parent };
+  }
+  return raw.fork === false ? { status: "not_fork" } : { status: "unknown", rateLimited: false };
+}
+
+/**
+ * Size is left unknown on purpose: the unit of Gitea's `size` has not been
+ * verified against its documentation, and a wrong unit would refuse clones
+ * that fit. Unknown means the cap gate lets the first clone proceed.
+ */
+async function giteaRepoInfo(context: DiscoveryContext, path: string): Promise<RepoInfo> {
+  const encoded = encodeRepoPath(path);
+  if (encoded.split("/").length < 2) {
+    return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+  }
+  try {
+    const response = await getJson<GiteaRepo>(
+      context,
+      `${apiBase(context.baseUrl)}/repos/${encoded}`,
+      { headers: headers(context), notFoundHint: path },
+    );
+    return {
+      fork: giteaFork(response.data),
+      // A 200 that does not say "public" is an answer: not public.
+      isPrivate: giteaVisibility(response.data) ?? true,
+      sizeBytes: null,
+    };
+  } catch (cause) {
+    return {
+      fork: forkLookupFailure(cause),
+      isPrivate: visibilityOnFailure(cause),
+      sizeBytes: null,
+    };
+  }
+}
+
 function apiBase(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/api/v1`;
 }
@@ -79,7 +135,7 @@ function toDiscovered(raw: GiteaRepo): DiscoveredRepo {
       !emptyRepo && typeof raw.default_branch === "string" && raw.default_branch !== ""
         ? raw.default_branch
         : null,
-    isPrivate: raw.private === true || raw.internal === true,
+    isPrivate: giteaVisibility(raw) !== false,
     archived: raw.archived === true,
     description:
       typeof raw.description === "string" && raw.description !== "" ? raw.description : null,
@@ -175,29 +231,10 @@ export const giteaProvider: AccountSyncProvider = {
   },
 
   async getForkParent(context: DiscoveryContext, path: string): Promise<ForkLookup> {
-    const encoded = encodeRepoPath(path);
-    if (encoded.split("/").length < 2) {
-      return { status: "unknown", rateLimited: false };
-    }
-    try {
-      const response = await getJson<GiteaRepo>(
-        context,
-        `${apiBase(context.baseUrl)}/repos/${encoded}`,
-        { headers: headers(context), notFoundHint: path },
-      );
-      if (response.data.fork === true) {
-        const parent = parentPathOrNull(response.data.parent?.full_name);
-        return parent === null
-          ? { status: "unknown", rateLimited: false }
-          : { status: "fork", parent };
-      }
-      return response.data.fork === false
-        ? { status: "not_fork" }
-        : { status: "unknown", rateLimited: false };
-    } catch (cause) {
-      return forkLookupFailure(cause);
-    }
+    return (await giteaRepoInfo(context, path)).fork;
   },
+
+  getRepoInfo: giteaRepoInfo,
 
   async checkOwner(context: DiscoveryContext, owner: string): Promise<OwnerLookup> {
     const name = owner.trim();

@@ -15,6 +15,7 @@ import {
 import { DomainError } from "../src/domain/errors.ts";
 import { SecretError } from "../src/security/secrets.ts";
 import { createTempDb, seedForge, TEST_SECRET_KEY, type TempDb } from "./helpers.ts";
+import { adminOf } from "./helpers/users.ts";
 
 const KEY = Buffer.from(TEST_SECRET_KEY, "hex");
 const SENTINEL = "SENTINEL-github_pat_11ABCDEF-do-not-leak";
@@ -36,13 +37,18 @@ afterEach(() => {
 });
 
 const make = (username: string, overrides: Partial<Parameters<typeof createAccount>[2]> = {}) =>
-  createAccount(db, KEY, {
-    forgeId,
-    username,
-    secret: null,
-    isDefault: false,
-    ...overrides,
-  });
+  createAccount(
+    db,
+    KEY,
+    {
+      forgeId,
+      username,
+      secret: null,
+      isDefault: false,
+      ...overrides,
+    },
+    adminOf(db).id,
+  );
 
 describe("createAccount", () => {
   it("stores an account and reports whether it carries a secret", () => {
@@ -67,37 +73,57 @@ describe("createAccount", () => {
 
   it("allows the same username on a different forge", () => {
     make("pmaxhogan");
-    const elsewhere = createAccount(db, KEY, {
-      forgeId: otherForgeId,
-      username: "pmaxhogan",
-      secret: null,
-      isDefault: false,
-    });
+    const elsewhere = createAccount(
+      db,
+      KEY,
+      {
+        forgeId: otherForgeId,
+        username: "pmaxhogan",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
     expect(elsewhere.forgeId).toBe(otherForgeId);
     expect(elsewhere.isDefault).toBe(true);
   });
 
   it("refuses to store a secret without a usable key", () => {
     expect(() =>
-      createAccount(db, null, { forgeId, username: "x", secret: SENTINEL, isDefault: false }),
+      createAccount(
+        db,
+        null,
+        { forgeId, username: "x", secret: SENTINEL, isDefault: false },
+        adminOf(db).id,
+      ),
     ).toThrow(SecretError);
     // The failed insert must not have left a row behind.
-    expect(listAccounts(db, forgeId)).toHaveLength(0);
+    expect(listAccounts(db, { forgeId })).toHaveLength(0);
   });
 
   it("stores an account with no secret even when no key is configured", () => {
-    const account = createAccount(db, null, {
-      forgeId,
-      username: "anon",
-      secret: null,
-      isDefault: false,
-    });
+    const account = createAccount(
+      db,
+      null,
+      {
+        forgeId,
+        username: "anon",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
     expect(account.hasSecret).toBe(false);
   });
 
   it("throws for an unknown forge", () => {
     expect(() =>
-      createAccount(db, KEY, { forgeId: 999, username: "x", secret: null, isDefault: false }),
+      createAccount(
+        db,
+        KEY,
+        { forgeId: 999, username: "x", secret: null, isDefault: false },
+        adminOf(db).id,
+      ),
     ).toThrow(/does not exist/);
   });
 });
@@ -106,14 +132,14 @@ describe("exactly one default per forge", () => {
   it("makes the first account the default even when it does not ask to be", () => {
     const first = make("first");
     expect(first.isDefault).toBe(true);
-    expect(getDefaultAccount(db, forgeId)?.id).toBe(first.id);
+    expect(getDefaultAccount(db, adminOf(db).id, forgeId)?.id).toBe(first.id);
   });
 
   it("does not promote later accounts automatically", () => {
     const first = make("first");
     const second = make("second");
     expect(second.isDefault).toBe(false);
-    expect(getDefaultAccount(db, forgeId)?.id).toBe(first.id);
+    expect(getDefaultAccount(db, adminOf(db).id, forgeId)?.id).toBe(first.id);
   });
 
   it("demotes the previous default when a new account asks to be default", () => {
@@ -121,7 +147,7 @@ describe("exactly one default per forge", () => {
     const second = make("second", { isDefault: true });
     expect(second.isDefault).toBe(true);
     expect(getAccount(db, first.id)?.isDefault).toBe(false);
-    expect(listAccounts(db, forgeId).filter((account) => account.isDefault)).toHaveLength(1);
+    expect(listAccounts(db, { forgeId }).filter((account) => account.isDefault)).toHaveLength(1);
   });
 
   it("promotes any account on request and keeps exactly one default", () => {
@@ -133,13 +159,13 @@ describe("exactly one default per forge", () => {
     expect(promoted.isDefault).toBe(true);
     expect(getAccount(db, first.id)?.isDefault).toBe(false);
     expect(getAccount(db, second.id)?.isDefault).toBe(false);
-    expect(listAccounts(db, forgeId).filter((account) => account.isDefault)).toHaveLength(1);
+    expect(listAccounts(db, { forgeId }).filter((account) => account.isDefault)).toHaveLength(1);
   });
 
   it("is a no-op when promoting the current default", () => {
     const first = make("first");
     expect(setDefaultAccount(db, first.id).id).toBe(first.id);
-    expect(listAccounts(db, forgeId).filter((account) => account.isDefault)).toHaveLength(1);
+    expect(listAccounts(db, { forgeId }).filter((account) => account.isDefault)).toHaveLength(1);
   });
 
   it("promotes the oldest remaining account when the default is deleted", () => {
@@ -149,39 +175,44 @@ describe("exactly one default per forge", () => {
     expect(first.isDefault).toBe(true);
 
     deleteAccount(db, first.id);
-    expect(getDefaultAccount(db, forgeId)?.id).toBe(second.id);
+    expect(getDefaultAccount(db, adminOf(db).id, forgeId)?.id).toBe(second.id);
 
     deleteAccount(db, second.id);
-    expect(getDefaultAccount(db, forgeId)?.id).toBe(third.id);
+    expect(getDefaultAccount(db, adminOf(db).id, forgeId)?.id).toBe(third.id);
   });
 
   it("does not disturb the default when a non-default account is deleted", () => {
     const first = make("first");
     const second = make("second");
     deleteAccount(db, second.id);
-    expect(getDefaultAccount(db, forgeId)?.id).toBe(first.id);
+    expect(getDefaultAccount(db, adminOf(db).id, forgeId)?.id).toBe(first.id);
   });
 
   it("leaves no default when the last account goes", () => {
     const only = make("only");
     deleteAccount(db, only.id);
-    expect(getDefaultAccount(db, forgeId)).toBeUndefined();
-    expect(listAccounts(db, forgeId)).toHaveLength(0);
+    expect(getDefaultAccount(db, adminOf(db).id, forgeId)).toBeUndefined();
+    expect(listAccounts(db, { forgeId })).toHaveLength(0);
   });
 
   it("keeps defaults independent per forge", () => {
     const githubDefault = make("gh");
-    const gitlabDefault = createAccount(db, KEY, {
-      forgeId: otherForgeId,
-      username: "gl",
-      secret: null,
-      isDefault: false,
-    });
-    expect(getDefaultAccount(db, forgeId)?.id).toBe(githubDefault.id);
-    expect(getDefaultAccount(db, otherForgeId)?.id).toBe(gitlabDefault.id);
+    const gitlabDefault = createAccount(
+      db,
+      KEY,
+      {
+        forgeId: otherForgeId,
+        username: "gl",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
+    expect(getDefaultAccount(db, adminOf(db).id, forgeId)?.id).toBe(githubDefault.id);
+    expect(getDefaultAccount(db, adminOf(db).id, otherForgeId)?.id).toBe(gitlabDefault.id);
 
     deleteAccount(db, githubDefault.id);
-    expect(getDefaultAccount(db, otherForgeId)?.id).toBe(gitlabDefault.id);
+    expect(getDefaultAccount(db, adminOf(db).id, otherForgeId)?.id).toBe(gitlabDefault.id);
   });
 
   it("survives a long churn of creates, promotions, and deletes", () => {
@@ -192,7 +223,7 @@ describe("exactly one default per forge", () => {
     deleteAccount(db, ids[0]!);
     deleteAccount(db, ids[4]!);
 
-    const remaining = listAccounts(db, forgeId);
+    const remaining = listAccounts(db, { forgeId });
     expect(remaining).toHaveLength(2);
     expect(remaining.filter((account) => account.isDefault)).toHaveLength(1);
   });
@@ -223,8 +254,8 @@ describe("forge immutability", () => {
     expect(getAccount(db, account.id)?.forgeId).toBe(forgeId);
 
     // The credential still belongs to the forge it was created for.
-    expect(listAccounts(db, otherForgeId)).toHaveLength(0);
-    expect(listAccounts(db, forgeId).map((a) => a.id)).toContain(account.id);
+    expect(listAccounts(db, { forgeId: otherForgeId })).toHaveLength(0);
+    expect(listAccounts(db, { forgeId }).map((a) => a.id)).toContain(account.id);
   });
 });
 
@@ -281,10 +312,10 @@ describe("secrets never leave through the account API", () => {
     const surfaces = [
       account,
       getAccount(db, account.id),
-      getDefaultAccount(db, forgeId),
+      getDefaultAccount(db, adminOf(db).id, forgeId),
       findAccountByUsername(db, forgeId, "pmaxhogan"),
       listAccounts(db),
-      listAccounts(db, forgeId),
+      listAccounts(db, { forgeId }),
       updateAccount(db, KEY, account.id, { username: "pmaxhogan" }),
       setDefaultAccount(db, account.id),
     ];
@@ -301,12 +332,17 @@ describe("secrets never leave through the account API", () => {
   it("keeps the secret out of a duplicate-username conflict message", () => {
     make("pmaxhogan", { secret: SENTINEL });
     try {
-      createAccount(db, KEY, {
-        forgeId,
-        username: "pmaxhogan",
-        secret: SENTINEL,
-        isDefault: false,
-      });
+      createAccount(
+        db,
+        KEY,
+        {
+          forgeId,
+          username: "pmaxhogan",
+          secret: SENTINEL,
+          isDefault: false,
+        },
+        adminOf(db).id,
+      );
       throw new Error("expected a conflict");
     } catch (error) {
       const message = (error as Error).message;
@@ -366,13 +402,18 @@ describe("listAccounts", () => {
   it("filters by forge and orders oldest first", () => {
     make("a");
     make("b");
-    createAccount(db, KEY, {
-      forgeId: otherForgeId,
-      username: "c",
-      secret: null,
-      isDefault: false,
-    });
-    expect(listAccounts(db, forgeId).map((account) => account.username)).toEqual(["a", "b"]);
+    createAccount(
+      db,
+      KEY,
+      {
+        forgeId: otherForgeId,
+        username: "c",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
+    expect(listAccounts(db, { forgeId }).map((account) => account.username)).toEqual(["a", "b"]);
     expect(listAccounts(db)).toHaveLength(3);
   });
 

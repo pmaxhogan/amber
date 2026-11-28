@@ -8,6 +8,7 @@ import DataTable from "primevue/datatable";
 import InputText from "primevue/inputtext";
 import Select from "primevue/select";
 import Tag from "primevue/tag";
+import ToggleSwitch from "primevue/toggleswitch";
 import type {
   Account,
   AmberEvent,
@@ -15,14 +16,17 @@ import type {
   Forge,
   RepoSortField,
   SortDirection,
+  UserRow,
 } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
 import { eventPayloadSchema } from "@amber/shared";
 import { deriveOutcome, type AccountSyncRow, type RepoRow } from "../api/types.ts";
 import { forgeOrigin, humanBytes, pluralize, relativeTime, absoluteTime } from "../lib/format.ts";
+import { accountsOfOwner, repoOwnerId } from "../lib/ownership.ts";
 import { useToaster } from "../lib/toast.ts";
 import { useEventsStore } from "../stores/events.ts";
+import { useMeStore } from "../stores/me.ts";
 import AppIcon from "../components/AppIcon.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import EmptyState from "../components/EmptyState.vue";
@@ -40,6 +44,7 @@ const api = useApi();
 const router = useRouter();
 const toast = useToaster();
 const events = useEventsStore();
+const me = useMeStore();
 
 // ---------------------------------------------------------------------------
 // Query state
@@ -60,19 +65,20 @@ const q = ref("");
 const forgeId = ref<number | null>(null);
 const stateFilter = ref<"active" | "paused" | null>(null);
 const outcomeFilter = ref<"success" | "error" | "canceled" | null>(null);
+/** Only repositories the caller owns. */
+const mineOnly = ref(false);
+/** Admin only: only repositories whose owner left the access policy. */
+const ownerRemovedOnly = ref(false);
+/** Admin only: repositories of one owner. */
+const ownerFilter = ref<number | null>(null);
+
+const users = ref<UserRow[]>([]);
 
 const forges = ref<Forge[]>([]);
 const accounts = ref<Account[]>([]);
 const accountSyncs = ref<AccountSyncRow[]>([]);
 
 const forgeById = computed(() => new Map(forges.value.map((forge) => [forge.id, forge])));
-const accountById = computed(() => new Map(accounts.value.map((account) => [account.id, account])));
-const defaultAccountByForge = computed(
-  () =>
-    new Map(
-      accounts.value.filter((account) => account.isDefault).map((a) => [a.forgeId, a] as const),
-    ),
-);
 
 const syncSourceById = computed(
   () => new Map(accountSyncs.value.map((sync) => [sync.id, sync.source] as const)),
@@ -110,13 +116,33 @@ const outcomeOptions = [
   { label: "Canceled", value: "canceled" },
 ];
 
+const ownerOptions = computed(() => [
+  { label: "Any owner", value: null },
+  ...users.value.map((user) => ({
+    label: user.removedAt === null ? user.email : `${user.email} (removed)`,
+    value: user.id,
+  })),
+]);
+
 const hasFilters = computed(
   () =>
     q.value.trim() !== "" ||
     forgeId.value !== null ||
     stateFilter.value !== null ||
-    outcomeFilter.value !== null,
+    outcomeFilter.value !== null ||
+    mineOnly.value ||
+    ownerRemovedOnly.value ||
+    ownerFilter.value !== null,
 );
+
+/** The ownership filters, as the list endpoint takes them. The two owner ones are admin only. */
+function ownershipParams(): { mine?: boolean; ownerId?: number; ownerRemoved?: boolean } {
+  return {
+    ...(mineOnly.value ? { mine: true } : {}),
+    ...(me.isAdmin && ownerFilter.value !== null ? { ownerId: ownerFilter.value } : {}),
+    ...(me.isAdmin && ownerRemovedOnly.value ? { ownerRemoved: true } : {}),
+  };
+}
 
 let inflight: AbortController | null = null;
 
@@ -136,6 +162,7 @@ async function load(): Promise<void> {
         forgeId: forgeId.value ?? undefined,
         state: stateFilter.value ?? undefined,
         outcome: outcomeFilter.value ?? undefined,
+        ...ownershipParams(),
       },
       controller.signal,
     );
@@ -157,14 +184,16 @@ async function load(): Promise<void> {
 
 async function loadReferenceData(): Promise<void> {
   try {
-    const [forgeRows, accountRows, syncRows] = await Promise.all([
+    const [forgeRows, accountRows, syncRows, userRows] = await Promise.all([
       api.listForges(),
       api.listAccounts(),
       api.listAccountSyncs(),
+      me.isAdmin ? api.listUsers() : Promise.resolve([] as UserRow[]),
     ]);
     forges.value = forgeRows;
     accounts.value = accountRows;
     accountSyncs.value = syncRows;
+    users.value = userRows;
   } catch {
     // The table still renders without the forge and account join; the columns
     // degrade to ids rather than the page failing outright.
@@ -182,7 +211,7 @@ watch(q, () => {
   }, 300);
 });
 
-watch([forgeId, stateFilter, outcomeFilter], () => {
+watch([forgeId, stateFilter, outcomeFilter, mineOnly, ownerRemovedOnly, ownerFilter], () => {
   page.value = 1;
   clearSelection();
   void load();
@@ -193,6 +222,9 @@ function resetFilters(): void {
   forgeId.value = null;
   stateFilter.value = null;
   outcomeFilter.value = null;
+  mineOnly.value = false;
+  ownerRemovedOnly.value = false;
+  ownerFilter.value = null;
 }
 
 function onPage(event: { page: number; rows: number }): void {
@@ -214,6 +246,15 @@ function onSort(event: { sortField?: unknown; sortOrder?: number | null }): void
 // ---------------------------------------------------------------------------
 
 const selected = ref<RepoRow[]>([]);
+
+/**
+ * Whether the caller may change this repository: their own, or anyone's with
+ * `modify_others`. The API refuses the rest per repository; this keeps rows
+ * the caller cannot change out of the ids a bulk action sends.
+ */
+function canModify(row: RepoRow): boolean {
+  return me.isAdmin || row.mine === true || me.can("modify_others");
+}
 const allMatching = ref(false);
 
 const selectionCount = computed(() => (allMatching.value ? total.value : selected.value.length));
@@ -241,7 +282,7 @@ const ID_PAGE_SIZE = 200;
  * that to a handful of requests even for a large instance.
  */
 async function resolveSelectedIds(): Promise<number[]> {
-  if (!allMatching.value) return selected.value.map((row) => row.id);
+  if (!allMatching.value) return selected.value.filter(canModify).map((row) => row.id);
   const ids: number[] = [];
   let cursor = 1;
   for (;;) {
@@ -254,6 +295,7 @@ async function resolveSelectedIds(): Promise<number[]> {
       forgeId: forgeId.value ?? undefined,
       state: stateFilter.value ?? undefined,
       outcome: outcomeFilter.value ?? undefined,
+      ...ownershipParams(),
     });
     ids.push(...result.rows.map((row) => row.id));
     if (ids.length >= result.total || result.rows.length === 0) break;
@@ -278,10 +320,17 @@ async function runBulk(action: BulkRepoAction, files = false): Promise<void> {
   try {
     const ids = await resolveSelectedIds();
     if (ids.length === 0) return;
-    await api.bulkRepos(ids, action, files);
+    const result = await api.bulkRepos(ids, action, files);
+    const refused = Math.max(0, result.requested - result.affected - result.missing.length);
     toast.success(
-      `${ACTION_LABELS[action]} ${pluralize(ids.length, "repository", "repositories")}`,
+      `${ACTION_LABELS[action]} ${pluralize(result.affected, "repository", "repositories")}`,
     );
+    if (refused > 0) {
+      toast.warn(
+        `${pluralize(refused, "repository", "repositories")} skipped`,
+        "You can only change repositories you own, unless you have been given more access.",
+      );
+    }
     clearSelection();
     deleteVisible.value = false;
     await load();
@@ -406,6 +455,16 @@ interface AccountBadge {
 }
 
 function accountBadge(row: RepoRow): AccountBadge {
+  const ownerId = repoOwnerId(row, me.userId);
+  if (ownerId === null) {
+    // Someone else's repository: which account fetches it is their business.
+    return {
+      label: "owner's",
+      severity: "secondary",
+      title: "Fetched with its owner's own settings.",
+    };
+  }
+  const ownerAccounts = accountsOfOwner(accounts.value, ownerId);
   if (row.forceAnonymous) {
     return {
       label: "anonymous",
@@ -414,14 +473,14 @@ function accountBadge(row: RepoRow): AccountBadge {
     };
   }
   if (row.accountOverrideId !== null) {
-    const account = accountById.value.get(row.accountOverrideId);
+    const account = ownerAccounts.find((entry) => entry.id === row.accountOverrideId);
     return {
       label: account === undefined ? "override" : `${account.username} (override)`,
       severity: "info",
       title: "This repository overrides the forge default account.",
     };
   }
-  const fallback = defaultAccountByForge.value.get(row.forgeId);
+  const fallback = ownerAccounts.find((entry) => entry.isDefault && entry.forgeId === row.forgeId);
   return {
     label: fallback === undefined ? "none" : fallback.username,
     severity: "secondary",
@@ -499,6 +558,24 @@ onBeforeUnmount(() => {
           option-label="label"
           option-value="value"
         />
+      </div>
+      <div v-if="me.isAdmin" class="amber-field">
+        <label for="repo-owner">Owner</label>
+        <Select
+          v-model="ownerFilter"
+          input-id="repo-owner"
+          :options="ownerOptions"
+          option-label="label"
+          option-value="value"
+        />
+      </div>
+      <div class="amber-row repos-filters__toggle">
+        <ToggleSwitch v-model="mineOnly" input-id="repo-mine" />
+        <label for="repo-mine">Mine</label>
+      </div>
+      <div v-if="me.isAdmin" class="amber-row repos-filters__toggle">
+        <ToggleSwitch v-model="ownerRemovedOnly" input-id="repo-owner-removed" />
+        <label for="repo-owner-removed">Owner removed</label>
       </div>
       <Button
         v-if="hasFilters"
@@ -615,9 +692,33 @@ onBeforeUnmount(() => {
       <Column field="displayName" header="Repo" sort-field="display_name" sortable>
         <template #body="{ data }">
           <div class="repo-cell" :title="repoUrl(data)">
-            <span class="repo-cell__name">{{ data.displayName }}</span>
+            <span class="repo-cell__name">
+              {{ data.displayName }}
+              <Tag
+                v-if="data.isPrivate !== undefined"
+                :value="data.isPrivate ? 'private' : 'public'"
+                severity="secondary"
+                class="repo-cell__visibility"
+                :title="
+                  data.isPrivate
+                    ? 'Private on its forge, or not known to be public.'
+                    : 'Public on its forge.'
+                "
+                data-testid="visibility"
+              />
+            </span>
             <span class="repo-cell__path mono">{{ forgeLabel(data) }}/{{ data.path }}</span>
           </div>
+        </template>
+      </Column>
+
+      <Column v-if="me.isAdmin" header="Owner" :sortable="false">
+        <template #body="{ data }">
+          <span v-if="data.owner" class="owner-cell" data-testid="owner-cell">
+            <span class="mono">{{ data.owner.email }}</span>
+            <Tag v-if="data.owner.removed" value="removed" severity="danger" />
+          </span>
+          <span v-else class="amber-muted">-</span>
         </template>
       </Column>
 
@@ -789,6 +890,22 @@ onBeforeUnmount(() => {
 
 .repo-cell__name {
   font-weight: 550;
+}
+
+.repo-cell__visibility {
+  margin-left: 0.4rem;
+  font-size: 0.65rem;
+  vertical-align: 0.1em;
+}
+
+.owner-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.repos-filters__toggle {
+  padding-bottom: 0.45rem;
 }
 
 .repo-cell__path {

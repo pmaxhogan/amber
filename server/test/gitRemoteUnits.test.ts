@@ -4,13 +4,9 @@ import { openDb, type Db } from "../src/db/db.ts";
 import { migrate } from "../src/db/migrate.ts";
 import {
   buildCloneUrlTemplate,
-  disableGitRemote,
-  enableGitRemote,
-  GitRemoteDisabledError,
+  isGitRemoteEnabled,
   KV_ENABLED,
-  readGitRemoteState,
-  rotateGitRemotePassword,
-  toGitRemoteConfig,
+  setGitRemoteEnabled,
 } from "../src/gitremote/config.ts";
 import {
   parseBasicAuth,
@@ -159,53 +155,31 @@ describe("AuthThrottle", () => {
   });
 });
 
-describe("git remote kv state", () => {
-  it("defaults to disabled with no password", () => {
-    expect(readGitRemoteState(db)).toEqual({
-      enabled: false,
-      username: "amber",
-      passwordHash: null,
-      rotatedAt: null,
-    });
+describe("git remote kill switch", () => {
+  it("defaults to off", () => {
+    expect(isGitRemoteEnabled(db)).toBe(false);
   });
 
-  it("enables with a fresh hash and a rotation timestamp", () => {
-    const { state, password } = enableGitRemote(db);
-    expect(state.enabled).toBe(true);
-    expect(state.passwordHash).toMatch(/^scrypt\$/);
-    expect(state.passwordHash).not.toContain(password);
-    expect(state.rotatedAt).toBeGreaterThan(0);
+  it("turns on and off", () => {
+    setGitRemoteEnabled(db, true);
+    expect(isGitRemoteEnabled(db)).toBe(true);
+    setGitRemoteEnabled(db, false);
+    expect(isGitRemoteEnabled(db)).toBe(false);
   });
 
-  it("rotates while enabled and refuses while disabled", () => {
-    const first = enableGitRemote(db);
-    const second = rotateGitRemotePassword(db);
-    expect(second.password).not.toBe(first.password);
-    expect(second.state.enabled).toBe(true);
-    expect(second.state.passwordHash).not.toBe(first.state.passwordHash);
-
-    disableGitRemote(db);
-    expect(() => rotateGitRemotePassword(db)).toThrow(GitRemoteDisabledError);
-    // The invariant holds: a disabled remote stores no credential at all.
-    expect(readGitRemoteState(db).passwordHash).toBeNull();
-  });
-
-  it("destroys the hash on disable", () => {
-    enableGitRemote(db);
-    const state = disableGitRemote(db);
-    expect(state.enabled).toBe(false);
-    expect(state.passwordHash).toBeNull();
-  });
-
-  it("treats an enabled flag with no password as disabled", () => {
+  it("reads anything but the exact value true as off", () => {
     const now = Date.now();
-    db.run(
-      "INSERT INTO kv (key, value, created_at, updated_at) VALUES (?, 'true', ?, ?)",
-      KV_ENABLED,
-      now,
-      now,
-    );
-    expect(readGitRemoteState(db).enabled).toBe(false);
+    for (const value of ["1", "TRUE", "yes", " true", ""]) {
+      db.run(
+        `INSERT INTO kv (key, value, created_at, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+        KV_ENABLED,
+        value,
+        now,
+        now,
+      );
+      expect(isGitRemoteEnabled(db), JSON.stringify(value)).toBe(false);
+    }
   });
 
   it("builds a clone URL template with placeholders, never a real password", () => {
@@ -218,13 +192,6 @@ describe("git remote kv state", () => {
     expect(buildCloneUrlTemplate("https://x.test", "user name")).toContain("user%20name");
     // A malformed origin degrades instead of throwing during a settings read.
     expect(buildCloneUrlTemplate("not a url", "amber")).toBe("not a url/git/{slug}.git");
-  });
-
-  it("never puts the hash into the API view", () => {
-    const { state } = enableGitRemote(db);
-    const view = toGitRemoteConfig(state, "https://amber.example.com");
-    expect(JSON.stringify(view)).not.toContain(state.passwordHash as string);
-    expect(view).not.toHaveProperty("passwordHash");
   });
 });
 

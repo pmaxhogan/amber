@@ -14,6 +14,7 @@ import {
 } from "../src/domain/forges.ts";
 import { createRepo } from "../src/domain/repos.ts";
 import { createTempDb, type TempDb } from "./helpers.ts";
+import { adminOf } from "./helpers/users.ts";
 
 let temp: TempDb;
 let db: Db;
@@ -200,7 +201,7 @@ describe("deleteForge", () => {
 
   it("refuses while repositories still reference it", () => {
     const forge = upsertForge(db, { protocol: "https", host: "github.com", port: null });
-    createRepo(db, { forgeId: forge.id, path: "nodejs/node" });
+    createRepo(db, { ownerUserId: adminOf(db).id, forgeId: forge.id, path: "nodejs/node" });
     expect(() => deleteForge(db, forge.id)).toThrow(DomainError);
     expect(() => deleteForge(db, forge.id)).toThrow(/still has 1 repositories/);
     expect(getForge(db, forge.id)).toBeDefined();

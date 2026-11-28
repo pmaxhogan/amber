@@ -49,6 +49,11 @@ export interface ImportLineResult {
    * line names a whole user or organization rather than one repository.
    */
   target?: "repo" | "namespace";
+  /**
+   * Set by the server on a refused line, for a client to branch on:
+   * `host_not_enabled` or `storage_cap_reached` (see API_ERROR_CODES).
+   */
+  code?: string;
 }
 
 const SCHEME_RE = /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\//;

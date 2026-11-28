@@ -23,16 +23,24 @@ import {
   supportsTrendingSync,
   type DiscoveryDeps,
 } from "../providers/discovery.ts";
+import { getUser, type User } from "../domain/users.ts";
 import { hasPermission, requireRequestUser } from "../security/authz.ts";
 import { createBackupFileRemover } from "./repos.ts";
 
 /**
  * /api/account-syncs CRUD and manual run.
  *
- * Authorization: creating a sync needs `import`, and a trending sync, being
- * instance-level, needs `manage_settings` to create, edit, delete or run.
- * Which other syncs a caller may see and touch (their own; the admin all) is
- * an ownership check made per object in the enforcement wave.
+ * Authorization:
+ * - A sync belongs to its creator, and so does every repository it creates.
+ * - Creating one needs `import`. Owned and starred syncs need an account the
+ *   caller OWNS; a namespace sync's account is the caller's own or none (none
+ *   means the owner's default account at run time, when they may use
+ *   accounts). Another user's account reads exactly like no account at all.
+ * - A trending sync is instance-level: everyone sees them, and creating,
+ *   editing, deleting or running one needs `manage_settings` (anyone holding
+ *   it may manage all of them).
+ * - Every other sync is visible to, and editable by, its owner and the admin
+ *   only. Anyone else gets the same 404 as a sync that does not exist.
  */
 
 /** What the create schema used to default to, before trending brought its own. */
@@ -58,6 +66,7 @@ interface AccountSyncRowShape {
   last_run_at: number | null;
   last_error: string | null;
   repos_discovered: number | null;
+  owner_user_id: number;
   created_at: number;
   updated_at: number;
 }
@@ -74,7 +83,26 @@ function trendingForbidden(reply: FastifyReply): FastifyReply {
   });
 }
 
-function listAccountSyncs(db: Db, accountId?: number): AccountSync[] {
+/**
+ * Whether `user` may see this sync at all. A trending sync is instance-level
+ * (it lists what is popular on a public forge, nothing of anyone's), so
+ * everyone sees those; changing one still needs manage_settings. Every other
+ * sync is its owner's and the admin's only.
+ */
+function maySee(user: User, row: Pick<AccountSyncRowShape, "owner_user_id" | "source">): boolean {
+  return user.isAdmin || row.owner_user_id === user.id || row.source === "trending";
+}
+
+/** The owner's address, for the admin only. */
+function withOwnerEmail(db: Db, user: User, sync: AccountSync): AccountSync {
+  if (!user.isAdmin || sync.ownerUserId === undefined) {
+    return sync;
+  }
+  const owner = getUser(db, sync.ownerUserId);
+  return owner === undefined ? sync : { ...sync, ownerEmail: owner.email };
+}
+
+function listAccountSyncs(db: Db, user: User, accountId?: number): AccountSync[] {
   const rows =
     accountId === undefined
       ? db.all<AccountSyncRowShape>("SELECT * FROM account_syncs ORDER BY id ASC")
@@ -82,7 +110,13 @@ function listAccountSyncs(db: Db, accountId?: number): AccountSync[] {
           "SELECT * FROM account_syncs WHERE account_id = ? ORDER BY id ASC",
           accountId,
         );
-  return rows.map(mapAccountSync);
+  return rows
+    .filter((row) => maySee(user, row))
+    .map((row) => withOwnerEmail(db, user, mapAccountSync(row)));
+}
+
+function notFoundSync(reply: FastifyReply, id: number): FastifyReply {
+  return fail(reply, 404, "not_found", `Account sync ${String(id)} does not exist`);
 }
 
 export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
@@ -101,7 +135,7 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     if (!query.success) {
       return fail(reply, 400, "invalid_query", z.prettifyError(query.error));
     }
-    return { rows: listAccountSyncs(db, query.data.accountId) };
+    return { rows: listAccountSyncs(db, requireRequestUser(request), query.data.accountId) };
   });
 
   app.post("/account-syncs", { config: { authz: "import" } }, (request, reply) => {
@@ -110,18 +144,19 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
       return fail(reply, 400, "invalid_body", z.prettifyError(body.error));
     }
     const input = body.data;
-    if (
-      input.source === "trending" &&
-      !hasPermission(requireRequestUser(request), "manage_settings")
-    ) {
+    const user = requireRequestUser(request);
+    if (input.source === "trending" && !hasPermission(user, "manage_settings")) {
       return trendingForbidden(reply);
     }
 
     let accountForgeId: number | undefined;
     if (input.accountId !== undefined) {
+      // Only the caller's OWN account: another user's answers exactly like
+      // one that does not exist, so account ids cannot be probed here.
       const account = db.get<{ forge_id: number }>(
-        "SELECT forge_id FROM accounts WHERE id = ?",
+        "SELECT forge_id FROM accounts WHERE id = ? AND owner_user_id = ?",
         input.accountId,
+        user.id,
       );
       if (account === undefined) {
         return fail(
@@ -211,6 +246,7 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
         );
       }
       const created = insertAccountSync(db, {
+        ownerUserId: user.id,
         forgeId,
         accountId: null,
         source: "trending",
@@ -228,11 +264,12 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     const duplicate =
       namespace === null
         ? db.get<{ id: number; namespace: string | null }>(
-            "SELECT id, namespace FROM account_syncs WHERE account_id = ? AND source = ?",
+            "SELECT id, namespace FROM account_syncs WHERE owner_user_id = ? AND account_id = ? AND source = ?",
+            user.id,
             input.accountId ?? null,
             input.source,
           )
-        : findNamespaceSync(db, forgeId, namespace);
+        : findNamespaceSync(db, user.id, forgeId, namespace);
     if (duplicate !== undefined) {
       return fail(
         reply,
@@ -246,6 +283,7 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const created = insertAccountSync(db, {
+      ownerUserId: user.id,
       forgeId,
       accountId: input.accountId ?? null,
       source: input.source,
@@ -267,14 +305,12 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
       return fail(reply, 400, "invalid_body", z.prettifyError(body.error));
     }
 
+    const user = requireRequestUser(request);
     const existing = getAccountSyncRow(db, params.data.id);
-    if (existing === undefined) {
-      return fail(reply, 404, "not_found", `Account sync ${String(params.data.id)} does not exist`);
+    if (existing === undefined || !maySee(user, existing)) {
+      return notFoundSync(reply, params.data.id);
     }
-    if (
-      existing.source === "trending" &&
-      !hasPermission(requireRequestUser(request), "manage_settings")
-    ) {
+    if (existing.source === "trending" && !hasPermission(user, "manage_settings")) {
       return trendingForbidden(reply);
     }
     const patch = body.data;
@@ -321,7 +357,7 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     );
 
     const row = getAccountSyncRow(db, params.data.id);
-    return row === undefined ? null : mapAccountSync(row);
+    return row === undefined ? null : withOwnerEmail(db, user, mapAccountSync(row));
   });
 
   app.delete("/account-syncs/:id", { config: { authz: "user" } }, (request, reply) => {
@@ -329,15 +365,17 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     if (!params.success) {
       return fail(reply, 400, "invalid_params", z.prettifyError(params.error));
     }
-    if (
-      getAccountSyncRow(db, params.data.id)?.source === "trending" &&
-      !hasPermission(requireRequestUser(request), "manage_settings")
-    ) {
+    const user = requireRequestUser(request);
+    const target = getAccountSyncRow(db, params.data.id);
+    if (target === undefined || !maySee(user, target)) {
+      return notFoundSync(reply, params.data.id);
+    }
+    if (target.source === "trending" && !hasPermission(user, "manage_settings")) {
       return trendingForbidden(reply);
     }
     const deleted = db.run("DELETE FROM account_syncs WHERE id = ?", params.data.id);
     if (deleted.changes === 0) {
-      return fail(reply, 404, "not_found", `Account sync ${String(params.data.id)} does not exist`);
+      return notFoundSync(reply, params.data.id);
     }
     // repos.managed_by_account_sync_id is ON DELETE SET NULL: the backups stay,
     // they simply stop being managed by a sync.
@@ -349,14 +387,12 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     if (!params.success) {
       return fail(reply, 400, "invalid_params", z.prettifyError(params.error));
     }
+    const user = requireRequestUser(request);
     const target = getAccountSyncRow(db, params.data.id);
-    if (target === undefined) {
-      return fail(reply, 404, "not_found", `Account sync ${String(params.data.id)} does not exist`);
+    if (target === undefined || !maySee(user, target)) {
+      return notFoundSync(reply, params.data.id);
     }
-    if (
-      target.source === "trending" &&
-      !hasPermission(requireRequestUser(request), "manage_settings")
-    ) {
+    if (target.source === "trending" && !hasPermission(user, "manage_settings")) {
       return trendingForbidden(reply);
     }
 
@@ -368,6 +404,6 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
       removed: result.removed,
       error: result.error,
     });
-    return result;
+    return { ...result, accountSync: withOwnerEmail(db, user, result.accountSync) };
   });
 };

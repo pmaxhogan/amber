@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { createApiClient } from "../src/api/client.ts";
-import { makeAccount, makeForge, makeRepo, makeRun, makeStatus } from "./helpers/stubApi.ts";
+import { createApiClient, type ApiClientError } from "../src/api/client.ts";
+import {
+  makeAccount,
+  makeForge,
+  makeMe,
+  makeRepo,
+  makeRun,
+  makeStatus,
+  makeUserRow,
+} from "./helpers/stubApi.ts";
 
 /**
  * Every method on the client, exercised once against a stubbed fetch.
@@ -41,8 +49,9 @@ function harness(body: unknown, status = 200) {
 
 const GIT_REMOTE = {
   enabled: true,
-  username: "amber",
-  cloneUrlTemplate: "http://amber:{password}@localhost:8080/git/{slug}.git",
+  username: "k3j9x0abcd",
+  hasPassword: true,
+  cloneUrlTemplate: "http://k3j9x0abcd:{password}@localhost:8080/git/{slug}.git",
   rotatedAt: 1_700_000_000_000,
 };
 
@@ -327,38 +336,112 @@ describe("account syncs", () => {
 });
 
 describe("git remote", () => {
-  it("reads the config without a password", async () => {
-    const { api } = harness(GIT_REMOTE);
+  it("reads the caller's own state without a password", async () => {
+    const { api, calls } = harness(GIT_REMOTE);
     const config = await api.getGitRemote();
     expect(Object.keys(config)).not.toContain("password");
+    expect(config.hasPassword).toBe(true);
+    expect(calls[0]).toMatchObject({ url: "/api/git-remote", method: "GET" });
   });
 
-  it("returns the one-time password on enable and rotate", async () => {
-    const enabled = harness({ ...GIT_REMOTE, password: "s3cret" });
-    await expect(enabled.api.enableGitRemote()).resolves.toMatchObject({ password: "s3cret" });
-    expect(enabled.calls[0]).toMatchObject({ url: "/api/git-remote/enable", method: "POST" });
-
+  it("returns the one-time password on rotate only", async () => {
     const rotated = harness({ ...GIT_REMOTE, password: "fresh" });
     await expect(rotated.api.rotateGitRemote()).resolves.toMatchObject({ password: "fresh" });
-    expect(rotated.calls[0]?.url).toBe("/api/git-remote/rotate");
+    expect(rotated.calls[0]).toMatchObject({ url: "/api/git-remote/rotate", method: "POST" });
   });
 
-  it("disables without returning a password", async () => {
-    const { api, calls } = harness({ ...GIT_REMOTE, enabled: false });
-    await expect(api.disableGitRemote()).resolves.toMatchObject({ enabled: false });
-    expect(calls[0]?.url).toBe("/api/git-remote/disable");
+  it("refuses a rotate answer that carries no password", async () => {
+    const { api } = harness(GIT_REMOTE);
+    await expect(api.rotateGitRemote()).rejects.toMatchObject({ problem: "invalid_response" });
   });
 
-  it("renames the user with a PATCH carrying only the username", async () => {
-    const { api, calls } = harness({ ...GIT_REMOTE, username: "backups" });
-    await expect(api.setGitRemoteUsername("backups")).resolves.toMatchObject({
-      username: "backups",
-    });
+  it("revokes the caller's password", async () => {
+    const { api, calls } = harness({ ...GIT_REMOTE, hasPassword: false });
+    await expect(api.revokeGitRemote()).resolves.toMatchObject({ hasPassword: false });
+    expect(calls[0]).toMatchObject({ url: "/api/git-remote/revoke", method: "POST" });
+  });
+
+  it("flips the kill switch both ways without a password", async () => {
+    const on = harness(GIT_REMOTE);
+    await expect(on.api.enableGitRemote()).resolves.toMatchObject({ enabled: true });
+    expect(on.calls[0]).toMatchObject({ url: "/api/git-remote/enable", method: "POST" });
+
+    const off = harness({ ...GIT_REMOTE, enabled: false });
+    await expect(off.api.disableGitRemote()).resolves.toMatchObject({ enabled: false });
+    expect(off.calls[0]?.url).toBe("/api/git-remote/disable");
+  });
+});
+
+describe("identity and users", () => {
+  it("reads /api/me", async () => {
+    const { api, calls } = harness(makeMe());
+    await expect(api.me()).resolves.toMatchObject({ isAdmin: true, email: "admin@example.com" });
+    expect(calls[0]).toMatchObject({ url: "/api/me", method: "GET" });
+  });
+
+  it("unwraps the user list", async () => {
+    const { api, calls } = harness({ rows: [makeUserRow()] });
+    const rows = await api.listUsers();
+    expect(rows).toHaveLength(1);
+    expect(calls[0]?.url).toBe("/api/users");
+  });
+
+  it("patches a user with permissions and a cap", async () => {
+    const { api, calls } = harness(makeUserRow({ storageCapBytes: 1024 }));
+    await api.updateUser(2, { permissions: { import_private: true }, storageCapBytes: 1024 });
     expect(calls[0]).toMatchObject({
-      url: "/api/git-remote",
+      url: "/api/users/2",
       method: "PATCH",
-      body: { username: "backups" },
+      body: { permissions: { import_private: true }, storageCapBytes: 1024 },
     });
+  });
+
+  it("refreshes the policy, adopts repos and revokes a git password", async () => {
+    const refresh = harness({
+      ok: true,
+      error: null,
+      policy: makeMe().policy,
+      changes: { created: 1, removed: 0, restored: 0 },
+    });
+    await expect(refresh.api.refreshUsers()).resolves.toMatchObject({ ok: true });
+    expect(refresh.calls[0]).toMatchObject({ url: "/api/users/refresh", method: "POST" });
+
+    const adopt = harness({ userId: 2, adopted: 3 });
+    await expect(adopt.api.adoptUserRepos(2)).resolves.toEqual({ userId: 2, adopted: 3 });
+    expect(adopt.calls[0]).toMatchObject({ url: "/api/users/2/adopt-repos", method: "POST" });
+
+    const revoke = harness(makeUserRow());
+    await revoke.api.revokeUserGit(2);
+    expect(revoke.calls[0]).toMatchObject({ url: "/api/users/2/revoke-git", method: "POST" });
+  });
+});
+
+describe("403 forbidden", () => {
+  it("reads as one clear message that names the missing permission", async () => {
+    const { api } = harness(
+      { error: "forbidden", message: "nope", details: { permission: "import" } },
+      403,
+    );
+    const error = (await api.listUsers().catch((cause: unknown) => cause)) as ApiClientError;
+    expect(error.problem).toBe("forbidden");
+    expect(error.message).toContain("You do not have permission");
+    expect(error.message).toContain("Import");
+  });
+
+  it("says so when the route is admin only", async () => {
+    const { api } = harness(
+      { error: "forbidden", message: "nope", details: { requires: "admin" } },
+      403,
+    );
+    const error = (await api.listUsers().catch((cause: unknown) => cause)) as ApiClientError;
+    expect(error.message).toBe("Only the Amber admin can do that.");
+  });
+
+  it("keeps not_a_user and policy_unavailable as their own problems", async () => {
+    const denied = harness({ error: "not_a_user", message: "no" }, 403);
+    await expect(denied.api.me()).rejects.toMatchObject({ problem: "not_a_user", status: 403 });
+    const down = harness({ error: "policy_unavailable", message: "later" }, 503);
+    await expect(down.api.me()).rejects.toMatchObject({ problem: "policy_unavailable" });
   });
 });
 

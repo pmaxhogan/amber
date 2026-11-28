@@ -11,12 +11,18 @@ import {
   type SettingsExplanation,
 } from "@amber/shared";
 import type { Db } from "../db/db.ts";
+import {
+  resolveRepoAccountId,
+  resolveRepoAccountIds,
+  type RepoCredentialFacts,
+} from "./credentials.ts";
 import { invalid, notFound } from "./errors.ts";
 
 /**
- * Resolution order, narrowest first: repo -> effective account (the override,
- * or the forge default; skipped when force_anonymous) -> forge -> global ->
- * registry default.
+ * Resolution order, narrowest first: repo -> effective account (the account
+ * the repo's fetches present, per domain/credentials.ts: the owner's override
+ * or default; skipped when there is none) -> forge -> global -> registry
+ * default.
  */
 
 type ScopeValues = Map<SettingKey, unknown>;
@@ -115,31 +121,32 @@ interface RepoScopeRow {
   forge_id: number;
   account_override_id: number | null;
   force_anonymous: number;
+  owner_user_id: number | null;
+}
+
+function credentialFactsOf(repo: RepoScopeRow): RepoCredentialFacts & { id: number } {
+  return {
+    id: repo.id,
+    forgeId: repo.forge_id,
+    ownerUserId: repo.owner_user_id,
+    accountOverrideId: repo.account_override_id,
+    forceAnonymous: repo.force_anonymous === 1,
+  };
 }
 
 /**
- * The account whose settings apply to this repo: the explicit override, or the
- * forge's default account. force_anonymous means the repo is fetched without
- * credentials, so no account layer participates at all.
+ * The account whose settings apply to this repo: exactly the account its
+ * fetches present (domain/credentials.ts), so the settings layer can never
+ * name an account the fetch would not use. No account, no account layer.
  */
 function effectiveAccountId(db: Db, repo: RepoScopeRow): number | null {
-  if (repo.force_anonymous === 1) {
-    return null;
-  }
-  if (repo.account_override_id !== null) {
-    return repo.account_override_id;
-  }
-  const row = db.get<{ id: number }>(
-    "SELECT id FROM accounts WHERE forge_id = ? AND is_default = 1",
-    repo.forge_id,
-  );
-  return row?.id ?? null;
+  return resolveRepoAccountId(db, credentialFactsOf(repo));
 }
 
 /** Narrowest first. The first layer holding a key wins it. */
 function layersForRepo(db: Db, repoId: number): Layer[] {
   const repo = db.get<RepoScopeRow>(
-    "SELECT id, forge_id, account_override_id, force_anonymous FROM repos WHERE id = ?",
+    "SELECT id, forge_id, account_override_id, force_anonymous, owner_user_id FROM repos WHERE id = ?",
     repoId,
   );
   if (repo === undefined) {
@@ -231,7 +238,7 @@ export function resolveSettingsForRepos(
 
   const placeholders = repoIds.map(() => "?").join(", ");
   const repos = db.all<RepoScopeRow>(
-    `SELECT id, forge_id, account_override_id, force_anonymous
+    `SELECT id, forge_id, account_override_id, force_anonymous, owner_user_id
        FROM repos WHERE id IN (${placeholders})`,
     ...repoIds,
   );
@@ -240,25 +247,7 @@ export function resolveSettingsForRepos(
   }
 
   const forgeIds = [...new Set(repos.map((repo) => repo.forge_id))];
-  const defaultAccountByForge = new Map<number, number>();
-  const forgePlaceholders = forgeIds.map(() => "?").join(", ");
-  for (const row of db.all<{ id: number; forge_id: number }>(
-    `SELECT id, forge_id FROM accounts
-      WHERE is_default = 1 AND forge_id IN (${forgePlaceholders})`,
-    ...forgeIds,
-  )) {
-    defaultAccountByForge.set(row.forge_id, row.id);
-  }
-
-  const accountIdByRepo = new Map<number, number | null>();
-  for (const repo of repos) {
-    accountIdByRepo.set(
-      repo.id,
-      repo.force_anonymous === 1
-        ? null
-        : (repo.account_override_id ?? defaultAccountByForge.get(repo.forge_id) ?? null),
-    );
-  }
+  const accountIdByRepo = resolveRepoAccountIds(db, repos.map(credentialFactsOf));
 
   const accountIds = [
     ...new Set([...accountIdByRepo.values()].filter((id): id is number => id !== null)),

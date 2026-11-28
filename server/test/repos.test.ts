@@ -27,6 +27,7 @@ import {
   type CreateRepoInput,
 } from "../src/domain/repos.ts";
 import { createTempDb, seedForge, TEST_SECRET_KEY, type TempDb } from "./helpers.ts";
+import { adminOf } from "./helpers/users.ts";
 
 const KEY = Buffer.from(TEST_SECRET_KEY, "hex");
 
@@ -47,7 +48,7 @@ afterEach(() => {
 });
 
 const make = (path: string, overrides: Partial<CreateRepoInput> = {}) =>
-  createRepo(db, { forgeId, path, ...overrides });
+  createRepo(db, { ownerUserId: adminOf(db).id, forgeId, path, ...overrides });
 
 const query = (overrides: Partial<RepoListQuery> = {}): RepoListQuery => ({
   page: 1,
@@ -207,12 +208,18 @@ describe("createRepo", () => {
 
   it("rejects an empty path and an unknown forge", () => {
     expect(() => make("/")).toThrow(DomainError);
-    expect(() => createRepo(db, { forgeId: 999, path: "a/b" })).toThrow(/does not exist/);
+    expect(() =>
+      createRepo(db, { ownerUserId: adminOf(db).id, forgeId: 999, path: "a/b" }),
+    ).toThrow(/does not exist/);
   });
 
   it("allows the same path on a different forge, with a distinct slug", () => {
     const first = make("nodejs/node");
-    const second = createRepo(db, { forgeId: otherForgeId, path: "nodejs/node" });
+    const second = createRepo(db, {
+      ownerUserId: adminOf(db).id,
+      forgeId: otherForgeId,
+      path: "nodejs/node",
+    });
     expect(second.id).not.toBe(first.id);
     expect(second.slug).not.toBe(first.slug);
   });
@@ -228,24 +235,34 @@ describe("createRepo", () => {
   });
 
   it("rejects an account override from another forge", () => {
-    const foreign = createAccount(db, KEY, {
-      forgeId: otherForgeId,
-      username: "someone",
-      secret: null,
-      isDefault: false,
-    });
+    const foreign = createAccount(
+      db,
+      KEY,
+      {
+        forgeId: otherForgeId,
+        username: "someone",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
     expect(() => make("nodejs/node", { accountOverrideId: foreign.id })).toThrow(
       /belongs to a different forge/,
     );
   });
 
   it("accepts an account override from its own forge", () => {
-    const account = createAccount(db, KEY, {
-      forgeId,
-      username: "pmaxhogan",
-      secret: null,
-      isDefault: false,
-    });
+    const account = createAccount(
+      db,
+      KEY,
+      {
+        forgeId,
+        username: "pmaxhogan",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
     expect(make("nodejs/node", { accountOverrideId: account.id }).accountOverrideId).toBe(
       account.id,
     );
@@ -277,43 +294,51 @@ describe("listRepos", () => {
     make("nodejs/node", { nextSyncAt: 300 });
     make("facebook/react", { nextSyncAt: 100 });
     make("vuejs/core", { nextSyncAt: 200, state: "paused" });
-    createRepo(db, { forgeId: otherForgeId, path: "gitlab-org/gitlab" });
+    createRepo(db, {
+      ownerUserId: adminOf(db).id,
+      forgeId: otherForgeId,
+      path: "gitlab-org/gitlab",
+    });
   });
 
   it("paginates and reports the unfiltered total", () => {
-    const page = listRepos(db, query({ perPage: 2, page: 1 }));
+    const page = listRepos(db, adminOf(db), query({ perPage: 2, page: 1 }));
     expect(page.rows).toHaveLength(2);
     expect(page.total).toBe(4);
     expect(page.page).toBe(1);
     expect(page.perPage).toBe(2);
 
-    const second = listRepos(db, query({ perPage: 2, page: 2 }));
+    const second = listRepos(db, adminOf(db), query({ perPage: 2, page: 2 }));
     expect(second.rows).toHaveLength(2);
     const firstIds = page.rows.map((repo) => repo.id);
     expect(second.rows.every((repo) => !firstIds.includes(repo.id))).toBe(true);
   });
 
   it("returns an empty page past the end", () => {
-    const page = listRepos(db, query({ perPage: 2, page: 99 }));
+    const page = listRepos(db, adminOf(db), query({ perPage: 2, page: 99 }));
     expect(page.rows).toEqual([]);
     expect(page.total).toBe(4);
   });
 
   it("sorts by each allowlisted column in both directions", () => {
-    expect(listRepos(db, query({ sort: "display_name", dir: "asc" })).rows[0]?.displayName).toBe(
-      "core",
-    );
-    expect(listRepos(db, query({ sort: "display_name", dir: "desc" })).rows[0]?.displayName).toBe(
-      "react",
-    );
-    expect(listRepos(db, query({ sort: "path", dir: "asc" })).rows[0]?.path).toBe("facebook/react");
-    expect(listRepos(db, query({ sort: "next_sync_at", dir: "asc" })).rows[0]?.path).toBe(
+    expect(
+      listRepos(db, adminOf(db), query({ sort: "display_name", dir: "asc" })).rows[0]?.displayName,
+    ).toBe("core");
+    expect(
+      listRepos(db, adminOf(db), query({ sort: "display_name", dir: "desc" })).rows[0]?.displayName,
+    ).toBe("react");
+    expect(listRepos(db, adminOf(db), query({ sort: "path", dir: "asc" })).rows[0]?.path).toBe(
       "facebook/react",
     );
-    expect(listRepos(db, query({ sort: "created_at", dir: "asc" })).rows).toHaveLength(4);
-    expect(listRepos(db, query({ sort: "last_sync_at" })).rows).toHaveLength(4);
-    expect(listRepos(db, query({ sort: "last_success_at" })).rows).toHaveLength(4);
-    expect(listRepos(db, query({ sort: "disk_usage_bytes" })).rows).toHaveLength(4);
+    expect(
+      listRepos(db, adminOf(db), query({ sort: "next_sync_at", dir: "asc" })).rows[0]?.path,
+    ).toBe("facebook/react");
+    expect(listRepos(db, adminOf(db), query({ sort: "created_at", dir: "asc" })).rows).toHaveLength(
+      4,
+    );
+    expect(listRepos(db, adminOf(db), query({ sort: "last_sync_at" })).rows).toHaveLength(4);
+    expect(listRepos(db, adminOf(db), query({ sort: "last_success_at" })).rows).toHaveLength(4);
+    expect(listRepos(db, adminOf(db), query({ sort: "disk_usage_bytes" })).rows).toHaveLength(4);
   });
 
   it("sorts by last seen, so the repo that disappeared longest ago comes first", () => {
@@ -325,10 +350,10 @@ describe("listRepos", () => {
       db.run("UPDATE repos SET last_seen_at = ? WHERE path = ?", at, path);
     }
 
-    const desc = listRepos(db, query({ sort: "last_seen_at", dir: "desc" })).rows;
+    const desc = listRepos(db, adminOf(db), query({ sort: "last_seen_at", dir: "desc" })).rows;
     expect(desc.map((repo) => repo.lastSeenAt)).toEqual([3_000, 1_000, null, null]);
     expect(desc[0]?.path).toBe("facebook/react");
-    const asc = listRepos(db, query({ sort: "last_seen_at", dir: "asc" })).rows;
+    const asc = listRepos(db, adminOf(db), query({ sort: "last_seen_at", dir: "asc" })).rows;
     expect(asc.map((repo) => repo.lastSeenAt)).toEqual([1_000, 3_000, null, null]);
   });
 
@@ -351,7 +376,7 @@ describe("listRepos", () => {
       "  https://github.com/nodejs/node  ",
     ];
     for (const q of shapes) {
-      const page = listRepos(db, query({ q }));
+      const page = listRepos(db, adminOf(db), query({ q }));
       expect(
         page.rows.map((repo) => repo.path),
         q,
@@ -360,15 +385,21 @@ describe("listRepos", () => {
   });
 
   it("keeps a pasted URL to its own forge, and lists an owner's repos from a profile URL", () => {
-    createRepo(db, { forgeId: otherForgeId, path: "nodejs/node" });
+    createRepo(db, { ownerUserId: adminOf(db).id, forgeId: otherForgeId, path: "nodejs/node" });
     make("nodejs/undici");
 
-    const onGitlab = listRepos(db, query({ q: "https://gitlab.com/nodejs/node" }));
+    const onGitlab = listRepos(db, adminOf(db), query({ q: "https://gitlab.com/nodejs/node" }));
     expect(onGitlab.rows.map((repo) => repo.forgeId)).toEqual([otherForgeId]);
-    expect(listRepos(db, query({ q: "https://github.com/nodejs/node" })).total).toBe(1);
-    expect(listRepos(db, query({ q: "https://github.com/nodejs" })).total).toBe(2);
-    expect(listRepos(db, query({ q: "https://github.com/nodejs/nope" })).total).toBe(0);
-    expect(listRepos(db, query({ q: "https://example.com/nodejs/node" })).total).toBe(0);
+    expect(listRepos(db, adminOf(db), query({ q: "https://github.com/nodejs/node" })).total).toBe(
+      1,
+    );
+    expect(listRepos(db, adminOf(db), query({ q: "https://github.com/nodejs" })).total).toBe(2);
+    expect(listRepos(db, adminOf(db), query({ q: "https://github.com/nodejs/nope" })).total).toBe(
+      0,
+    );
+    expect(listRepos(db, adminOf(db), query({ q: "https://example.com/nodejs/node" })).total).toBe(
+      0,
+    );
   });
 
   it("only treats a term as a URL when it names a host", () => {
@@ -381,31 +412,33 @@ describe("listRepos", () => {
     });
     expect(parseSearchUrl("git@host.example:8022/x/y")?.host).toBe("host.example");
     // A plain owner/repo term is still the substring search it always was.
-    expect(listRepos(db, query({ q: "nodejs/node" })).total).toBe(1);
+    expect(listRepos(db, adminOf(db), query({ q: "nodejs/node" })).total).toBe(1);
   });
 
   it("filters by a case insensitive substring of path or display name", () => {
-    expect(listRepos(db, query({ q: "node" })).total).toBe(1);
-    expect(listRepos(db, query({ q: "NODE" })).total).toBe(1);
-    expect(listRepos(db, query({ q: "core" })).rows[0]?.path).toBe("vuejs/core");
-    expect(listRepos(db, query({ q: "gitlab-org" })).total).toBe(1);
-    expect(listRepos(db, query({ q: "nothing-here" })).total).toBe(0);
-    expect(listRepos(db, query({ q: "   " })).total).toBe(4);
+    expect(listRepos(db, adminOf(db), query({ q: "node" })).total).toBe(1);
+    expect(listRepos(db, adminOf(db), query({ q: "NODE" })).total).toBe(1);
+    expect(listRepos(db, adminOf(db), query({ q: "core" })).rows[0]?.path).toBe("vuejs/core");
+    expect(listRepos(db, adminOf(db), query({ q: "gitlab-org" })).total).toBe(1);
+    expect(listRepos(db, adminOf(db), query({ q: "nothing-here" })).total).toBe(0);
+    expect(listRepos(db, adminOf(db), query({ q: "   " })).total).toBe(4);
   });
 
   it("treats LIKE wildcards in the search term as literals", () => {
     make("weird/100%-coverage");
     make("weird/under_score");
-    expect(listRepos(db, query({ q: "%" })).total).toBe(1);
-    expect(listRepos(db, query({ q: "100%" })).rows[0]?.path).toBe("weird/100%-coverage");
-    expect(listRepos(db, query({ q: "_" })).rows[0]?.path).toBe("weird/under_score");
+    expect(listRepos(db, adminOf(db), query({ q: "%" })).total).toBe(1);
+    expect(listRepos(db, adminOf(db), query({ q: "100%" })).rows[0]?.path).toBe(
+      "weird/100%-coverage",
+    );
+    expect(listRepos(db, adminOf(db), query({ q: "_" })).rows[0]?.path).toBe("weird/under_score");
   });
 
   it("filters by forge and state", () => {
-    expect(listRepos(db, query({ forgeId })).total).toBe(3);
-    expect(listRepos(db, query({ forgeId: otherForgeId })).total).toBe(1);
-    expect(listRepos(db, query({ state: "paused" })).total).toBe(1);
-    expect(listRepos(db, query({ state: "active" })).total).toBe(3);
+    expect(listRepos(db, adminOf(db), query({ forgeId })).total).toBe(3);
+    expect(listRepos(db, adminOf(db), query({ forgeId: otherForgeId })).total).toBe(1);
+    expect(listRepos(db, adminOf(db), query({ state: "paused" })).total).toBe(1);
+    expect(listRepos(db, adminOf(db), query({ state: "active" })).total).toBe(3);
   });
 
   it("filters by the outcome of the most recent run only", () => {
@@ -416,13 +449,17 @@ describe("listRepos", () => {
     addRun(react.id, "success", 1000);
     addRun(react.id, "error", 2000);
 
-    expect(listRepos(db, query({ outcome: "success" })).rows.map((r) => r.id)).toEqual([node.id]);
-    expect(listRepos(db, query({ outcome: "error" })).rows.map((r) => r.id)).toEqual([react.id]);
-    expect(listRepos(db, query({ outcome: "canceled" })).total).toBe(0);
+    expect(listRepos(db, adminOf(db), query({ outcome: "success" })).rows.map((r) => r.id)).toEqual(
+      [node.id],
+    );
+    expect(listRepos(db, adminOf(db), query({ outcome: "error" })).rows.map((r) => r.id)).toEqual([
+      react.id,
+    ]);
+    expect(listRepos(db, adminOf(db), query({ outcome: "canceled" })).total).toBe(0);
   });
 
   it("combines filters", () => {
-    expect(listRepos(db, query({ forgeId, state: "active", q: "e" })).total).toBe(2);
+    expect(listRepos(db, adminOf(db), query({ forgeId, state: "active", q: "e" })).total).toBe(2);
   });
 });
 
@@ -443,7 +480,7 @@ describe("fork parent in listings", () => {
     const fork = make("me/linux");
     setFork(fork.id, "torvalds/linux");
 
-    const rows = listRepos(db, query()).rows;
+    const rows = listRepos(db, adminOf(db), query()).rows;
 
     expect(byPath(rows, "me/linux").forkParentRepoId).toBe(upstream.id);
     expect(byPath(rows, "me/linux").forkParent).toBe("torvalds/linux");
@@ -456,7 +493,7 @@ describe("fork parent in listings", () => {
     setFork(plain.id, null);
     make("me/unknown");
 
-    const rows = listRepos(db, query()).rows;
+    const rows = listRepos(db, adminOf(db), query()).rows;
 
     expect(byPath(rows, "me/orphan").forkParentRepoId).toBeNull();
     expect(byPath(rows, "me/plain").forkParentRepoId).toBeUndefined();
@@ -464,11 +501,13 @@ describe("fork parent in listings", () => {
   });
 
   it("does not match the same path on another forge", () => {
-    createRepo(db, { forgeId: otherForgeId, path: "torvalds/linux" });
+    createRepo(db, { ownerUserId: adminOf(db).id, forgeId: otherForgeId, path: "torvalds/linux" });
     const fork = make("me/linux");
     setFork(fork.id, "torvalds/linux");
 
-    expect(byPath(listRepos(db, query()).rows, "me/linux").forkParentRepoId).toBeNull();
+    expect(
+      byPath(listRepos(db, adminOf(db), query()).rows, "me/linux").forkParentRepoId,
+    ).toBeNull();
   });
 
   it("carries the same field on a single read", () => {
@@ -490,8 +529,8 @@ describe("fork parent in listings", () => {
     setFork(a.id, "Alpha/a");
     setFork(c.id, "mid/m");
 
-    const asc = listRepos(db, query({ sort: "fork_parent", dir: "asc" })).rows;
-    const desc = listRepos(db, query({ sort: "fork_parent", dir: "desc" })).rows;
+    const asc = listRepos(db, adminOf(db), query({ sort: "fork_parent", dir: "asc" })).rows;
+    const desc = listRepos(db, adminOf(db), query({ sort: "fork_parent", dir: "desc" })).rows;
 
     expect(asc.map((row) => row.path)).toEqual(["me/a", "me/c", "me/b", "me/none"]);
     expect(desc.map((row) => row.path)).toEqual(["me/b", "me/c", "me/a", "me/none"]);
@@ -518,7 +557,7 @@ describe("ownerGone in reads", () => {
 
     expect(getRepo(db, missing.id)?.ownerGone).toBe(true);
     expect(getRepo(db, present.id)?.ownerGone).toBe(false);
-    const listed = listRepos(db, query()).rows;
+    const listed = listRepos(db, adminOf(db), query()).rows;
     expect(listed.find((row) => row.path === "a/missing")?.ownerGone).toBe(true);
     expect(listed.find((row) => row.path === "a/present")?.ownerGone).toBe(false);
   });
@@ -528,7 +567,7 @@ describe("ownerGone in reads", () => {
     set(back.id, "owner_gone = 1, owner_checked_at = ?", 600);
 
     expect(getRepo(db, back.id)?.ownerGone).toBeNull();
-    expect(listRepos(db, query()).rows[0]?.ownerGone).toBeNull();
+    expect(listRepos(db, adminOf(db), query()).rows[0]?.ownerGone).toBeNull();
   });
 
   it("is null when the repo went gone again after the owner was last asked", () => {
@@ -541,17 +580,17 @@ describe("ownerGone in reads", () => {
 
 describe("counts and totals", () => {
   it("counts repos and sums disk usage, coalescing an empty table to zero", () => {
-    expect(countRepos(db)).toBe(0);
-    expect(totalDiskUsageBytes(db)).toBe(0);
+    expect(countRepos(db, adminOf(db))).toBe(0);
+    expect(totalDiskUsageBytes(db, adminOf(db))).toBe(0);
 
     const a = make("a/b");
     const b = make("c/d");
-    expect(countRepos(db)).toBe(2);
-    expect(totalDiskUsageBytes(db)).toBe(0);
+    expect(countRepos(db, adminOf(db))).toBe(2);
+    expect(totalDiskUsageBytes(db, adminOf(db))).toBe(0);
 
     db.run("UPDATE repos SET disk_usage_bytes = ? WHERE id = ?", 1500, a.id);
     db.run("UPDATE repos SET disk_usage_bytes = ? WHERE id = ?", 2500, b.id);
-    expect(totalDiskUsageBytes(db)).toBe(4000);
+    expect(totalDiskUsageBytes(db, adminOf(db))).toBe(4000);
   });
 });
 
@@ -575,12 +614,17 @@ describe("updateRepo", () => {
   });
 
   it("sets and clears the account override", () => {
-    const account = createAccount(db, KEY, {
-      forgeId,
-      username: "pmaxhogan",
-      secret: null,
-      isDefault: false,
-    });
+    const account = createAccount(
+      db,
+      KEY,
+      {
+        forgeId,
+        username: "pmaxhogan",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
     const repo = make("nodejs/node");
     expect(updateRepo(db, repo.id, { accountOverrideId: account.id }).accountOverrideId).toBe(
       account.id,
@@ -589,12 +633,17 @@ describe("updateRepo", () => {
   });
 
   it("refuses an account override that belongs to another forge", () => {
-    const foreign = createAccount(db, KEY, {
-      forgeId: otherForgeId,
-      username: "someone",
-      secret: null,
-      isDefault: false,
-    });
+    const foreign = createAccount(
+      db,
+      KEY,
+      {
+        forgeId: otherForgeId,
+        username: "someone",
+        secret: null,
+        isDefault: false,
+      },
+      adminOf(db).id,
+    );
     const repo = make("nodejs/node");
     expect(() => updateRepo(db, repo.id, { accountOverrideId: foreign.id })).toThrow(
       /belongs to a different forge/,
@@ -718,30 +767,30 @@ describe("bulkRepoAction", () => {
   it("pauses and resumes many at once", async () => {
     const ids = [make("a/one").id, make("b/two").id, make("c/three").id];
 
-    const paused = await bulkRepoAction(db, ids, "pause");
+    const paused = await bulkRepoAction(db, adminOf(db), ids, "pause");
     expect(paused).toMatchObject({ action: "pause", requested: 3, affected: 3, missing: [] });
     expect(ids.every((id) => getRepo(db, id)?.state === "paused")).toBe(true);
 
-    await bulkRepoAction(db, ids, "resume");
+    await bulkRepoAction(db, adminOf(db), ids, "resume");
     expect(ids.every((id) => getRepo(db, id)?.state === "active")).toBe(true);
   });
 
   it("gives resumed repos a next sync time when they had none", async () => {
     const repo = make("a/one", { nextSyncAt: null });
-    await bulkRepoAction(db, [repo.id], "resume");
+    await bulkRepoAction(db, adminOf(db), [repo.id], "resume");
     expect(getRepo(db, repo.id)?.nextSyncAt).not.toBeNull();
   });
 
   it("does not push back an existing schedule on resume", async () => {
     const repo = make("a/one", { nextSyncAt: 1_000 });
-    await bulkRepoAction(db, [repo.id], "resume");
+    await bulkRepoAction(db, adminOf(db), [repo.id], "resume");
     expect(getRepo(db, repo.id)?.nextSyncAt).toBe(1_000);
   });
 
   it("requests an immediate sync", async () => {
     const repo = make("a/one", { nextSyncAt: Date.now() + 3_600_000 });
     const before = Date.now();
-    await bulkRepoAction(db, [repo.id], "sync");
+    await bulkRepoAction(db, adminOf(db), [repo.id], "sync");
     expect(getRepo(db, repo.id)!.nextSyncAt).toBeLessThanOrEqual(Date.now());
     expect(getRepo(db, repo.id)!.nextSyncAt).toBeGreaterThanOrEqual(before);
   });
@@ -749,15 +798,18 @@ describe("bulkRepoAction", () => {
   it("deletes many, with files when asked", async () => {
     const ids = [make("a/one").id, make("b/two").id];
     const removeFiles = vi.fn(async () => {});
-    const result = await bulkRepoAction(db, ids, "delete", { withFiles: true, removeFiles });
+    const result = await bulkRepoAction(db, adminOf(db), ids, "delete", {
+      withFiles: true,
+      removeFiles,
+    });
     expect(result.affected).toBe(2);
     expect(removeFiles).toHaveBeenCalledTimes(2);
-    expect(countRepos(db)).toBe(0);
+    expect(countRepos(db, adminOf(db))).toBe(0);
   });
 
   it("reports missing ids instead of failing the batch", async () => {
     const repo = make("a/one");
-    const result = await bulkRepoAction(db, [repo.id, 998, 999], "pause");
+    const result = await bulkRepoAction(db, adminOf(db), [repo.id, 998, 999], "pause");
     expect(result).toMatchObject({
       requested: 3,
       affected: 1,
@@ -768,7 +820,7 @@ describe("bulkRepoAction", () => {
   });
 
   it("handles an empty id list", async () => {
-    const result = await bulkRepoAction(db, [], "pause");
+    const result = await bulkRepoAction(db, adminOf(db), [], "pause");
     expect(result).toMatchObject({ requested: 0, affected: 0, ids: [], missing: [] });
   });
 });

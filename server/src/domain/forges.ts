@@ -1,6 +1,14 @@
-import type { CreateForge, Forge, ForgeKind, UpdateForge } from "@amber/shared";
+import type { CreateForge, Forge, ForgeKind, ForgeProtocol, UpdateForge } from "@amber/shared";
 import type { Db } from "../db/db.ts";
-import { conflict, isForeignKeyViolation, isUniqueViolation, notFound } from "./errors.ts";
+import {
+  conflict,
+  DomainError,
+  forbidden,
+  isForeignKeyViolation,
+  isUniqueViolation,
+  notFound,
+} from "./errors.ts";
+import type { User } from "./users.ts";
 
 /**
  * A forge is an origin: protocol, host, port. Those three are IMMUTABLE after
@@ -16,11 +24,13 @@ interface ForgeRow {
   host: string;
   port: number | null;
   kind: string;
+  allow_private_network: number;
   created_at: number;
   updated_at: number;
 }
 
-const FORGE_COLUMNS = "id, protocol, host, port, kind, created_at, updated_at";
+const FORGE_COLUMNS =
+  "id, protocol, host, port, kind, allow_private_network, created_at, updated_at";
 
 function toForge(row: ForgeRow): Forge {
   return {
@@ -29,6 +39,7 @@ function toForge(row: ForgeRow): Forge {
     host: row.host,
     port: row.port,
     kind: row.kind as ForgeKind,
+    allowPrivateNetwork: row.allow_private_network === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -109,6 +120,60 @@ export function findForge(
   return row === undefined ? undefined : toForge(row);
 }
 
+// ---------------------------------------------------------------------------
+// Who may introduce a host
+// ---------------------------------------------------------------------------
+
+export interface ForgeOrigin {
+  protocol: ForgeProtocol;
+  host: string;
+  port: number | null;
+}
+
+/** The message a caller who may not add a host gets, by import or by the forges API. */
+export const HOST_NOT_ENABLED_MESSAGE = "This host is not enabled on this Amber.";
+
+/** Introducing a NEW host is an access-control decision: manage_forges or the admin. */
+export function mayAddForges(user: User): boolean {
+  return user.isAdmin || user.permissions.manage_forges;
+}
+
+export function hostNotEnabled(): DomainError {
+  return new DomainError("host_not_enabled", HOST_NOT_ENABLED_MESSAGE);
+}
+
+/**
+ * `allow_private_network` lets requests to a forge reach non-public
+ * addresses, so only the admin may set it. Anyone else asking for it is
+ * refused rather than having the flag silently dropped.
+ */
+export function assertMaySetPrivateNetwork(user: User, wanted: boolean | undefined): void {
+  if (wanted === true && !user.isAdmin) {
+    throw forbidden("Only the admin can allow a forge to reach private networks.", {
+      requires: "admin",
+    });
+  }
+}
+
+/**
+ * EGRESS SEAM. Called right before a NEW forge row is created, by the forges
+ * API and by import's new-host path, outside any database transaction so it
+ * may resolve DNS. Today it checks nothing: the egress wave fills it in
+ * (security/egress.ts: a restricted forge must be plain https on 443 or http
+ * on 80, its host must not be an IP literal, and every address it resolves
+ * to must be public). It throws a DomainError to refuse.
+ */
+export async function assertForgeAllowed(
+  origin: ForgeOrigin,
+  actor: User,
+  options: { allowPrivateNetwork: boolean },
+): Promise<void> {
+  void origin;
+  void actor;
+  void options;
+  await Promise.resolve();
+}
+
 /**
  * Idempotent: returns the existing forge when protocol+host+port already
  * exist. An explicit kind is honored on create; on an existing forge the
@@ -133,13 +198,16 @@ export function upsertForge(db: Db, input: CreateForge): Forge {
     const now = Date.now();
     let id: number;
     try {
+      // Restricted unless asked otherwise. Whether the caller MAY ask is the
+      // route's check (assertMaySetPrivateNetwork); the default is closed.
       id = db.run(
-        `INSERT INTO forges (protocol, host, port, kind, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO forges (protocol, host, port, kind, allow_private_network, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         protocol,
         host,
         port,
         kind,
+        input.allowPrivateNetwork === true ? 1 : 0,
         now,
         now,
       ).lastInsertRowid;
@@ -165,11 +233,25 @@ export function upsertForge(db: Db, input: CreateForge): Forge {
 export function updateForge(db: Db, id: number, patch: UpdateForge): Forge {
   return db.tx(() => {
     const existing = requireForge(db, id);
-    if (patch.kind === undefined || patch.kind === existing.kind) {
-      return existing;
+    const now = Date.now();
+    let changed = false;
+    if (patch.kind !== undefined && patch.kind !== existing.kind) {
+      db.run("UPDATE forges SET kind = ?, updated_at = ? WHERE id = ?", patch.kind, now, id);
+      changed = true;
     }
-    db.run("UPDATE forges SET kind = ?, updated_at = ? WHERE id = ?", patch.kind, Date.now(), id);
-    return requireForge(db, id);
+    if (
+      patch.allowPrivateNetwork !== undefined &&
+      patch.allowPrivateNetwork !== existing.allowPrivateNetwork
+    ) {
+      db.run(
+        "UPDATE forges SET allow_private_network = ?, updated_at = ? WHERE id = ?",
+        patch.allowPrivateNetwork ? 1 : 0,
+        now,
+        id,
+      );
+      changed = true;
+    }
+    return changed ? requireForge(db, id) : existing;
   });
 }
 

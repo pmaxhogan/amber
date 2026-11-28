@@ -10,25 +10,43 @@ import {
   type ParsedRepoUrl,
 } from "@amber/shared";
 import type { Db } from "../db/db.ts";
-import { findAccountByUsername } from "./accounts.ts";
+import { canView } from "../security/authz.ts";
+import { findOwnAccountByUsername } from "./accounts.ts";
+import { ownerMayUseAccounts } from "./credentials.ts";
 import { DomainError } from "./errors.ts";
 import { findNamespaceSync, insertAccountSync } from "../providers/discovery.ts";
-import { detectForgeKind, findForge, upsertForge } from "./forges.ts";
-import { createRepo, findRepoByPath, normalizeRepoPath } from "./repos.ts";
+import {
+  assertForgeAllowed,
+  detectForgeKind,
+  findForge,
+  HOST_NOT_ENABLED_MESSAGE,
+  mayAddForges,
+  upsertForge,
+  type ForgeOrigin,
+} from "./forges.ts";
+import { createRepo, normalizeRepoPath } from "./repos.ts";
+import { isAtOrOverCap, type User } from "./users.ts";
 
 /**
- * Bulk import. Forges are created on demand, accounts never are: a `user@`
- * prefix can only select an account that already exists on that forge, and
- * otherwise the line imports with a warning and no override. Implicitly
- * creating a credential-less account would be a confusing half-state, and
- * silently attaching a credential the user did not intend would be worse.
+ * Bulk import, always on behalf of one IMPORTER, who owns everything the
+ * import creates.
+ *
+ * - A `user@` prefix selects among the IMPORTER'S OWN accounts only, and only
+ *   when they may use accounts at all (`import_private`). It never creates an
+ *   account, and another user's account by that name reads exactly like none.
+ *   Without `import_private` the line imports anonymously: none of that
+ *   user's repositories ever resolves a credential (domain/credentials.ts).
+ * - A forge+path Amber already has is never created twice and never changed:
+ *   the importer can view it -> "already backed up"; they cannot -> the line
+ *   fails with the same text an upstream that refuses them produces.
+ * - A NEW host needs `manage_forges` or the admin, and passes the egress seam
+ *   (assertForgeAllowed) before its forge row exists. Anyone else gets
+ *   "this host is not enabled on this Amber".
+ * - At or over the storage cap, a new repository is refused.
  *
  * A line that names a whole user or organization rather than a repository -
  * `https://github.com/nodejs`, one path segment on a forge whose provider can
- * enumerate namespaces - imports as a namespace sync instead: every repository
- * that namespace owns is discovered now and on every later run, so ones
- * created after the import arrive on their own. A `user@` prefix pins the sync
- * to that account; without one it follows the forge default account.
+ * enumerate namespaces - imports as a namespace sync owned by the importer.
  */
 
 /** Spacing between the first syncs of newly imported repos. */
@@ -43,12 +61,25 @@ export interface ImportOptions {
 }
 
 const NO_ACCOUNT_MESSAGE = (username: string, host: string): string =>
-  `No account named "${username}" exists on ${host}, so this repository was imported without ` +
-  `an account override. Add the account first if it needs credentials.`;
+  `You have no account named "${username}" on ${host}, so this repository was imported ` +
+  `without an account override. Add the account first if it needs credentials.`;
 
 const NO_ACCOUNT_NAMESPACE_MESSAGE = (username: string, host: string): string =>
-  `No account named "${username}" exists on ${host}, so this namespace syncs with the ` +
-  `forge default account. Add the account first if it needs other credentials.`;
+  `You have no account named "${username}" on ${host}, so this namespace syncs with your ` +
+  `default account there, if any. Add the account first if it needs other credentials.`;
+
+const ANONYMOUS_MESSAGE =
+  "Imported anonymously: using forge accounts needs the import_private permission, so the " +
+  "account named in this line is not used.";
+
+/** Exactly what an upstream that refuses the importer produces. */
+export const COULD_NOT_IMPORT_MESSAGE = "Amber could not import this repository.";
+
+export const ALREADY_BACKED_UP_MESSAGE = "Already backed up. Nothing was changed.";
+
+export const STORAGE_CAP_MESSAGE =
+  "You are at your storage cap, so new repositories cannot be added. Your existing ones " +
+  "keep syncing.";
 
 /** Matches the account-sync API default. */
 const DEFAULT_NAMESPACE_INTERVAL_MINUTES = 360;
@@ -77,17 +108,36 @@ function redactResult<T extends ImportLineResult>(result: T): T {
   return line === result.line ? result : { ...result, line };
 }
 
+function originOf(parsed: ParsedRepoUrl): ForgeOrigin {
+  return { protocol: parsed.protocol, host: parsed.host, port: parsed.port };
+}
+
+function originKey(origin: ForgeOrigin): string {
+  return `${origin.protocol}://${origin.host.toLowerCase()}:${String(origin.port ?? "")}`;
+}
+
+function failLine(result: ImportLineResult, message: string, code?: string): ImportLineResult {
+  return { ...result, status: "error", message, ...(code === undefined ? {} : { code }) };
+}
+
 /**
- * Warn when a user@ prefix names an account we do not have. Applied to both
- * preview and commit so the preview table shows exactly what will happen.
+ * Warn when a user@ prefix names an account the importer does not have (or
+ * may not use). Applied to both preview and commit so the preview table shows
+ * exactly what will happen. Only the importer's own accounts are consulted.
  */
-function checkAccountPrefix(db: Db, result: ImportLineResult): ImportLineResult {
+function checkAccountPrefix(db: Db, importer: User, result: ImportLineResult): ImportLineResult {
   const parsed = result.parsed;
   if (result.status === "error" || parsed === undefined || parsed.username === null) {
     return result;
   }
+  if (!ownerMayUseAccounts(importer)) {
+    return withWarning(result, ANONYMOUS_MESSAGE);
+  }
   const forge = findForge(db, parsed.protocol, parsed.host, parsed.port);
-  if (forge !== undefined && findAccountByUsername(db, forge.id, parsed.username) !== undefined) {
+  if (
+    forge !== undefined &&
+    findOwnAccountByUsername(db, importer.id, forge.id, parsed.username) !== undefined
+  ) {
     return result;
   }
   // classifyTarget has already run, so a namespace line gets the warning its
@@ -97,6 +147,20 @@ function checkAccountPrefix(db: Db, result: ImportLineResult): ImportLineResult 
       ? NO_ACCOUNT_NAMESPACE_MESSAGE(parsed.username, parsed.host)
       : NO_ACCOUNT_MESSAGE(parsed.username, parsed.host);
   return withWarning(result, message);
+}
+
+/** A line on a host Amber does not have fails up front unless the importer may add hosts. */
+function checkHost(db: Db, importer: User, result: ImportLineResult): ImportLineResult {
+  const parsed = result.parsed;
+  if (result.status === "error" || parsed === undefined) {
+    return result;
+  }
+  if (findForge(db, parsed.protocol, parsed.host, parsed.port) !== undefined) {
+    return result;
+  }
+  return mayAddForges(importer)
+    ? result
+    : failLine(result, HOST_NOT_ENABLED_MESSAGE, "host_not_enabled");
 }
 
 const NAMESPACE_MESSAGE = (namespace: string, host: string): string =>
@@ -134,10 +198,16 @@ function classifyTarget(db: Db, result: ImportLineResult): ImportLineResult {
   };
 }
 
-/** Pure parse plus account matching, no writes. Backed by shared/src/importUrl.ts. */
-export function previewImport(db: Db, text: string): ImportPreviewResponse {
+/**
+ * Pure parse plus account and host checks, no writes. Backed by
+ * shared/src/importUrl.ts. It says nothing about repositories Amber already
+ * has, so a preview is never a way to learn what other people back up.
+ */
+export function previewImport(db: Db, importer: User, text: string): ImportPreviewResponse {
   const results = parseImportText(text).map((result) =>
-    redactResult(checkAccountPrefix(db, classifyTarget(db, result))),
+    redactResult(
+      checkHost(db, importer, checkAccountPrefix(db, importer, classifyTarget(db, result))),
+    ),
   );
   return { results, summary: summarizeImport(results) };
 }
@@ -153,19 +223,64 @@ export function staggerStepFor(count: number, step: number = STAGGER_STEP_MS): n
 type CommitResult = ImportCommitResponse["results"][number];
 
 /**
- * Commit an import. Idempotent: re-importing an existing forge+path updates the
- * account override rather than erroring, and deliberately leaves that repo's
- * next_sync_at alone so a re-import does not reschedule healthy backups.
- * Only newly created repos are staggered.
+ * The new hosts this import would introduce, each put through the egress
+ * seam BEFORE any forge row exists. Runs outside the commit transaction
+ * because the seam may resolve DNS. A host the importer may not add, or that
+ * the seam refuses, maps to the refusal its lines will carry.
  */
-export function commitImport(
+async function vetNewHosts(
   db: Db,
+  importer: User,
+  lines: readonly ImportLineResult[],
+): Promise<Map<string, { message: string; code: string } | null>> {
+  const verdicts = new Map<string, { message: string; code: string } | null>();
+  for (const line of lines) {
+    if (line.status === "error" || line.parsed === undefined) {
+      continue;
+    }
+    const origin = originOf(line.parsed);
+    const key = originKey(origin);
+    if (
+      verdicts.has(key) ||
+      findForge(db, origin.protocol, origin.host, origin.port) !== undefined
+    ) {
+      continue;
+    }
+    if (!mayAddForges(importer)) {
+      verdicts.set(key, { message: HOST_NOT_ENABLED_MESSAGE, code: "host_not_enabled" });
+      continue;
+    }
+    try {
+      await assertForgeAllowed(origin, importer, { allowPrivateNetwork: false });
+      verdicts.set(key, null);
+    } catch (error) {
+      verdicts.set(
+        key,
+        error instanceof DomainError
+          ? { message: error.message, code: error.code }
+          : { message: HOST_NOT_ENABLED_MESSAGE, code: "host_not_enabled" },
+      );
+    }
+  }
+  return verdicts;
+}
+
+/**
+ * Commit an import for `importer`. Idempotent: re-importing a repository
+ * Amber already has changes nothing at all (not its owner, not its account
+ * override, not its schedule). Only newly created repos are staggered.
+ */
+export async function commitImport(
+  db: Db,
+  importer: User,
   text: string,
   options: ImportOptions = {},
-): ImportCommitResponse {
+): Promise<ImportCommitResponse> {
   const now = options.now ?? Date.now();
   // Redact first, so nothing downstream can echo a pasted password.
   const parsedLines = parseImportText(text).map((line) => redactResult(classifyTarget(db, line)));
+  const hostVerdicts = await vetNewHosts(db, importer, parsedLines);
+
   const importable = parsedLines.filter(
     (line) => line.status !== "error" && line.target === "repo",
   ).length;
@@ -184,9 +299,16 @@ export function commitImport(
       continue;
     }
 
+    const refusal = hostVerdicts.get(originKey(originOf(line.parsed)));
+    if (refusal !== undefined && refusal !== null) {
+      results.push({ ...failLine(line, refusal.message, refusal.code), action: "failed" });
+      failed += 1;
+      continue;
+    }
+
     try {
       if (line.target === "namespace") {
-        const outcome = commitNamespaceLine(db, line.parsed, now);
+        const outcome = commitNamespaceLine(db, importer, line.parsed, now);
         if (outcome.action === "created") {
           created += 1;
         } else {
@@ -202,17 +324,22 @@ export function commitImport(
         continue;
       }
 
-      const outcome = commitLine(db, line.parsed, now + newIndex * step);
+      const outcome = commitLine(db, importer, line.parsed, now + newIndex * step);
+      if (outcome.action === "failed") {
+        results.push({ ...failLine(line, outcome.message, outcome.code), action: "failed" });
+        failed += 1;
+        continue;
+      }
       if (outcome.action === "created") {
         created += 1;
         newIndex += 1;
       } else {
         updated += 1;
       }
-      const message = outcome.warning ?? line.message;
+      const message = outcome.warning ?? outcome.note ?? line.message;
       results.push({
         ...line,
-        status: message === undefined ? "ok" : "warning",
+        status: outcome.warning === undefined ? "ok" : "warning",
         ...(message === undefined ? {} : { message }),
         action: outcome.action,
         repoId: outcome.repoId,
@@ -220,7 +347,8 @@ export function commitImport(
     } catch (error) {
       const message =
         error instanceof DomainError ? error.message : "Could not import this repository.";
-      results.push({ ...line, status: "error", message, action: "failed" });
+      const code = error instanceof DomainError ? error.code : undefined;
+      results.push({ ...failLine(line, message, code), action: "failed" });
       failed += 1;
     }
   }
@@ -235,37 +363,61 @@ interface NamespaceOutcome {
 }
 
 /**
- * Idempotent like a repo line: importing a namespace that is already synced
- * updates its account when a user@ prefix names a different one, and never
- * clears an account just because this line carried no prefix.
+ * The importer's own account named by a `user@` prefix, when they may use
+ * accounts and have one by that name; otherwise null with the warning that
+ * explains why.
  */
-function commitNamespaceLine(db: Db, parsed: ParsedRepoUrl, now: number): NamespaceOutcome {
+function prefixAccount(
+  db: Db,
+  importer: User,
+  forgeId: number,
+  parsed: ParsedRepoUrl,
+  noAccount: (username: string, host: string) => string,
+): { accountId: number | null; warning: string | undefined } {
+  if (parsed.username === null) {
+    return { accountId: null, warning: undefined };
+  }
+  if (!ownerMayUseAccounts(importer)) {
+    return { accountId: null, warning: ANONYMOUS_MESSAGE };
+  }
+  const account = findOwnAccountByUsername(db, importer.id, forgeId, parsed.username);
+  return account === undefined
+    ? { accountId: null, warning: noAccount(parsed.username, parsed.host) }
+    : { accountId: account.id, warning: undefined };
+}
+
+/**
+ * Idempotent like a repo line, per importer: importing a namespace the
+ * importer already syncs updates their sync's account when a user@ prefix
+ * names a different one of THEIR accounts, and never clears an account just
+ * because this line carried no prefix. Another user's sync of the same
+ * namespace is theirs and is never touched.
+ */
+function commitNamespaceLine(
+  db: Db,
+  importer: User,
+  parsed: ParsedRepoUrl,
+  now: number,
+): NamespaceOutcome {
   return db.tx(() => {
-    const forge = upsertForge(db, {
-      protocol: parsed.protocol,
-      host: parsed.host,
-      port: parsed.port,
-    });
+    const forge = upsertForge(db, originOf(parsed));
+    const { accountId, warning } = prefixAccount(
+      db,
+      importer,
+      forge.id,
+      parsed,
+      NO_ACCOUNT_NAMESPACE_MESSAGE,
+    );
 
-    let accountId: number | null = null;
-    let warning: string | undefined;
-    if (parsed.username !== null) {
-      const account = findAccountByUsername(db, forge.id, parsed.username);
-      if (account === undefined) {
-        warning = NO_ACCOUNT_NAMESPACE_MESSAGE(parsed.username, parsed.host);
-      } else {
-        accountId = account.id;
-      }
-    }
-
-    const existing = findNamespaceSync(db, forge.id, parsed.path);
+    const existing = findNamespaceSync(db, importer.id, forge.id, parsed.path);
     if (existing !== undefined) {
       if (accountId !== null && accountId !== existing.account_id) {
         db.run(
-          "UPDATE account_syncs SET account_id = ?, updated_at = ? WHERE id = ?",
+          "UPDATE account_syncs SET account_id = ?, updated_at = ? WHERE id = ? AND owner_user_id = ?",
           accountId,
           now,
           existing.id,
+          importer.id,
         );
       }
       return { action: "updated", accountSyncId: existing.id, warning };
@@ -281,6 +433,7 @@ function commitNamespaceLine(db: Db, parsed: ParsedRepoUrl, now: number): Namesp
         visibility: "all",
         enabled: true,
         intervalMinutes: DEFAULT_NAMESPACE_INTERVAL_MINUTES,
+        ownerUserId: importer.id,
       },
       now,
     );
@@ -288,55 +441,69 @@ function commitNamespaceLine(db: Db, parsed: ParsedRepoUrl, now: number): Namesp
   });
 }
 
-interface LineOutcome {
-  action: "created" | "updated";
-  repoId: number;
-  warning: string | undefined;
-}
-
-function commitLine(db: Db, parsed: ParsedRepoUrl, nextSyncAt: number): LineOutcome {
-  return db.tx(() => {
-    const forge = upsertForge(db, {
-      protocol: parsed.protocol,
-      host: parsed.host,
-      port: parsed.port,
-    });
-
-    // A user@ prefix selects an existing account. It never creates one.
-    let overrideId: number | null = null;
-    let warning: string | undefined;
-    if (parsed.username !== null) {
-      const account = findAccountByUsername(db, forge.id, parsed.username);
-      if (account === undefined) {
-        warning = NO_ACCOUNT_MESSAGE(parsed.username, parsed.host);
-      } else {
-        overrideId = account.id;
-      }
+type LineOutcome =
+  | {
+      action: "created" | "updated";
+      repoId: number;
+      warning: string | undefined;
+      /** Informational, not a warning: the line still succeeded cleanly. */
+      note?: string;
     }
+  | { action: "failed"; message: string; code?: string };
 
+function commitLine(
+  db: Db,
+  importer: User,
+  parsed: ParsedRepoUrl,
+  nextSyncAt: number,
+): LineOutcome {
+  return db.tx((): LineOutcome => {
     const path = normalizeRepoPath(parsed.path);
-    const existing = findRepoByPath(db, forge.id, path);
-
-    if (existing !== undefined) {
-      // Re-import updates the override when one was named, and never clears an
-      // existing override just because this line carried no user@ prefix.
-      if (overrideId !== null && overrideId !== existing.accountOverrideId) {
-        const at = Date.now();
-        db.run(
-          "UPDATE repos SET account_override_id = ?, updated_at = ? WHERE id = ?",
-          overrideId,
-          at,
-          existing.id,
-        );
+    const known = findForge(db, parsed.protocol, parsed.host, parsed.port);
+    if (known !== undefined) {
+      const existing = db.get<{ id: number; owner_user_id: number | null; is_private: number }>(
+        "SELECT id, owner_user_id, is_private FROM repos WHERE forge_id = ? AND path = ?",
+        known.id,
+        path,
+      );
+      if (existing !== undefined) {
+        // Repos stay unique per forge and path and have one owner: a second
+        // import never creates or changes anything. One the importer cannot
+        // see answers exactly like an upstream that refused them.
+        const visible = canView(importer, {
+          ownerUserId: existing.owner_user_id,
+          isPrivate: existing.is_private !== 0,
+        });
+        return visible
+          ? {
+              action: "updated",
+              repoId: existing.id,
+              warning: undefined,
+              note: ALREADY_BACKED_UP_MESSAGE,
+            }
+          : { action: "failed", message: COULD_NOT_IMPORT_MESSAGE };
       }
-      return { action: "updated", repoId: existing.id, warning };
     }
+
+    if (isAtOrOverCap(db, importer)) {
+      return { action: "failed", message: STORAGE_CAP_MESSAGE, code: "storage_cap_reached" };
+    }
+
+    const forge = known ?? upsertForge(db, originOf(parsed));
+    const { accountId, warning } = prefixAccount(
+      db,
+      importer,
+      forge.id,
+      parsed,
+      NO_ACCOUNT_MESSAGE,
+    );
 
     const repo = createRepo(db, {
       forgeId: forge.id,
       path,
-      accountOverrideId: overrideId,
+      accountOverrideId: accountId,
       nextSyncAt,
+      ownerUserId: importer.id,
     });
     return { action: "created", repoId: repo.id, warning };
   });

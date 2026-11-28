@@ -68,6 +68,19 @@ async function openStream(path = "/api/events"): Promise<{ response: Response; s
   return { response, stream };
 }
 
+/**
+ * Repo-scoped events are only delivered for repositories the stream's user can
+ * view, decided against the real row, so the tests publish about a real one.
+ */
+async function realRepoId(path = "nodejs/node"): Promise<number> {
+  const response = await app.inject({
+    method: "POST",
+    url: "/api/import",
+    payload: { text: `https://github.com/${path}` },
+  });
+  return response.json<{ results: { repoId: number }[] }>().results[0]!.repoId;
+}
+
 describe("GET /api/events", () => {
   it("opens an event stream with the right headers", async () => {
     const { response, stream } = await openStream();
@@ -84,27 +97,29 @@ describe("GET /api/events", () => {
   });
 
   it("delivers a published event as a named SSE frame", async () => {
+    const repoId = await realRepoId();
     const { stream } = await openStream();
     await stream.until((text) => text.includes(": connected"));
 
-    temp.events.publish("repo.created", { id: 42 });
+    temp.events.publish("repo.created", { repoId });
     const text = await stream.until((chunk) => chunk.includes("repo.created"));
 
     expect(text).toContain("event: repo.created\n");
     const dataLine = text.split("\n").find((line) => line.startsWith("data: "))!;
     expect(JSON.parse(dataLine.slice(6))).toMatchObject({
       type: "repo.created",
-      payload: { id: 42 },
+      payload: { repoId },
     });
     await stream.cancel();
   });
 
   it("delivers events in order", async () => {
+    const repoId = await realRepoId();
     const { stream } = await openStream();
     await stream.until((text) => text.includes(": connected"));
 
-    temp.events.publish("sync.started", { repoId: 1 });
-    temp.events.publish("sync.finished", { repoId: 1 });
+    temp.events.publish("sync.started", { repoId });
+    temp.events.publish("sync.finished", { repoId });
     const text = await stream.until((chunk) => chunk.includes("sync.finished"));
 
     expect(text.indexOf("sync.started")).toBeLessThan(text.indexOf("sync.finished"));
@@ -112,12 +127,13 @@ describe("GET /api/events", () => {
   });
 
   it("fans out to several clients at once", async () => {
+    const repoId = await realRepoId();
     const first = await openStream();
     const second = await openStream();
     await first.stream.until((text) => text.includes(": connected"));
     await second.stream.until((text) => text.includes(": connected"));
 
-    temp.events.publish("repo.updated", { id: 7 });
+    temp.events.publish("repo.updated", { repoId });
     expect(await first.stream.until((text) => text.includes("repo.updated"))).toContain(
       "repo.updated",
     );

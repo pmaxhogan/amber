@@ -27,6 +27,7 @@ import { useApi } from "../api/provide.ts";
 import { STARRED_SUPPORTED_FORGE_KINDS, type AccountSyncRow } from "../api/types.ts";
 import { absoluteTime, relativeTime } from "../lib/format.ts";
 import { useToaster } from "../lib/toast.ts";
+import { useMeStore } from "../stores/me.ts";
 import AppIcon from "../components/AppIcon.vue";
 import ConfirmDialog from "../components/ConfirmDialog.vue";
 import EmptyState from "../components/EmptyState.vue";
@@ -36,6 +37,7 @@ import ListSkeleton from "../components/ListSkeleton.vue";
 
 const api = useApi();
 const toast = useToaster();
+const me = useMeStore();
 
 const syncs = ref<AccountSyncRow[]>([]);
 const accounts = ref<Account[]>([]);
@@ -44,6 +46,25 @@ const loading = ref(false);
 const error = ref<ApiClientError | null>(null);
 
 const accountById = computed(() => new Map(accounts.value.map((a) => [a.id, a])));
+
+/**
+ * The accounts a new sync may use: the caller's own. The list can carry other
+ * people's accounts (the admin's view), which no sync of theirs may borrow.
+ */
+const ownAccounts = computed(() =>
+  accounts.value.filter(
+    (account) => account.ownerUserId === undefined || account.ownerUserId === me.userId,
+  ),
+);
+
+/** Trending is instance-level, so it is a settings-level control. */
+const canTrending = computed(() => me.can("manage_settings"));
+
+/** Whether the caller may run, edit, pause or delete this sync. */
+function canControl(sync: AccountSyncRow): boolean {
+  if (sync.source === "trending") return canTrending.value;
+  return me.isAdmin || sync.ownerUserId === undefined || sync.ownerUserId === me.userId;
+}
 const forgeById = computed(() => new Map(forges.value.map((f) => [f.id, f])));
 
 function forgeForAccount(accountId: number): Forge | undefined {
@@ -146,12 +167,13 @@ interface SyncForm {
 
 function blankForm(): SyncForm {
   return {
-    accountId: accounts.value[0]?.id ?? null,
+    accountId: ownAccounts.value[0]?.id ?? null,
     forgeId: namespaceForges.value[0]?.id ?? null,
     namespace: "",
     topN: TRENDING_TOP_N_DEFAULT,
     windowDays: TRENDING_WINDOW_DAYS_DEFAULT,
-    source: accounts.value.length === 0 && namespaceForges.value.length > 0 ? "namespace" : "owned",
+    source:
+      ownAccounts.value.length === 0 && namespaceForges.value.length > 0 ? "namespace" : "owned",
     visibility: "all",
     intervalMinutes: 360,
     enabled: true,
@@ -171,7 +193,7 @@ const form = ref<SyncForm>({
 });
 
 const accountOptions = computed(() =>
-  accounts.value.map((account) => ({ label: accountLabel(account.id), value: account.id })),
+  ownAccounts.value.map((account) => ({ label: accountLabel(account.id), value: account.id })),
 );
 
 const forgeOptions = computed(() => {
@@ -182,7 +204,7 @@ const forgeOptions = computed(() => {
 /** A namespace sync may borrow any account on its forge, or none. */
 const namespaceAccountOptions = computed(() => [
   { label: "Forge default account (anonymous if there is none)", value: null },
-  ...accounts.value
+  ...ownAccounts.value
     .filter((account) => account.forgeId === form.value.forgeId)
     .map((account) => ({ label: account.username, value: account.id })),
 ]);
@@ -193,13 +215,15 @@ const parsedNamespace = computed(() => parseNamespaceInput(form.value.namespace)
 const sourceOptions = computed(() => {
   const starredAllowed = form.value.accountId !== null && supportsStarred(form.value.accountId);
   const namespaceAllowed = namespaceForges.value.length > 0;
-  const trendingAllowed = trendingForges.value.length > 0;
+  const trendingAllowed = trendingForges.value.length > 0 && canTrending.value;
   return [
     {
       label:
-        accounts.value.length === 0 ? "Owned (needs an account)" : "Repositories an account owns",
+        ownAccounts.value.length === 0
+          ? "Owned (needs an account)"
+          : "Repositories an account owns",
       value: "owned",
-      disabled: accounts.value.length === 0,
+      disabled: ownAccounts.value.length === 0,
     },
     {
       label: starredAllowed
@@ -216,7 +240,9 @@ const sourceOptions = computed(() => {
       disabled: !namespaceAllowed,
     },
     {
-      label: trendingAllowed ? "The top trending repositories, daily" : "Trending (GitHub only)",
+      label: trendingAllowed
+        ? "The top trending repositories, daily"
+        : "Trending (GitHub only, needs permission to manage settings)",
       value: "trending",
       disabled: !trendingAllowed,
     },
@@ -232,9 +258,9 @@ const canSave = computed(() => {
 
 const canCreate = computed(
   () =>
-    accounts.value.length > 0 ||
+    ownAccounts.value.length > 0 ||
     namespaceForges.value.length > 0 ||
-    trendingForges.value.length > 0,
+    (trendingForges.value.length > 0 && canTrending.value),
 );
 
 const visibilityOptions = [
@@ -399,7 +425,7 @@ function onSourceChange(source: AccountSyncSource): void {
       form.value.accountId = null;
     }
   } else if (form.value.accountId === null) {
-    form.value.accountId = accounts.value[0]?.id ?? null;
+    form.value.accountId = ownAccounts.value[0]?.id ?? null;
   }
 }
 
@@ -461,20 +487,26 @@ onMounted(() => void load());
                 >visibility: {{ sync.visibility }}</span
               >
               <span>every {{ sync.intervalMinutes }} minutes</span>
+              <span v-if="sync.ownerEmail" class="mono" data-testid="sync-owner"
+                >owner: {{ sync.ownerEmail }}</span
+              >
             </p>
           </div>
           <div class="amber-row">
             <ToggleSwitch
               :model-value="sync.enabled"
               :input-id="`sync-enabled-${sync.id}`"
+              :disabled="!canControl(sync)"
               @update:model-value="toggleEnabled(sync, $event)"
             />
             <label :for="`sync-enabled-${sync.id}`" class="amber-muted">
               {{ sync.enabled ? "enabled" : "paused" }}
             </label>
-            <Button label="Run now" size="small" severity="secondary" @click="runNow(sync)" />
-            <Button label="Edit" size="small" severity="secondary" text @click="openEdit(sync)" />
-            <Button label="Delete" size="small" severity="danger" text @click="toDelete = sync" />
+            <template v-if="canControl(sync)">
+              <Button label="Run now" size="small" severity="secondary" @click="runNow(sync)" />
+              <Button label="Edit" size="small" severity="secondary" text @click="openEdit(sync)" />
+              <Button label="Delete" size="small" severity="danger" text @click="toDelete = sync" />
+            </template>
           </div>
         </header>
 

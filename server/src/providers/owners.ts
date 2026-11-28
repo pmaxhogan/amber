@@ -53,6 +53,7 @@ interface DueRow {
   forge_id: number;
   account_override_id: number | null;
   force_anonymous: number;
+  owner_user_id: number | null;
   kind: ForgeKind;
   protocol: string;
   host: string;
@@ -100,7 +101,7 @@ export async function resolveGoneOwners(
 
     const due = db
       .all<DueRow>(
-        `SELECT r.id, r.path, r.forge_id, r.account_override_id, r.force_anonymous,
+        `SELECT r.id, r.path, r.forge_id, r.account_override_id, r.force_anonymous, r.owner_user_id,
                 f.kind, f.protocol, f.host, f.port
            FROM repos r
            JOIN forges f ON f.id = r.forge_id
@@ -114,24 +115,27 @@ export async function resolveGoneOwners(
       .filter((row) => providerFor(row.kind)?.checkOwner !== undefined)
       .filter((row) => !coolForges.has(row.forge_id));
 
-    // One lookup per (forge, owner), owners compared without regard to case.
-    // The first repo of a group lends its credential.
-    const groups = new Map<string, { row: DueRow; owner: string }>();
+    // One lookup per (forge, owner, credential), owners compared without
+    // regard to case. The credential is part of the key: what one user's token
+    // can see must never be written onto rows another user's fetches would
+    // ask about with a different credential (or none).
+    const groups = new Map<string, { row: DueRow; owner: string; accountId: number | null }>();
     for (const row of due) {
       const owner = ownerOf(row.path);
       if (owner === null) {
         continue;
       }
-      const key = `${String(row.forge_id)}\u0000${owner.toLowerCase()}`;
+      const accountId = accountFor(db, row)?.id ?? null;
+      const key = `${String(row.forge_id)}\u0000${owner.toLowerCase()}\u0000${String(accountId)}`;
       if (!groups.has(key)) {
-        groups.set(key, { row, owner });
+        groups.set(key, { row, owner, accountId });
       }
       if (groups.size >= batchSize) {
         break;
       }
     }
 
-    for (const { row, owner } of groups.values()) {
+    for (const { row, owner, accountId } of groups.values()) {
       if (coolForges.has(row.forge_id)) {
         continue;
       }
@@ -177,15 +181,22 @@ export async function resolveGoneOwners(
         continue;
       }
 
-      // Every gone repo of this owner on this forge shares the answer, whether
-      // or not it was the one that made the owner due.
-      const siblings = db.all<GoneRow>(
-        `SELECT id, owner_gone FROM repos
-          WHERE forge_id = ? AND gone_at IS NOT NULL
-            AND lower(substr(path, 1, instr(path, '/') - 1)) = ?`,
-        row.forge_id,
-        owner.toLowerCase(),
-      );
+      // Every gone repo of this owner on this forge that would be asked with
+      // the SAME credential shares the answer, whether or not it was the one
+      // that made the owner due.
+      const siblings = db
+        .all<
+          GoneRow &
+            Pick<DueRow, "forge_id" | "account_override_id" | "force_anonymous" | "owner_user_id">
+        >(
+          `SELECT id, owner_gone, forge_id, account_override_id, force_anonymous, owner_user_id
+             FROM repos
+            WHERE forge_id = ? AND gone_at IS NOT NULL
+              AND lower(substr(path, 1, instr(path, '/') - 1)) = ?`,
+          row.forge_id,
+          owner.toLowerCase(),
+        )
+        .filter((sibling) => (accountFor(db, sibling)?.id ?? null) === accountId);
       const at = now();
 
       if (lookup.status === "unknown") {

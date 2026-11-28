@@ -1,5 +1,6 @@
 import {
   forkLookupFailure,
+  visibilityOnFailure,
   getJson,
   matchesVisibility,
   normalizeRepoPath,
@@ -7,7 +8,13 @@ import {
   parentPathOrNull,
   ProviderError,
 } from "./http.ts";
-import type { AccountSyncProvider, DiscoveredRepo, DiscoveryContext, ForkLookup } from "./types.ts";
+import type {
+  AccountSyncProvider,
+  DiscoveredRepo,
+  DiscoveryContext,
+  ForkLookup,
+  RepoInfo,
+} from "./types.ts";
 
 /**
  * GitLab REST v4 client (gitlab.com and self-hosted, base <origin>/api/v4).
@@ -47,6 +54,56 @@ interface GitLabProject {
   forked_from_project?: { path_with_namespace?: unknown } | null;
 }
 
+/**
+ * The visibility field, fail closed: "public" is public; "private" and
+ * "internal" (any signed-in user) are private; a missing field (some reduced
+ * anonymous representations) is null (unknown).
+ */
+export function gitlabVisibility(raw: Pick<GitLabProject, "visibility">): boolean | null {
+  if (raw.visibility === "public") {
+    return false;
+  }
+  if (raw.visibility === "private" || raw.visibility === "internal") {
+    return true;
+  }
+  return null;
+}
+
+/** Size needs statistics=true and Reporter access, so it is not asked for: unknown. */
+async function gitlabRepoInfo(context: DiscoveryContext, path: string): Promise<RepoInfo> {
+  const normalized = path.replace(/^\/+|\/+$/g, "");
+  if (normalized === "") {
+    return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+  }
+  try {
+    // The project id slot takes the whole path with its slashes encoded.
+    const response = await getJson<GitLabProject>(
+      context,
+      `${apiBase(context.baseUrl)}/projects/${encodeURIComponent(normalized)}`,
+      { headers: headers(context), notFoundHint: path },
+    );
+    if (typeof response.data.path_with_namespace !== "string") {
+      // An answer, but not a recognisable one: not public.
+      return { fork: { status: "unknown", rateLimited: false }, isPrivate: true, sizeBytes: null };
+    }
+    const parent = parentPathOrNull(response.data.forked_from_project?.path_with_namespace);
+    return {
+      // A fork whose upstream was deleted or is private to us loses the key,
+      // which GitLab cannot tell apart from "never a fork", so it reads as not a fork.
+      fork: parent === null ? { status: "not_fork" } : { status: "fork", parent },
+      // A 200 that does not say "public" is an answer: not public.
+      isPrivate: gitlabVisibility(response.data) ?? true,
+      sizeBytes: null,
+    };
+  } catch (cause) {
+    return {
+      fork: forkLookupFailure(cause),
+      isPrivate: visibilityOnFailure(cause),
+      sizeBytes: null,
+    };
+  }
+}
+
 function apiBase(baseUrl: string): string {
   return `${baseUrl.replace(/\/+$/, "")}/api/v4`;
 }
@@ -73,8 +130,9 @@ function toDiscovered(raw: GitLabProject): DiscoveredRepo {
       !emptyRepo && typeof raw.default_branch === "string" && raw.default_branch !== ""
         ? raw.default_branch
         : null,
-    // internal means "any signed in user", which is not public: treat as private.
-    isPrivate: raw.visibility === "private" || raw.visibility === "internal",
+    // internal means "any signed in user", which is not public; a missing
+    // field is not public either (gitlabVisibility).
+    isPrivate: gitlabVisibility(raw) !== false,
     // Absent from the reduced field set an anonymous listing returns.
     archived: raw.archived === true,
     description:
@@ -144,26 +202,8 @@ export const gitlabProvider: AccountSyncProvider = {
   },
 
   async getForkParent(context: DiscoveryContext, path: string): Promise<ForkLookup> {
-    const normalized = path.replace(/^\/+|\/+$/g, "");
-    if (normalized === "") {
-      return { status: "unknown", rateLimited: false };
-    }
-    try {
-      // The project id slot takes the whole path with its slashes encoded.
-      const response = await getJson<GitLabProject>(
-        context,
-        `${apiBase(context.baseUrl)}/projects/${encodeURIComponent(normalized)}`,
-        { headers: headers(context), notFoundHint: path },
-      );
-      if (typeof response.data.path_with_namespace !== "string") {
-        return { status: "unknown", rateLimited: false };
-      }
-      const parent = parentPathOrNull(response.data.forked_from_project?.path_with_namespace);
-      // A fork whose upstream was deleted or is private to us loses the key,
-      // which GitLab cannot tell apart from "never a fork", so it reads as not a fork.
-      return parent === null ? { status: "not_fork" } : { status: "fork", parent };
-    } catch (cause) {
-      return forkLookupFailure(cause);
-    }
+    return (await gitlabRepoInfo(context, path)).fork;
   },
+
+  getRepoInfo: gitlabRepoInfo,
 };
