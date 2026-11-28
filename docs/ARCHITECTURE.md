@@ -815,6 +815,298 @@ configure.
   host, and the server runs on an isolated docker network with nothing else
   listening on trust-by-source.
 
+## Multi-user access control
+
+Amber is shared between one admin and a small number of trusted-but-limited
+users (friends). This section is the locked design. Where it disagrees with an
+older passage elsewhere in this document, this section wins and the older
+passage is a bug to fix.
+
+### Who is a user
+
+- Cloudflare Access is the only list of who may get in. Amber never stores an
+  allow list of its own and `CF_ACCESS_ALLOWED_EMAILS` is gone.
+- The ADMIN is the single email in `AMBER_ADMIN_EMAIL`. It cannot be changed
+  from the UI or the API, so no session can promote itself. The admin holds
+  every permission, is uncapped, and is accepted on any valid Access JWT
+  whatever policy admitted it: editing the friends policy, or a Cloudflare API
+  failure, can never lock the admin out.
+  Upgrade fallback: when `AMBER_ADMIN_EMAIL` is unset and the legacy
+  `CF_ACCESS_ALLOWED_EMAILS` is set, its FIRST entry is the admin and startup
+  logs a deprecation warning. Any further entries are ignored.
+- Everyone else is a USER exactly while their email is an explicit `email`
+  entry in the `include` list of one reusable Access policy. Amber reads that
+  policy with `GET /accounts/<CF_ACCOUNT_ID>/access/policies/<CF_ACCESS_POLICY_ID>`
+  using `CF_API_TOKEN`, a token whose only scope is "Access: Apps and Policies
+  Read". Other include rule types (domains, groups, everyone) cannot be
+  enumerated and are IGNORED: a person admitted only by such a rule presents a
+  valid JWT and is refused with 403 `not_a_user`.
+- `CF_API_TOKEN`, `CF_ACCOUNT_ID` and `CF_ACCESS_POLICY_ID` are set together or
+  not at all (startup refuses a partial set). Without them Amber is admin-only:
+  every non-admin is refused, and the Users page explains the setup.
+- The Users page links to the policy editor, built from the two ids:
+  `https://dash.cloudflare.com/<account>/one/access-controls/policies/<policy>/edit`.
+- Email addresses live only in `.env` and the database. None is ever committed.
+
+### Policy sync (`security/accessPolicy.ts`)
+
+One in-process object holds `{ emails, fetchedAt }`, mirrored to `kv`
+(`access_policy.emails`, `access_policy.fetched_at`) so a restart starts from
+the last good list rather than from nothing.
+
+- Background refresh every 5 minutes, plus `POST /api/users/refresh` (admin).
+- Every refresh is single-flight with a 15 second timeout. After a failure the
+  next attempt waits at least 30 seconds.
+- A successful refresh reconciles the `users` table in one transaction: a new
+  email gets a row with the default permissions; a row whose email left the
+  list gets `removed_at` and has its git password hash DELETED; a row whose
+  email came back has `removed_at` cleared (it must mint a new git password).
+- THE MEMBERSHIP RULE, used identically by web requests and by git auth for
+  every non-admin identity: if the copy is older than 60 seconds, await a
+  refresh. If that refresh fails, use the copy when it is less than 5 minutes
+  old, and FAIL CLOSED (503 `policy_unavailable`) when it is older. Web is
+  already gated by Access at the edge, so the rule mostly matters for git, but
+  one rule everywhere means a removed user with a live Access session is out
+  within a minute. Worst case call volume is about one policy read a minute,
+  against a Cloudflare limit of 1200 calls per 5 minutes.
+- On the git path a fail-closed refusal is sent as a `text/plain` body, which
+  git prints to the client as `remote: ...` (pinned by a test with a real git
+  client). A failed refresh that is covered by a fresh-enough copy is NOT
+  shown to the git client: the clone succeeds and there is no channel for a
+  warning short of rewriting the pack stream. Every failed refresh is logged at
+  warn and surfaced to the admin in `GET /api/me` (`policy.stale`).
+
+### Data model additions (migration 010)
+
+- `users`: `id` PK, `email` TEXT UNIQUE COLLATE NOCASE (stored lower case),
+  `is_admin` 0/1 (exactly one row), `permissions` TEXT (JSON object of the
+  keys below), `storage_cap_bytes` INTEGER NULL (NULL = the global default),
+  `git_username` TEXT UNIQUE NULL, `git_password_hash` TEXT NULL,
+  `git_rotated_at` INTEGER NULL, `removed_at` INTEGER NULL,
+  `last_seen_at` INTEGER NULL, `cap_notified_at` INTEGER NULL.
+  Rows are never deleted: ownership history must survive a removal.
+  The admin's email is normally in the policy too. Reconciliation never
+  creates a second row for it and never sets `removed_at` on the admin row.
+- `repos.owner_user_id`: FK to `users`, RESTRICT. Every repo has exactly ONE
+  owner: the user who imported it. There is no co-ownership.
+- `forges.allow_private_network` INTEGER NOT NULL DEFAULT 0 (see "Forges and
+  outbound requests"). Existing forges are backfilled to 1: the admin made
+  them.
+- `repos.is_private` INTEGER NOT NULL DEFAULT 1 and
+  `repos.visibility_checked_at` INTEGER NULL.
+- `accounts.owner_user_id`, `account_syncs.owner_user_id`,
+  `push_subscriptions.user_id`: FK to `users`, NOT NULL in effect.
+- Backfill: the admin row is created at first boot (the migration cannot know
+  the email, so it creates a placeholder admin row that boot fills in); every
+  existing repo, account, account sync and push subscription is assigned to
+  it. Every existing repo starts `is_private = 1`: nothing is exposed by the
+  upgrade, and the visibility pass below flips the confirmed-public ones.
+- The instance-wide git credential in `kv` (`git_remote.username`,
+  `git_remote.password_hash`, `git_remote.rotated_at`) is deleted.
+  `git_remote.enabled` stays as the admin's kill switch.
+- `accounts` keeps UNIQUE(forge_id, username): one forge login is registered
+  by one Amber user. A second registration is a 409 with a generic message.
+  The default-account index becomes per owner:
+  `ON accounts(owner_user_id, forge_id) WHERE is_default = 1`. The
+  account-sync uniqueness indexes gain `owner_user_id` the same way (the
+  trending one stays per forge and window: trending is instance-level).
+- No table is rebuilt: with foreign keys on, dropping `accounts` would cascade
+  into `account_syncs` (see the migration 004 note).
+
+### Permissions
+
+Stored per user, edited only by the admin. `shared/src/permissions.ts` is the
+single definition (keys, labels, descriptions, defaults); the server and the
+Users page both read it.
+
+| key                   | grants                                                        | new user |
+| --------------------- | ------------------------------------------------------------- | -------- |
+| `view_others_public`  | see repos other people own that are public                    | on       |
+| `view_others_private` | see repos other people own that are private                   | off      |
+| `import`              | import repos, and create owned/starred/namespace syncs        | on       |
+| `import_private`      | own forge accounts (PATs) and fetch with them                 | off      |
+| `modify_others`       | change settings of, pause, sync and delete repos they can see | off      |
+| `browse`              | the file browser, on repos they can see                       | on       |
+| `export`              | archive downloads, on repos they can see                      | on       |
+| `git`                 | a personal git credential, for repos they can see             | on       |
+| `view_removed`        | the Removed page (still limited to repos they can see)        | off      |
+| `manage_forges`       | create/edit/delete forges and forge settings; see and delete  | off      |
+|                       | other users' accounts (never their secrets)                   |          |
+| `manage_settings`     | global settings, the default cap, trending syncs, git on/off  | off      |
+
+Rules that are not toggles:
+
+- VISIBILITY. `canView(user, repo)` is: admin, OR the owner, OR
+  (`is_private = 0` AND `view_others_public`), OR (`is_private = 1` AND
+  `view_others_private`). Every repo-scoped read, list, count, event, push,
+  export, browse and git clone goes through it. A repo a user cannot view
+  answers exactly like a repo that does not exist (404), never 403. Lists and
+  their totals are filtered IN SQL, never after paging. Derived references
+  obey it too: `forkParentRepoId` is null when the caller cannot view the
+  parent.
+- OWN REPOS. The owner can always see the repo, edit its repo-scope settings,
+  pause, resume, sync now, read its run history, rename its path, and delete
+  it. `browse`, `export` and `git` still gate those three surfaces, even on
+  owned repos.
+- OTHERS' REPOS. `modify_others` on a repo the caller can view allows
+  settings, pause, resume, sync now, `force_anonymous` and delete. It does NOT
+  allow changing `path` or setting `account_override_id`: both decide what the
+  OWNER'S token fetches, so they are owner or admin only, and an override may
+  only name an account the repo's owner owns. Anyone allowed to edit may clear
+  an override.
+- A PATH CHANGE resets `is_private` to 1 and clears `visibility_checked_at`:
+  the row now names a different upstream and nothing is known about it.
+- Bulk actions apply the same rules per repo and report the ones refused.
+  Starred-sync auto-removal only ever touches repos owned by the sync's owner.
+- USER MANAGEMENT (permissions, caps, adoption, policy refresh) is admin only
+  and is not delegable.
+- A removed user (`removed_at` set) is refused everywhere, their accounts are
+  never used for a fetch, and their account syncs do not run. Their repos stay
+  and keep syncing anonymously where that works. The admin sees them under an
+  "owner removed" filter on the repo list and can ADOPT them
+  (`POST /api/users/:id/adopt-repos`: the admin becomes the owner of every
+  repo that user owns, and each repo's account override is cleared). Nothing
+  is deleted automatically.
+
+### Credentials are per user
+
+- An account belongs to exactly one user and is used ONLY for repos that user
+  owns. No user's token ever fetches on behalf of someone else. This replaces
+  the old global "forge default account" rule everywhere.
+- A user needs `import_private` to create, edit or use accounts. Without it
+  every one of their repos is fetched anonymously.
+- `resolveRepoAccount(repo)`: `force_anonymous` -> none. The owner is removed,
+  or is not the admin and lacks `import_private` -> none. Otherwise
+  `account_override_id` when the OWNER owns that account, else the owner's
+  default account on the repo's forge, else none. Layered settings use the
+  same account.
+- The `user@` import prefix selects among the IMPORTER'S OWN accounts only.
+
+### Forges and outbound requests
+
+Amber's job is fetching URLs it is given, so who may introduce a new host is
+an access-control decision.
+
+- Importing from a host Amber already has needs only `import`. A NEW host
+  (a new forge row, by import or by the forges API) needs `manage_forges` or
+  the admin. Anyone else gets "this host is not enabled on this Amber".
+- A forge is RESTRICTED unless `allow_private_network = 1`, and only the admin
+  can create a forge with that flag or set it. A `manage_forges` user can only
+  create restricted forges, and creation is refused when the forge is not
+  plain `https` on 443 or `http` on 80, or when its host is an IP literal or
+  resolves to any address that is not public (loopback, private, link-local,
+  CGNAT, unique-local, multicast, unspecified, or an IPv4-mapped form of one).
+- That creation check alone would be a time-of-check/time-of-use hole (DNS
+  can change afterwards), so the rule is ENFORCED AT EVERY REQUEST for a
+  restricted forge (`security/egress.ts`): resolve the host, refuse unless
+  every answer is public, then pin the connection to the validated address -
+  `git -c http.curloptResolve=<host>:<port>:<ip>` for fetches (and
+  `ls-remote`), and a pinned lookup for provider API calls. Redirects off the
+  host are already refused (`http.followRedirects=initial` applies to the
+  same pinned host; a redirect to another host is not followed).
+- Editing or deleting forges needs `manage_forges`. `protocol`, `host` and
+  `port` stay immutable.
+
+### Private versus public
+
+- `is_private` is the forge's own answer. For forge kinds with a provider
+  (GitHub, GitLab, Gitea, Bitbucket) Amber reads the VISIBILITY FIELD of the
+  forge's repository metadata, whoever's token asked: a 200 to an
+  authenticated request proves nothing by itself. This rides on the existing
+  fork-parent pass (`providers/forks.ts`) and is refreshed at most daily per
+  repo.
+- Where the forge cannot be asked (generic hosts, API failure): a repo whose
+  last successful fetch was anonymous is public; anything else stays private.
+- Unknown is always private.
+
+### Importing something Amber already has
+
+Repos stay unique per forge and path and have one owner, so a second import
+never creates anything:
+
+- The importer can view the existing repo: the line succeeds as "already
+  backed up" and changes nothing (not the owner, not the override).
+- They cannot view it: the line fails with "Amber could not import this
+  repository", the same text an upstream that refuses them produces.
+
+### Storage caps
+
+- A user's USAGE is the sum of `disk_usage_bytes` over the repos they own.
+- CAP: `users.storage_cap_bytes`, else the global setting
+  `default_user_storage_cap_gb` (default 5). The admin is uncapped.
+- At or over the cap, a new repo is refused: manual import lines fail with a
+  clear message, and the user's account syncs skip new discoveries. Existing
+  repos KEEP SYNCING.
+- A size is only known after a clone, so a batch of imports would all pass
+  that check. Two more gates close it: the cap is re-checked when a
+  never-synced repo is about to start its FIRST clone (over the cap, the clone
+  does not start and the repo shows "storage cap reached"), and a capped
+  user's first clones run ONE AT A TIME. Where the forge reports a repository
+  size, a first clone that would not fit the remaining allowance is refused
+  up front. One clone of unknown size can still overshoot.
+- When a sync moves a user from under to at-or-over the cap, Amber sets
+  `cap_notified_at` and sends a web push to that user's browsers and the
+  admin's. The user sees a persistent banner (from `GET /api/me`) and the
+  Users page marks the row. Dropping back under clears `cap_notified_at`.
+
+### Git remote, per user
+
+- `/git` stays outside Access and stays read-only. The instance-wide
+  credential is gone. Each user with `git` mints their own: username is a
+  random 10 character lower-case alphanumeric slug (`crypto`, never derived
+  from the email or a database id, stable across rotations), password is the
+  same 32 character base58 secret as before, scrypt-hashed, shown once.
+- Auth order on every `/git` request: kill switch off -> 404. Throttle. Parse
+  Basic. Look the user up by `git_username`; when there is none, still run
+  scrypt against a fixed dummy hash so timing does not reveal which usernames
+  exist. Verify the password. Refuse a removed user or one without `git`.
+  Apply the membership rule (admin exempt). Resolve the slug and require
+  `canView`; anything else is the same 404 as an unknown slug.
+- A credential dies when its email leaves the policy (the hash is deleted on
+  the sync that notices, and the membership rule covers the gap before it).
+- API: `GET /api/git-remote` (my username, whether I have a password, the
+  clone URL template, whether the remote is on), `POST /api/git-remote/rotate`
+  (mint or rotate mine; the only response that carries a password),
+  `POST /api/git-remote/revoke` (delete mine), `POST /api/git-remote/enable`
+  and `/disable` (the kill switch; `manage_settings`). The admin can revoke
+  anyone's with `POST /api/users/:id/revoke-git`.
+
+### API
+
+- `GET /api/me`: `{ email, isAdmin, permissions, storage: { usedBytes,
+  capBytes, overCap }, policy: { configured, fetchedAt, stale, editUrl } }`.
+  `capBytes` is null for the admin. `policy` is null for non-admins.
+- `GET /api/users` (admin): every row with permissions, cap, usage, repo
+  count, `removedAt`, `lastSeenAt`, `hasGitPassword`.
+  `PATCH /api/users/:id` `{ permissions?, storageCapBytes? }` (the admin row
+  is immutable), `POST /api/users/refresh`, `POST /api/users/:id/adopt-repos`,
+  `POST /api/users/:id/revoke-git`.
+- `GET /api/repos` gains `ownerId` and `ownerRemoved=true` filters (admin
+  only) and `mine=true`. Rows carry `mine: boolean`, `isPrivate`, and for the
+  admin `owner: { id, email, removed }`.
+- EVERY route declares what it needs in its Fastify route config
+  (`config.authz`): `public`, `user` (any accepted identity), `admin`, or one
+  permission key. One hook under `/api` enforces it, and a test walks the live
+  route table and fails when any route lacks a declaration. Object-level
+  checks (`canView`, ownership) happen in the handler through shared helpers
+  in `security/authz.ts`, never ad hoc.
+- `GET /api/status` totals, the SSE stream and web push are filtered to what
+  the caller can view, re-checked at SEND time (a permission change takes
+  effect on open streams). `repo.deleted` carries the audience computed before
+  the row went away. A stream whose user is removed is closed. `account_sync.finished` goes to the sync's owner and the
+  admin. `status.changed` (queue depth, active syncs, breaker) is instance-wide.
+
+### Insecure mode and tests
+
+- `INSECURE_ALLOW_PUBLIC_ACCESS=1` makes every request the admin, as before.
+- For tests and local development only, `INSECURE_USER_EMAILS` (comma
+  separated) stands in for the Access policy, and a request may carry
+  `X-Amber-Insecure-User: <email>` to act as one of those users. It can only
+  ever LOWER a request's privilege (the default is already admin), and it is
+  read only in insecure mode, which binds 127.0.0.1.
+- Server tests for the real path use the existing `cfAccessGetKey` seam with
+  locally signed JWTs and an injected policy fetcher.
+
 ## Config (.env / env vars)
 
 `PORT` (8080), `DATA_DIR` (/data; derives `BACKUPS_DIR=$DATA_DIR/backups`,
