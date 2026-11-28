@@ -47,8 +47,8 @@ function seed(): { forgeId: number; accountId: number; syncId: number } {
   )!.id;
   const accountId = Number(
     db.run(
-      `INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at, owner_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))`,
       forgeId,
       "octocat",
       null,
@@ -64,8 +64,8 @@ function createSync(accountId: number, source: "owned" | "starred"): number {
   return Number(
     db.run(
       `INSERT INTO account_syncs (forge_id, account_id, source, visibility, enabled,
-         interval_minutes, next_run_at, created_at, updated_at)
-       VALUES ((SELECT forge_id FROM accounts WHERE id = ?), ?, ?, 'all', 1, 360, NULL, 1, 1)`,
+         interval_minutes, next_run_at, created_at, updated_at, owner_user_id)
+       VALUES ((SELECT forge_id FROM accounts WHERE id = ?), ?, ?, 'all', 1, 360, NULL, 1, 1, (SELECT id FROM users WHERE is_admin = 1))`,
       accountId,
       accountId,
       source,

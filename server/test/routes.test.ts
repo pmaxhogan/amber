@@ -7,6 +7,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AmberApp } from "../src/app.ts";
 import type { Db } from "../src/db/db.ts";
 import { createTempApp, type TempApp } from "./helpers.ts";
+import { usePublicDns } from "./helpers/egress.ts";
+
+// Forge creation vets the host (security/egress.ts); every name is public here.
+usePublicDns();
 
 const SENTINEL = "SENTINEL-github_pat_11ABCDEF-do-not-leak";
 
@@ -87,10 +91,12 @@ describe("GET/POST /api/forges", () => {
   });
 
   it("accepts an explicit kind and port", async () => {
+    // A non-standard port is only allowed on an unrestricted (admin) forge.
     const created = await json("POST", "/api/forges", {
       host: "git.example.com",
       port: 8443,
       kind: "gitea",
+      allowPrivateNetwork: true,
     });
     expect(created.json()).toMatchObject({ port: 8443, kind: "gitea" });
   });

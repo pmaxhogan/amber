@@ -29,14 +29,6 @@ import { resolveGlobalSettings } from "./settings.ts";
  */
 export const ADMIN_PLACEHOLDER_EMAIL = "admin@amber.invalid";
 
-/**
- * SQL for an owner column on insert: the bound value, or the admin row when it
- * is NULL. Every repo, account, sync and push subscription has an owner, and a
- * NULL one would also slip past the per-owner unique indexes (SQLite treats
- * NULLs as distinct), so the fallback is the admin rather than nothing.
- */
-export const OWNER_OR_ADMIN_SQL = "COALESCE(?, (SELECT id FROM users WHERE is_admin = 1))";
-
 /** last_seen_at is a hint, not an audit log: at most one write a minute. */
 export const LAST_SEEN_RESOLUTION_MS = 60_000;
 
@@ -359,6 +351,16 @@ export function updateUser(db: Db, id: number, patch: UpdateUser, now: number = 
         now,
         id,
       );
+      // Losing `git` revokes the credential, exactly like revokeGitPassword:
+      // re-granting it later must need a fresh mint, never revive the old one.
+      if (user.permissions.git && !merged.git) {
+        db.run(
+          `UPDATE users SET git_password_hash = NULL, git_rotated_at = NULL, updated_at = ?
+            WHERE id = ?`,
+          now,
+          id,
+        );
+      }
     }
     if (patch.storageCapBytes !== undefined) {
       db.run(

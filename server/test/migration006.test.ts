@@ -173,7 +173,7 @@ describe("006_trending_sync", () => {
     migrate(db, log);
 
     const next = insert(
-      "INSERT INTO account_syncs (forge_id, source, top_n, window_days, created_at, updated_at) VALUES (?, 'trending', 10, 3, 1, 1)",
+      "INSERT INTO account_syncs (forge_id, source, top_n, window_days, created_at, updated_at, owner_user_id) VALUES (?, 'trending', 10, 3, 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
       forgeId,
     );
     expect(next).toBeGreaterThan(seeded.starredId);
@@ -214,7 +214,7 @@ describe("006_trending_sync", () => {
     migrate(db, log);
 
     const sql =
-      "INSERT INTO account_syncs (forge_id, account_id, source, top_n, window_days, created_at, updated_at) VALUES (?, ?, 'trending', ?, ?, 1, 1)";
+      "INSERT INTO account_syncs (forge_id, account_id, source, top_n, window_days, created_at, updated_at, owner_user_id) VALUES (?, ?, 'trending', ?, ?, 1, 1, (SELECT id FROM users WHERE is_admin = 1))";
     expect(insert(sql, forgeId, null, 10, 3)).toBeGreaterThan(0);
     expect(insert(sql, forgeId, null, 10, 365)).toBeGreaterThan(0);
     expect(() => insert(sql, forgeId, null, 50, 3)).toThrow(/UNIQUE/);
@@ -231,27 +231,27 @@ describe("006_trending_sync", () => {
 
     expect(() =>
       insert(
-        "INSERT INTO account_syncs (forge_id, account_id, source, top_n, window_days, created_at, updated_at) VALUES (?, ?, 'starred', 5, 3, 1, 1)",
+        "INSERT INTO account_syncs (forge_id, account_id, source, top_n, window_days, created_at, updated_at, owner_user_id) VALUES (?, ?, 'starred', 5, 3, 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
         accountId,
       ),
     ).toThrow(/CHECK|UNIQUE/);
     expect(() =>
       insert(
-        "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at) VALUES (?, NULL, 'owned', 1, 1)",
+        "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at, owner_user_id) VALUES (?, NULL, 'owned', 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
       ),
     ).toThrow(/CHECK/);
     expect(() =>
       insert(
-        "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at) VALUES (?, ?, 'owned', 1, 1)",
+        "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at, owner_user_id) VALUES (?, ?, 'owned', 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
         accountId,
       ),
     ).toThrow(/UNIQUE/);
     expect(() =>
       insert(
-        "INSERT INTO account_syncs (forge_id, source, namespace, created_at, updated_at) VALUES (?, 'namespace', 'NodeJS', 1, 1)",
+        "INSERT INTO account_syncs (forge_id, source, namespace, created_at, updated_at, owner_user_id) VALUES (?, 'namespace', 'NodeJS', 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
       ),
     ).toThrow(/UNIQUE/);

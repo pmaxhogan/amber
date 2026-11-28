@@ -104,13 +104,27 @@ describe("pure helpers", () => {
   it("builds a credential free remote url", () => {
     expect(
       buildRemoteUrl(
-        { id: 1, protocol: "https", host: "github.com", port: null, kind: "github" },
+        {
+          id: 1,
+          protocol: "https",
+          host: "github.com",
+          port: null,
+          kind: "github",
+          allowPrivateNetwork: false,
+        },
         "nodejs/node",
       ),
     ).toBe("https://github.com/nodejs/node.git");
     expect(
       buildRemoteUrl(
-        { id: 1, protocol: "http", host: "git.lan", port: 8080, kind: "gitea" },
+        {
+          id: 1,
+          protocol: "http",
+          host: "git.lan",
+          port: 8080,
+          kind: "gitea",
+          allowPrivateNetwork: true,
+        },
         "ops/infra",
       ),
     ).toBe("http://git.lan:8080/ops/infra.git");

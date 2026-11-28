@@ -4,12 +4,19 @@
 # Amber has no login of its own. It expects an authenticating proxy in front of
 # it and verifies that proxy's JWT on every request. The reference setup is a
 # Cloudflare Tunnel plus a Cloudflare Access application, configured through
-# CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD, and CF_ACCESS_ALLOWED_EMAILS in the env
-# file below.
+# CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD, and AMBER_ADMIN_EMAIL (the one admin) in
+# the env file below.
+#
+# To share Amber with other people, list their email addresses in ONE reusable
+# Access policy attached to the Amber application, and add CF_API_TOKEN (scope:
+# "Access: Apps and Policies Read" only), CF_ACCOUNT_ID and CF_ACCESS_POLICY_ID
+# to the env file. Set all three or none. Permissions and storage caps are then
+# managed on Amber's Users page.
 #
 # If you enable the read-only git remote, give its path a second Access
 # application with a Bypass policy. Otherwise git clients hit the SSO page
-# instead of the HTTP basic auth the remote expects.
+# instead of the HTTP basic auth the remote expects. Each person creates their
+# own git password on the Git Remote page.
 
 services:
   amber:

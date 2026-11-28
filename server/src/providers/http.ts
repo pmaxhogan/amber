@@ -1,3 +1,4 @@
+import { EgressRefusedError, pinnedFetch, vetRestrictedUrl } from "../security/egress.ts";
 import type { DiscoveryContext, ProviderFetch } from "./types.ts";
 
 /**
@@ -47,8 +48,30 @@ export const MAX_PAGES = 1000;
 const MAX_REDIRECTS = 3;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
+/**
+ * The fetch for one request. Unrestricted forge: the injected fetch or the
+ * global one, exactly as before. Restricted forge: vet THIS url (its host may
+ * not be the forge's: github.com's API is api.github.com) and connect only to
+ * an address that passed, re-checked on every call, so a name that rebinds
+ * after the forge was created is refused at the request that would use it.
+ */
 export function resolveFetch(context: DiscoveryContext): ProviderFetch {
-  return context.fetch ?? ((url, init) => globalThis.fetch(url, init));
+  if (!context.restricted) {
+    return context.fetch ?? ((url, init) => globalThis.fetch(url, init));
+  }
+  const transport = context.pinnedFetch ?? pinnedFetch;
+  return async (url, init) => {
+    let vetted;
+    try {
+      vetted = await vetRestrictedUrl(url, context.resolveHost);
+    } catch (cause) {
+      if (cause instanceof EgressRefusedError) {
+        throw new ProviderError(cause.message, { kind: "network", cause });
+      }
+      throw cause;
+    }
+    return transport(url, init ?? {}, vetted);
+  };
 }
 
 /**
@@ -207,6 +230,8 @@ export async function getJson<T>(
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
     let response: Response;
     try {
+      // For a restricted forge doFetch vets currentUrl first, so a redirect
+      // target is checked like the original request before it is reached.
       response = await doFetch(currentUrl, {
         method: "GET",
         headers: options.headers ?? {},
@@ -214,6 +239,9 @@ export async function getJson<T>(
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (cause) {
+      if (cause instanceof ProviderError) {
+        throw cause;
+      }
       const isTimeout = cause instanceof Error && cause.name === "TimeoutError";
       throw new ProviderError(
         isTimeout

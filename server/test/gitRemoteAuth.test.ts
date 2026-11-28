@@ -5,7 +5,6 @@ import {
   reconcileUsers,
   requireUser,
   revokeGitPassword,
-  updateUser,
 } from "../src/domain/users.ts";
 import {
   authenticateGitRequest,
@@ -287,7 +286,11 @@ describe("the /git authentication order", () => {
   it("6. refuses a user without git, after the derivation, and charges the throttle", async () => {
     const id = userId(FRIEND);
     const minted = mintGitCredential(temp.db, id);
-    updateUser(temp.db, id, { permissions: { git: false } });
+    // updateUser deletes the hash when git is taken away (users.ts), so the
+    // permission is flipped underneath it: this pins the order check itself,
+    // for a row where a hash somehow survived.
+    const permissions = { ...requireUser(temp.db, id).permissions, git: false };
+    temp.db.run("UPDATE users SET permissions = ? WHERE id = ?", JSON.stringify(permissions), id);
     const result = await attempt(basic(minted.username, minted.password));
     expect(result).toEqual({ ok: false, status: 401, reason: "not_permitted", userId: id });
     expect(verified).toHaveLength(1);

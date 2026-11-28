@@ -22,7 +22,14 @@ import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
 import { eventPayloadSchema } from "@amber/shared";
 import { deriveOutcome, type AccountSyncRow, type RepoRow } from "../api/types.ts";
-import { forgeOrigin, humanBytes, pluralize, relativeTime, absoluteTime } from "../lib/format.ts";
+import {
+  forgeOrigin,
+  humanBytes,
+  pluralize,
+  refusedReason,
+  relativeTime,
+  absoluteTime,
+} from "../lib/format.ts";
 import { accountsOfOwner, repoOwnerId } from "../lib/ownership.ts";
 import { useToaster } from "../lib/toast.ts";
 import { useEventsStore } from "../stores/events.ts";
@@ -321,14 +328,14 @@ async function runBulk(action: BulkRepoAction, files = false): Promise<void> {
     const ids = await resolveSelectedIds();
     if (ids.length === 0) return;
     const result = await api.bulkRepos(ids, action, files);
-    const refused = Math.max(0, result.requested - result.affected - result.missing.length);
+    const refused = result.refused?.length ?? 0;
     toast.success(
       `${ACTION_LABELS[action]} ${pluralize(result.affected, "repository", "repositories")}`,
     );
     if (refused > 0) {
       toast.warn(
         `${pluralize(refused, "repository", "repositories")} skipped`,
-        "You can only change repositories you own, unless you have been given more access.",
+        refusedReason(result.refused ?? []),
       );
     }
     clearSelection();

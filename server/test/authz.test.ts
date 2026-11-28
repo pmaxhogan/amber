@@ -238,6 +238,46 @@ describe("coarse enforcement, route by route", () => {
     }
   });
 
+  it("enforces a route however its path is spelled on the wire", async () => {
+    // The router percent-decodes before matching, so these all reach the
+    // /api/users handler. A check keyed on the raw URL let them through.
+    const asFriend = asUser(DEFAULT_USER);
+    const spellings = [
+      "/api/users",
+      "/%61pi/users",
+      "/%61%70%69/users",
+      "/api/%75sers",
+      "/API/users",
+      "/api/users/",
+      "//api/users",
+      "/api//users",
+      "/api/users?x=1",
+      "/%61pi/users?x=1",
+    ];
+    for (const url of spellings) {
+      const friend = await temp.app.inject({ method: "GET", url, headers: asFriend });
+      expect([403, 404], `${url} as a friend`).toContain(friend.statusCode);
+      expect(friend.body, `${url} as a friend`).not.toContain(NOTHING_USER);
+    }
+    // And a write: a friend must not be able to grant themselves anything.
+    const me = (await temp.app.inject({ method: "GET", url: "/api/me", headers: asFriend })).json<{
+      id: number;
+    }>();
+    for (const prefix of ["/%61pi/users", "/api/%75sers", "/%61%70%69/%75%73%65%72%73"]) {
+      const patch = await temp.app.inject({
+        method: "PATCH",
+        url: `${prefix}/${String(me.id)}`,
+        headers: asFriend,
+        payload: { permissions: { manage_settings: true } },
+      });
+      expect([403, 404], `PATCH ${prefix}`).toContain(patch.statusCode);
+    }
+    const after = (
+      await temp.app.inject({ method: "GET", url: "/api/me", headers: asFriend })
+    ).json<{ permissions: Record<string, boolean> }>();
+    expect(after.permissions["manage_settings"]).toBe(false);
+  });
+
   it("enforces an /api route registered outside the api plugin, too", async () => {
     temp.app.get("/api/t/admin-only", { config: { authz: "admin" } }, () => ({ ok: true }));
     temp.app.get("/api/t/forges-only", { config: { authz: "manage_forges" } }, () => ({

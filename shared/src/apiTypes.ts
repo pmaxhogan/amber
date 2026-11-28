@@ -972,6 +972,9 @@ export const API_ERROR_CODES = [
   "policy_unavailable",
   "forbidden",
   "host_not_enabled",
+  // A restricted forge's host failed the egress rule: non-standard port, IP
+  // literal, not a public DNS name, or it resolves to a non-public address.
+  "host_not_allowed",
   "storage_cap_reached",
   "not_found",
   "conflict",
@@ -980,7 +983,6 @@ export const API_ERROR_CODES = [
   "immutable",
   "unsupported",
   "precondition_failed",
-  "git_remote_disabled",
   "internal",
 ] as const;
 export const apiErrorCodeSchema = z.enum(API_ERROR_CODES);

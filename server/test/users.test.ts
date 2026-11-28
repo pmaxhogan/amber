@@ -203,6 +203,30 @@ describe("updateUser", () => {
     expect(cleared.permissions.modify_others).toBe(true);
   });
 
+  it("deletes the git password when git is taken away, so re-granting needs a new mint", () => {
+    const friend = findUserByEmail(temp.db, "friend@example.com")!;
+    setGitPassword(friend.id);
+    expect(requireUser(temp.db, friend.id).hasGitPassword).toBe(true);
+
+    // Unrelated permission edits leave the credential alone.
+    expect(
+      updateUser(temp.db, friend.id, { permissions: { modify_others: true } }).hasGitPassword,
+    ).toBe(true);
+    // Setting git to the value it already has is not a revocation either.
+    expect(updateUser(temp.db, friend.id, { permissions: { git: true } }).hasGitPassword).toBe(
+      true,
+    );
+
+    const revoked = updateUser(temp.db, friend.id, { permissions: { git: false } });
+    expect(revoked.hasGitPassword).toBe(false);
+    expect(revoked.gitRotatedAt).toBeNull();
+    expect(revoked.gitUsername).toBe(`user${String(friend.id)}`);
+
+    const regranted = updateUser(temp.db, friend.id, { permissions: { git: true } });
+    expect(regranted.permissions.git).toBe(true);
+    expect(regranted.hasGitPassword).toBe(false);
+  });
+
   it("refuses to edit the admin row and unknown users", () => {
     const admin = getAdminUser(temp.db);
     expect(() => updateUser(temp.db, admin.id, { permissions: { git: false } })).toThrow(

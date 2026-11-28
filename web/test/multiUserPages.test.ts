@@ -390,6 +390,7 @@ describe("import failures", () => {
         status: "ok" as const,
         action: "failed" as const,
         message: "This host is not enabled on this Amber",
+        code: "host_not_enabled",
       },
       {
         line: "b",
@@ -397,6 +398,7 @@ describe("import failures", () => {
         status: "ok" as const,
         action: "failed" as const,
         message: "You have reached your storage limit",
+        code: "storage_cap_reached",
       },
       {
         line: "c",
@@ -434,11 +436,57 @@ describe("import failures", () => {
     ]);
   });
 
-  it("classifies messages", () => {
-    expect(importFailureKind("This host is not enabled on this Amber")).toBe("host_not_enabled");
-    expect(importFailureKind("You are at your storage cap")).toBe("storage_cap_reached");
-    expect(importFailureKind(undefined)).toBe("not_imported");
-    expect(importFailureKind("Amber could not import this repository")).toBe("not_imported");
+  it("classifies by code first, then falls back to the message", () => {
+    expect(importFailureKind("host_not_enabled", "anything")).toBe("host_not_enabled");
+    expect(importFailureKind("storage_cap_reached")).toBe("storage_cap_reached");
+    // A domain error code is not one the page names, whatever the wording says.
+    expect(importFailureKind("forbidden", "This host is not enabled")).toBe("not_imported");
+    expect(importFailureKind(undefined, "This host is not enabled on this Amber")).toBe(
+      "host_not_enabled",
+    );
+    expect(importFailureKind(undefined, "You are at your storage cap")).toBe("storage_cap_reached");
+    expect(importFailureKind(undefined, undefined)).toBe("not_imported");
+    expect(importFailureKind(undefined, "Amber could not import this repository")).toBe(
+      "not_imported",
+    );
+  });
+
+  it("shows an already-backed-up line as neutral, not as a failure", async () => {
+    const api = stubApi({
+      previewImport: vi.fn().mockResolvedValue({
+        results: [{ line: "a", lineNumber: 1, status: "ok" }],
+        summary: { total: 1, ok: 1, warning: 0, error: 0 },
+      }),
+      commitImport: vi.fn().mockResolvedValue({
+        results: [
+          {
+            line: "a",
+            lineNumber: 1,
+            status: "ok",
+            action: "updated",
+            message: "Already backed up. Nothing was changed.",
+          },
+        ],
+        created: 0,
+        updated: 1,
+        failed: 0,
+      }),
+    });
+    const router = createRouter({ history: createMemoryHistory(), routes });
+    await router.push("/import");
+    await router.isReady();
+    const wrapper = mount(ImportPage, { global: mountGlobals({ api, router }) });
+    await flush();
+    await wrapper.find("#import-text").setValue("x");
+    await clickButton(wrapper, "Preview");
+    await flush();
+    await clickButton(wrapper, "Import 1");
+    await flush();
+
+    expect(wrapper.findAll('[data-testid="import-failure"]')).toHaveLength(0);
+    expect(wrapper.find(".chip--error").text()).toBe("0 failed");
+    expect(wrapper.find(".import-row--updated").exists()).toBe(true);
+    expect(wrapper.text()).toContain("Already backed up. Nothing was changed.");
   });
 });
 

@@ -5,6 +5,7 @@ import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
 import { buildBaseUrl, providerForKind, resolveToken } from "./discovery.ts";
 import { accountFor } from "./forks.ts";
+import type { HostResolver, PinnedFetch } from "../security/egress.ts";
 import type { AccountSyncProvider, DiscoveryContext, OwnerLookup, ProviderFetch } from "./types.ts";
 
 /**
@@ -27,6 +28,9 @@ export interface OwnerResolverDeps {
   secretKey?: Buffer | null;
   now?: () => number;
   fetch?: ProviderFetch;
+  /** Egress test seams for restricted forges (security/egress.ts). */
+  resolveHost?: HostResolver;
+  pinnedFetch?: PinnedFetch;
   decryptSecret?: (key: Buffer, blob: Buffer) => string;
   providerFor?: (kind: ForgeKind) => AccountSyncProvider | undefined;
   /** forge id -> epoch ms until which that forge is not asked; kept by the caller. */
@@ -58,6 +62,7 @@ interface DueRow {
   protocol: string;
   host: string;
   port: number | null;
+  allow_private_network: number;
 }
 
 interface GoneRow {
@@ -102,7 +107,7 @@ export async function resolveGoneOwners(
     const due = db
       .all<DueRow>(
         `SELECT r.id, r.path, r.forge_id, r.account_override_id, r.force_anonymous, r.owner_user_id,
-                f.kind, f.protocol, f.host, f.port
+                f.kind, f.protocol, f.host, f.port, f.allow_private_network
            FROM repos r
            JOIN forges f ON f.id = r.forge_id
           WHERE r.gone_at IS NOT NULL
@@ -154,6 +159,9 @@ export async function resolveGoneOwners(
             account === undefined ? null : resolveToken(account, deps.secretKey ?? null, decrypt),
           visibility: "all",
           fetch: deps.fetch,
+          restricted: row.allow_private_network !== 1,
+          resolveHost: deps.resolveHost,
+          pinnedFetch: deps.pinnedFetch,
         };
         lookup = await provider.checkOwner(context, owner);
       } catch (cause) {

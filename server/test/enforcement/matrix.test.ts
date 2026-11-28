@@ -17,6 +17,10 @@ import { asUser } from "../helpers/accessFixtures.ts";
 import { createTempApp, seedForge, type TempApp } from "../helpers.ts";
 import { createOrigin, fixedSettings, silentLog, tempDir } from "../helpers/gitFixtures.ts";
 import { makeUser } from "../helpers/users.ts";
+import { usePublicDns } from "../helpers/egress.ts";
+
+// Forge creation vets the host (security/egress.ts); every name is public here.
+usePublicDns();
 
 /**
  * The full identity matrix (admin, owner, a second default user, a user with

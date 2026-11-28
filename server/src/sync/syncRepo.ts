@@ -19,6 +19,12 @@ import { isPlausibleRef } from "../gitRef.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { providerForKind } from "../providers/discovery.ts";
 import {
+  EgressRefusedError,
+  gitPinConfig,
+  vetRestrictedUrl,
+  type HostResolver,
+} from "../security/egress.ts";
+import {
   backoffDelayMs,
   goneRecheckCapMs,
   jitteredIntervalMs,
@@ -89,6 +95,10 @@ export interface SyncRepoDeps {
   allowFileProtocol?: boolean;
   now?: () => number;
   random?: () => number;
+  /** The egress guard's resolver for restricted forges. Defaults to the system one. */
+  resolveHost?: HostResolver;
+  /** Test-only: the git binary to run, so a test can record the exact argv. */
+  gitBinary?: string;
 }
 
 /** Repo-level git config applied once when paranoid mode is turned on. */
@@ -281,11 +291,27 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
     stats = await performSync(deps, target, settings, log);
   } catch (cause) {
     outcome = "error";
-    errorKind = cause instanceof GitError ? cause.kind : "other";
+    // An egress refusal is "network": Amber would not connect. It is not a
+    // kind that can make a repository gone, and it takes the ordinary failure
+    // backoff, so a refused host is not re-resolved any faster than a dead one.
+    errorKind =
+      cause instanceof GitError
+        ? cause.kind
+        : cause instanceof EgressRefusedError
+          ? "network"
+          : "other";
     error = scrubCredentials(cause instanceof Error ? cause.message : String(cause)).slice(
       0,
       MAX_STORED_ERROR_CHARS,
     );
+    if (cause instanceof EgressRefusedError) {
+      // The stored error (visible to whoever can see the repo) names only the
+      // reason; the addresses that caused it go to the server log alone.
+      log.warn(
+        { runId, host: cause.host, reason: cause.reason, addresses: cause.addresses },
+        "egress guard refused a restricted forge",
+      );
+    }
     log.warn({ runId, errorKind, err: error }, "sync failed");
   }
 
@@ -416,6 +442,10 @@ async function performSync(
   const mode: CloneMode = settings.clone_mode;
   const dir = repoDir(deps.backupsDir, target.repo.slug);
   const remote = deps.remoteUrl ?? buildRemoteUrl(target.forge, target.repo.path);
+  // Restricted forge: resolve and vet the host NOW, once per sync, and pin
+  // every network git call below to the addresses that passed. Throws before
+  // anything touches the network or the disk.
+  const egressConfig = await gitEgressConfig(target, remote, deps.resolveHost);
   // Resolved once: the same account backs the credential presented to the
   // fetch and the last_used_at stamp written after it succeeds.
   const account = resolveRepoAccount(deps.db, target);
@@ -429,14 +459,16 @@ async function performSync(
     logger: log,
     stateDir: deps.stateDir,
     allowFileProtocol: deps.allowFileProtocol,
+    ...(deps.gitBinary === undefined ? {} : { binary: deps.gitBinary }),
   };
   const authed: GitRunOptions = /^https?:\/\//i.test(remote)
     ? {
         ...base,
         credentials,
         expectedHost: expectedHostForRemote(remote),
+        configList: egressConfig,
       }
-    : base;
+    : { ...base, configList: egressConfig };
 
   await mkdir(deps.backupsDir, { recursive: true });
   const layout = await ensureRepo(dir, mode, base);
@@ -483,7 +515,15 @@ async function performSync(
   }
 
   if (settings.lfs_enabled) {
-    await fetchLfs(settings.paranoid, defaultBranch, authed, log);
+    if (target.forge.allowPrivateNetwork) {
+      await fetchLfs(settings.paranoid, defaultBranch, authed, log);
+    } else {
+      // git-lfs is a separate program with its own HTTP client: it ignores
+      // http.curloptResolve, and the LFS batch API hands back download URLs on
+      // arbitrary hosts (and .lfsconfig can name another server). None of that
+      // can be pinned, so a restricted forge never fetches LFS objects.
+      log.warn("skipping LFS objects: this forge is restricted and git-lfs cannot be pinned");
+    }
   }
 
   // Point HEAD at the upstream default branch for EVERY mode, not just the
@@ -509,6 +549,22 @@ async function performSync(
     lastFetchHead,
     anonymous: credentials === undefined,
   };
+}
+
+/**
+ * The pinning -c entries for a restricted forge, or none for an unrestricted
+ * one (which behaves exactly as before). The remote actually fetched is what
+ * gets vetted, so a non-http(s) remote on a restricted forge is refused too.
+ */
+async function gitEgressConfig(
+  target: SyncTarget,
+  remote: string,
+  resolver: HostResolver | undefined,
+): Promise<[string, string][]> {
+  if (target.forge.allowPrivateNetwork) {
+    return [];
+  }
+  return gitPinConfig(await vetRestrictedUrl(remote, resolver));
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ import { resolveRepoAccountId } from "../domain/credentials.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
 import { buildBaseUrl, providerForKind, resolveToken } from "./discovery.ts";
+import type { HostResolver, PinnedFetch } from "../security/egress.ts";
 import type { AccountSyncProvider, DiscoveryContext, ProviderFetch, RepoInfo } from "./types.ts";
 
 /**
@@ -49,6 +50,9 @@ export interface ForkResolverDeps {
   now?: () => number;
   /** Passed through to the provider, so tests can supply a stub fetch. */
   fetch?: ProviderFetch;
+  /** Egress test seams for restricted forges (security/egress.ts). */
+  resolveHost?: HostResolver;
+  pinnedFetch?: PinnedFetch;
   decryptSecret?: (key: Buffer, blob: Buffer) => string;
   providerFor?: (kind: ForgeKind) => AccountSyncProvider | undefined;
   /**
@@ -91,6 +95,7 @@ interface PendingRow {
   protocol: string;
   host: string;
   port: number | null;
+  allow_private_network: number;
 }
 
 export interface ForkAccountRow {
@@ -128,7 +133,7 @@ export function accountFor(
 
 const PENDING_COLUMNS = `r.id, r.path, r.forge_id, r.account_override_id, r.force_anonymous,
   r.owner_user_id, r.fork_known, r.fork_checked_at, r.visibility_checked_at,
-  f.kind, f.protocol, f.host, f.port`;
+  f.kind, f.protocol, f.host, f.port, f.allow_private_network`;
 
 /** Whether the provider can answer at all: one of the two single-repo GETs. */
 function canAsk(provider: AccountSyncProvider | undefined): provider is AccountSyncProvider {
@@ -165,6 +170,9 @@ function contextFor(
       token: account === undefined ? null : resolveToken(account, deps.secretKey ?? null, decrypt),
       visibility: "all",
       fetch: deps.fetch,
+      restricted: row.allow_private_network !== 1,
+      resolveHost: deps.resolveHost,
+      pinnedFetch: deps.pinnedFetch,
     },
   };
 }

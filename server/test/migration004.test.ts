@@ -114,7 +114,7 @@ describe("004_namespace_sync", () => {
     migrate(db, log);
 
     const sql =
-      "INSERT INTO account_syncs (forge_id, account_id, source, namespace, created_at, updated_at) VALUES (?, ?, 'namespace', ?, 1, 1)";
+      "INSERT INTO account_syncs (forge_id, account_id, source, namespace, created_at, updated_at, owner_user_id) VALUES (?, ?, 'namespace', ?, 1, 1, (SELECT id FROM users WHERE is_admin = 1))";
     insert(sql, forgeId, null, "nodejs");
     expect(() => insert(sql, forgeId, null, "NodeJS")).toThrow(/UNIQUE/);
     expect(() => insert(sql, forgeId, accountId, "nodejs")).toThrow(/UNIQUE/);
@@ -126,7 +126,7 @@ describe("004_namespace_sync", () => {
     migrate(db, log);
 
     const sql =
-      "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at) VALUES (?, ?, ?, 1, 1)";
+      "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, 1, 1, (SELECT id FROM users WHERE is_admin = 1))";
     expect(() => insert(sql, forgeId, accountId, "owned")).toThrow(/UNIQUE/);
     expect(insert(sql, forgeId, accountId, "starred")).toBeGreaterThan(0);
     expect(() => insert(sql, forgeId, accountId, "starred")).toThrow(/UNIQUE/);
@@ -138,20 +138,20 @@ describe("004_namespace_sync", () => {
 
     expect(() =>
       insert(
-        "INSERT INTO account_syncs (forge_id, account_id, source, namespace, created_at, updated_at) VALUES (?, ?, 'starred', 'nodejs', 1, 1)",
+        "INSERT INTO account_syncs (forge_id, account_id, source, namespace, created_at, updated_at, owner_user_id) VALUES (?, ?, 'starred', 'nodejs', 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
         accountId,
       ),
     ).toThrow(/CHECK/);
     expect(() =>
       insert(
-        "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at) VALUES (?, NULL, 'owned', 1, 1)",
+        "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at, owner_user_id) VALUES (?, NULL, 'owned', 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
       ),
     ).toThrow(/CHECK/);
     expect(() =>
       insert(
-        "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at) VALUES (?, NULL, 'namespace', 1, 1)",
+        "INSERT INTO account_syncs (forge_id, account_id, source, created_at, updated_at, owner_user_id) VALUES (?, NULL, 'namespace', 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
       ),
     ).toThrow(/CHECK/);
@@ -164,7 +164,7 @@ describe("004_namespace_sync", () => {
       "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES ('https', 'other.example.com', NULL, 'github', 1, 1)",
     );
     insert(
-      "INSERT INTO account_syncs (forge_id, source, namespace, created_at, updated_at) VALUES (?, 'namespace', 'nodejs', 1, 1)",
+      "INSERT INTO account_syncs (forge_id, source, namespace, created_at, updated_at, owner_user_id) VALUES (?, 'namespace', 'nodejs', 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
       other,
     );
     db.run("DELETE FROM forges WHERE id = ?", other);

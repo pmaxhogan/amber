@@ -189,7 +189,7 @@ describe("deleteForge", () => {
     const forge = upsertForge(db, { protocol: "https", host: "github.com", port: null });
     const now = Date.now();
     db.run(
-      "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, 1, ?, ?)",
+      "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, 1, ?, ?, (SELECT id FROM users WHERE is_admin = 1))",
       forge.id,
       "pmaxhogan",
       now,

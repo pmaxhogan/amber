@@ -58,13 +58,23 @@ server/src/
   db/migrate.ts           # migration runner
   db/migrations.ts        # ordered array of {name, up(sql)} migrations (SQL strings)
   security/cfAccess.ts    # CF Access JWT middleware
+  security/identity.ts    # who is asking: ends every accepted request with request.user
+  security/accessPolicy.ts # reads the Access policy (CF API), the membership rule
+  security/authz.ts       # canView, per-route config.authz, requireRepo* helpers
+  security/audience.ts    # who may be told about a repo (push, events)
+  security/eventAudience.ts # per-event SSE filter, decided at send time
+  security/egress.ts      # restricted-forge egress guard: public-only, pinned addresses
   security/secrets.ts     # AES-256-GCM encrypt/decrypt for account credentials
-  security/gitPassword.ts # scrypt hash/verify + generator for the git remote password
-  domain/forges.ts        # forge CRUD + kind detection
-  domain/accounts.ts      # account CRUD + default-account invariants
+  security/gitPassword.ts # scrypt hash/verify + generator for git remote passwords
+  domain/users.ts         # users, permissions merge, adopt, usage and caps
+  domain/caps.ts          # storage cap transitions and first-clone gates
+  domain/credentials.ts   # THE rule for which account a repo or sync fetches with
+  domain/errors.ts        # DomainError codes -> HTTP statuses
+  domain/forges.ts        # forge CRUD + kind detection + restricted-forge vetting
+  domain/accounts.ts      # account CRUD + per-owner default-account invariants
   domain/repos.ts         # repo CRUD + listing query builder (paginate/sort/filter)
   domain/settings.ts      # layered settings resolution
-  domain/importer.ts      # URL parsing + bulk import
+  domain/importer.ts      # URL parsing + bulk import (host vetting, caps, ownership)
   sync/gitCli.ts          # hardened git spawn wrapper (askpass, allowlisted flags)
   sync/syncRepo.ts        # single-repo sync: modes, paranoid archival, LFS
   sync/gone.ts            # the rule for "this repository is gone upstream"
@@ -77,19 +87,29 @@ server/src/
   providers/forks.ts      # background resolver: which repository a fork came from
   providers/owners.ts     # background resolver: is a gone repository's owner gone too
   gitremote/routes.ts     # smart HTTP read-only remote (/git/*)
+  gitremote/auth.ts       # /git authentication: kill switch, throttle, credential, membership
+  gitremote/credentials.ts # per-user username slug + password minting
+  gitremote/config.ts     # the kill switch (kv git_remote.enabled)
+  gitremote/throttle.ts   # per-IP failure throttle
   web.ts                  # serves the built SPA + client-route fallback
   notify/push.ts          # web push: VAPID keys, subscriptions, gone notifications
   export/archive.ts       # zip/tar.gz/7z streaming of source, git-archive, file listing
   browse/*.ts             # read-only repository browser: refs, contents, raw, history, diffs
-  routes/*.ts             # REST routes per resource (thin; call domain/*)
+  routes/*.ts             # REST routes per resource (thin; call domain/*): repos,
+                          #   imports, forges, accounts, accountSyncs, settings, me, users,
+                          #   gitRemoteConfig (the caller's own credential + kill switch),
+                          #   push, status, events, browse, exports
   events.ts               # SSE broadcaster for live UI updates
 web/src/
-  main.ts, App.vue, router/, stores/, pages/, components/, theme/
+  main.ts, App.vue, router/ (route guards read the me store), stores/ (me, status,
+  events, theme), pages/ (Repos, Import, Accounts, AccountSync, Settings, GitRemote,
+  Users, Removed, About), components/ (CapBanner, AccessScreen, ...), lib/ownership.ts, theme/
   components/browse/      # the Browse tab of the repo drawer
   lib/markdown/           # hostile markdown -> sanitized, sandboxed frame document
   theme/amber-preset.ts   # PrimeVue theme preset, dark-first amber palette
   assets/logo.svg         # inclusion-in-amber mark
-e2e/                      # playwright smoke (built server + a docker image check)
+e2e/                      # playwright: smoke, browse, hostile, hygiene, multiuser (three
+                          #   identities) against the built server; a docker image check
 Dockerfile
 docker-compose.local.yml  # local full-stack test (docker desktop)
 deploy/docker-compose.nas.yml
@@ -111,15 +131,19 @@ a transaction per migration. Never edit an applied migration; append new ones.
 Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch ms):
 
 - `forges`: `id` PK, `protocol` ('https'|'http'), `host` TEXT, `port` INTEGER NULL,
-  `kind` ('github'|'gitlab'|'bitbucket'|'gitea'|'generic'), UNIQUE(protocol, host, port).
+  `kind` ('github'|'gitlab'|'bitbucket'|'gitea'|'generic'), UNIQUE(protocol, host, port),
+  `allow_private_network` INTEGER 0/1 (migration 010; see "Forges and outbound requests").
   Kind auto-detected from host on create (github.com -> github, gitlab.com -> gitlab,
   bitbucket.org -> bitbucket), user-editable (self-hosted gitea/gitlab).
 - `accounts`: `id` PK, `forge_id` FK CASCADE, `username` TEXT,
   `secret_enc` BLOB NULL (AES-256-GCM: 12b IV || 16b tag || ciphertext),
   `is_default` INTEGER 0/1, `last_used_at`. UNIQUE(forge_id, username).
-  Partial unique index: `ON accounts(forge_id) WHERE is_default = 1`.
-  Invariant (enforced in domain/accounts.ts, tested): a forge with >=1 accounts has
-  exactly one default. Deleting the default promotes the oldest remaining account.
+  `owner_user_id` FK users (migration 010; an account belongs to exactly one user).
+  Partial unique index: `ON accounts(owner_user_id, forge_id) WHERE is_default = 1`.
+  Invariant (enforced in domain/accounts.ts, tested): per OWNER and forge, a user with
+  >=1 accounts there has exactly one default. Deleting the default promotes that owner's
+  oldest remaining account on the forge. UNIQUE(forge_id, username) stays global: one
+  forge login is registered by one Amber user.
 - `repos`: `id` PK, `forge_id` FK RESTRICT, `path` TEXT (normalized URL path, no
   leading slash, no trailing `.git` or `/`; e.g. `nodejs/node` or
   `pub/scm/linux/kernel/git/torvalds/linux`), `display_name` TEXT (last path segment),
@@ -148,8 +172,13 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   009; see "Gone owners" under Sync engine). Whether the account that owned a
   gone repository is gone as well. NULL until the forge has answered, and
   only meaningful while `gone_at` is set.
-  UNIQUE(forge_id, path). Re-importing an existing forge+path updates the account
-  override instead of erroring (idempotent import).
+  `owner_user_id` FK users RESTRICT, `is_private` INTEGER 0/1 (default 1: unknown is
+  private), `visibility_checked_at` INTEGER NULL (migration 010; see "Multi-user access
+  control").
+  UNIQUE(forge_id, path). Re-importing an existing forge+path changes NOTHING (not the
+  owner, not the account override, not the schedule): it answers "Already backed up" to
+  a user who can view the repo and "Amber could not import this repository" to one who
+  cannot (idempotent import).
 - `sync_runs`: `id` PK, `repo_id` FK CASCADE, `started_at`, `finished_at`,
   `outcome` ('success'|'error'|'canceled'), `error` TEXT NULL, `error_kind` TEXT NULL
   ('auth'|'not_found'|'rate_limited'|'network'|'timeout'|'disk'|'git'|'other'),
@@ -161,18 +190,19 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   scope_id, key).
 - `account_syncs`: `id` PK, `forge_id` FK CASCADE, `account_id` FK CASCADE
   NULL, `source` ('owned'|'starred'|'namespace'|'trending', default 'owned'),
-  `namespace` TEXT NULL, `top_n` INTEGER NULL (1..100), `window_days` INTEGER
+  `owner_user_id` FK users (migration 010), `namespace` TEXT NULL, `top_n` INTEGER NULL (1..100), `window_days` INTEGER
   NULL (1..3650), `visibility` ('all'|'public'|'private', applies to owned and
   namespace syncs), `enabled` 0/1, `interval_minutes` (default 360),
   `next_run_at`, `last_run_at`, `last_error` TEXT NULL, `repos_discovered` INTEGER.
   CHECKs: `namespace` is set exactly when source='namespace'; `top_n` and
   `window_days` are set exactly when source='trending'; only a namespace or
   trending sync may have a NULL `account_id`, and a trending sync always does.
-  Partial unique indexes: one owned and one starred sync per account
-  (`(account_id, source) WHERE source IN ('owned','starred')`), one namespace
-  sync per forge and name (`(forge_id, namespace COLLATE NOCASE) WHERE source =
-  'namespace'`), and one trending sync per forge and window (`(forge_id,
-  window_days) WHERE source = 'trending'`).
+  Partial unique indexes: one owned and one starred sync per owner and account
+  (`(owner_user_id, account_id, source) WHERE source IN ('owned','starred')`), one
+  namespace sync per owner, forge and name (`(owner_user_id, forge_id, namespace COLLATE
+  NOCASE) WHERE source = 'namespace'`), and one trending sync per forge and window
+  (`(forge_id, window_days) WHERE source = 'trending'`: trending is instance-level, so
+  this one stays per forge).
   Trending sync semantics (GitHub kind only for now; error clearly elsewhere):
   - Auto-discovery of repositories that are valuable and likely to be taken
     down. Each run asks the forge for the `top_n` most-starred repositories
@@ -186,9 +216,14 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
     days (the default) for what is blowing up right now, 365 for the year's
     biggest. It is immutable; `top_n` is editable. The interval defaults to
     1440 minutes instead of 360.
-  - It belongs to the forge and has no account: every run uses the forge's
-    default account, anonymous if there is none. Search only returns public
-    repositories, so visibility does not apply.
+  - It belongs to the forge and has no pinned account. Creating one needs
+    `manage_settings`, the creator becomes its `owner_user_id`, and every run uses
+    the OWNER's default account on that forge (read fresh each run), anonymous when
+    the owner has none or may not use accounts (a non-admin needs `import_private`;
+    the admin always may). Everything it adds is owned by that user. Trending syncs
+    are listed to every user (`GET /api/account-syncs`), but only a user with
+    `manage_settings` (the admin always) may change one. Search only returns public repositories, so visibility
+    does not apply.
   - It NEVER removes anything, and a repository that drops off the list is not
     counted as vanished or logged: falling off is what trending lists do
     daily. Whatever trended once keeps its backup and keeps syncing.
@@ -206,9 +241,10 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
     are imported on the next run. Like owned syncs it NEVER auto-removes: a
     repository deleted or transferred upstream keeps its backup.
   - It belongs to a forge, and the account is optional. NULL `account_id`
-    means "the forge's default account at run time, anonymous if there is
-    none". A pinned account also becomes the account override of the repos the
-    sync creates, so private repos it found are fetched with the same token.
+    means "the sync OWNER's default account on that forge at run time,
+    anonymous if there is none". A pinned account must be the owner's own, and
+    also becomes the account override of the repos the sync creates, so private
+    repos it found are fetched with the same token.
   - Deleting a pinned account sets the sync's `account_id` to NULL (done in
     domain/accounts.ts before the delete) rather than cascading, so a whole
     organization's backups never stop silently.
@@ -233,11 +269,20 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
     backup must retain; only a confirmed intentional unstar frees disk.
 - `push_subscriptions`: `id` PK, `endpoint` TEXT UNIQUE (the capability URL a
   browser's push service issued), `p256dh`, `auth`, `user_agent` TEXT NULL,
-  `last_success_at`, `last_error` TEXT NULL. One row per browser that asked to
-  be notified.
-- `kv`: `key` TEXT PK, `value` TEXT. Uses: git remote config (enabled, username,
-  scrypt password hash), the web push VAPID key pair, instance id, cached JWKS,
-  schema/state misc.
+  `user_id` FK users (migration 010), `last_success_at`, `last_error` TEXT NULL.
+  One row per browser that asked to be notified, owned by whoever subscribed it last.
+- `users` (migration 010): one row per identity Amber has admitted; exactly one is
+  the admin. Columns and the full multi-user model are under "Multi-user access
+  control". Rows are never deleted.
+- `kv`: `key` TEXT PK, `value` TEXT. Uses: the git remote kill switch
+  (`git_remote.enabled`; credentials are per user, on the `users` row), the cached
+  access policy (`access_policy.emails`, `access_policy.fetched_at`), the web push
+  VAPID key pair, instance id, cached JWKS, schema/state misc.
+
+Every `owner_user_id` / `user_id` column added by migration 010 is nullable only
+because SQLite cannot add NOT NULL with a foreign key default; BEFORE INSERT and
+BEFORE UPDATE triggers make each one NOT NULL in effect (an insert or update that
+leaves the owner NULL aborts, and nothing is silently handed to the admin).
 
 ## Layered settings
 
@@ -255,9 +300,11 @@ default, allowed scopes, and UI metadata (label, description, group). Keys:
 | `paranoid` (bool)          | false   | all       |
 | `max_concurrent_syncs`     | 8       | global    |
 | `max_concurrent_per_forge` | 4       | global    |
+| `default_user_storage_cap_gb` | 5    | global    |
 
-Resolution order (narrowest wins): repo -> effective account (the override, or the
-forge default account; skipped when force_anonymous or no account) -> forge ->
+Resolution order (narrowest wins): repo -> effective account (the account the repo's
+fetches would use, by the credential rule in "Credentials are per user": the OWNER's
+override or default account; skipped when force_anonymous or no account) -> forge ->
 global -> registry default. `domain/settings.ts` exposes
 `resolveSettings(repoId)` returning the fully-merged typed object plus, for the UI,
 `explainSettings(repoId)` that reports which scope supplied each value, and
@@ -284,10 +331,12 @@ Accepted line formats (one per line, blank lines and `#` comments ignored):
 - Full URLs: `https://github.com/nodejs/node`, `http://host:8080/x/y.git`
 - Proto-less: `github.com/nodejs/node/` (assume https, default port)
 - User prefix: `pmaxhogan@github.com/pmaxhogan/mkvid` or
-  `https://b@github.com/d/e` - the user part selects/creates an account override:
-  if an account with that username exists on the forge it becomes the repo's
-  override; otherwise import succeeds with a warning and no override (do not create
-  accounts implicitly).
+  `https://b@github.com/d/e` - the user part selects among the IMPORTER'S OWN accounts
+  on that forge (never another user's): if the importer has an account with that
+  username it becomes the new repo's override; otherwise import succeeds with a warning
+  and no override (do not create accounts implicitly). A user without `import_private`
+  imports anonymously and the line says so. The prefix only matters when the repo is
+  created: re-importing an existing repo changes nothing.
 - Trailing `.git` optional and stripped for identity; `path` is the normalized key.
 - Whole namespaces: a single path segment on a forge whose kind supports
   namespace sync (`https://github.com/nodejs`, `me@github.com/acme`) imports as
@@ -296,8 +345,11 @@ Accepted line formats (one per line, blank lines and `#` comments ignored):
   kind a single segment stays a repository (`host/repo` is common on plain git
   servers). The parser stays pure and cannot know the kind, so the server tags
   each result `target: 'repo' | 'namespace'` on preview and commit. Re-import is
-  idempotent per (forge, namespace, case-insensitive); a `user@` prefix pins
-  that account (never creates one) and a prefix-less line never unpins it.
+  idempotent per importer, forge and namespace (case-insensitive): another
+  user's sync of the same namespace is theirs and is never touched; a `user@`
+  prefix pins one of the importer's own accounts (never creates one) and a
+  prefix-less line never unpins it. A namespace line, like a repo line, needs
+  `import`; a new host needs `manage_forges` or the admin.
   Namespace lines do not count toward the first-sync stagger, and a committed
   one answers with `accountSyncId` instead of `repoId`.
 
@@ -469,7 +521,8 @@ notes; amber must be safe against malicious forges AND malicious repos):
 
 ## Read-only git remote (gitremote/routes.ts)
 
-Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
+Smart HTTP v2, native `git clone` UX. The routes are always registered; the kill
+switch (`git_remote.enabled`, admin only) decides whether they answer. Endpoints:
 
 - `GET /git/:slug/info/refs?service=git-upload-pack` ->
   `git upload-pack --stateless-rpc --advertise-refs <repodir>` with
@@ -480,16 +533,34 @@ Smart HTTP v2, native `git clone` UX. Endpoints (registered only when enabled):
   `Content-Encoding: gzip` - git clients send gzip), stdout streamed back as
   `application/x-git-upload-pack-result`. No request body buffering to disk.
 - `:slug` accepts the repo slug with optional trailing `.git`.
-  Clone URL shown in UI: `https://<user>:<pass>@<PUBLIC_ORIGIN host>/git/<slug>.git`.
+  Clone URL shown in UI: `https://<user>:<pass>@<PUBLIC_ORIGIN host>/git/<slug>.git`,
+  where user and password are the caller's own credential.
 - Anything else under `/git/` (notably `service=git-receive-pack` or
-  `POST /git-receive-pack`) -> 403 with a plain explanation. receive-pack is never
-  spawned anywhere in the codebase; read-only holds by construction.
-- Auth: HTTP Basic. Username from kv (default `amber`), password autogenerated
-  (32 chars, `crypto.randomBytes`, base58) - stored ONLY as scrypt hash
-  (N=2^15, r=8, p=1, `timingSafeEqual`), shown once on enable/rotate. Rotation
-  re-generates; no user-supplied passwords. 401 with `WWW-Authenticate: Basic`
-  when absent/wrong; per-IP failure throttling (in-memory token bucket).
-- Disabled (default): all /git routes return 404. Toggle + rotate live in the UI.
+  `POST /git-receive-pack`) -> 403 with a plain explanation, AFTER the same
+  authentication as every other /git request: an anonymous request for it gets
+  the 401 challenge, not the 403, so the surface says nothing to someone who
+  is not signed in. receive-pack is never spawned anywhere in the codebase;
+  read-only holds by construction.
+- Auth: HTTP Basic, per user (`gitremote/auth.ts` is the contract; the order is
+  listed under "Git remote, per user" in the multi-user section). Each user with
+  the `git` permission mints their own credential: a random 10 character
+  lower-case alphanumeric username (stable across rotations and revokes) and an
+  autogenerated 32 character base58 password (`crypto.randomBytes`), stored ONLY
+  as a scrypt hash (N=2^15, r=8, p=1, `timingSafeEqual`) and shown once by
+  `POST /api/git-remote/rotate`. No user-supplied passwords. A request without
+  credentials is the normal first leg of a clone and gets 401 with
+  `WWW-Authenticate: Basic` without spending a throttle token; a wrong
+  password, an unknown username, a removed user, one without `git` and one who
+  left the access policy all get the same 401; per-IP failure throttling
+  (in-memory token bucket) answers 429.
+- Visibility: after authentication the slug must resolve and the user must be
+  able to view that repo (`canView`); anything else is the same 404 as an
+  unknown slug.
+- Disabled (the kill switch off): all /git routes return 404, before any
+  credential is read. Turning it off keeps everyone's credential hashes (only the
+  switch flips), and a user can still create, rotate or revoke theirs while it is
+  off; nothing can be cloned until it is back on. The switch lives in the UI
+  (`manage_settings`); it is off by default.
 - CF Access: main app enforces SSO; a second CF Access application scoped to
   the deployment host's `/git` path carries a Bypass policy so git clients reach
   basic auth.
@@ -591,18 +662,43 @@ Rules that make it safe:
 
 - Unauthenticated: `GET /healthz` (also used by docker healthcheck).
 - Basic-auth realm: `/git/*` only.
-- Everything else requires a valid CF Access JWT (see Security).
+- Everything else requires a valid CF Access JWT (see Security) AND an accepted
+  identity (the admin, or a user the access policy admits). Every route declares
+  what it needs in its Fastify route config (`config.authz`: `public`, `user`,
+  `admin`, or one permission key); one hook under `/api` enforces it and a test
+  walks the live route table. Object-level checks (`canView`, ownership) happen in
+  the handler. An object the caller cannot see answers 404, never 403; 403 is for
+  an object they can see but may not change, or a missing permission.
 - Resources:
-  - `GET/POST /api/forges`, `PATCH/DELETE /api/forges/:id`
+  - `GET /api/me` - `{ id, email, isAdmin, permissions, storage: { usedBytes,
+    capBytes, overCap }, policy }`; `policy` (`configured`, `fetchedAt`, `stale`,
+    `editUrl`, `lastError`) is null for everyone but the admin.
+  - `GET /api/users`, `PATCH /api/users/:id` `{ permissions?, storageCapBytes? }`,
+    `POST /api/users/refresh`, `POST /api/users/:id/adopt-repos`,
+    `POST /api/users/:id/revoke-git` - all admin only.
+  - `GET /api/forges` (any user), `POST /api/forges` and `PATCH/DELETE
+    /api/forges/:id` (`manage_forges`; only the admin may set `allowPrivateNetwork`).
   - `GET/POST /api/accounts`, `PATCH/DELETE /api/accounts/:id`,
     `POST /api/accounts/:id/default`. Secrets are write-only: responses carry
-    `hasSecret: boolean`, never the secret.
+    `hasSecret: boolean`, never the secret. List and read return the caller's own
+    accounts; `manage_forges` and the admin see everyone's (with `ownerEmail`).
+    Create, edit and set-default need `import_private` and act on the caller's OWN
+    accounts only, the admin included; delete is the owner's or `manage_forges`.
   - `POST /api/import/preview` (text blob -> per-line parse results),
-    `POST /api/import` (commit; returns created/updated/failed per line)
+    `POST /api/import` (commit; returns created/updated/failed per line); both need
+    `import`. A refused line carries an optional machine-readable `code`:
+    `host_not_enabled`, `storage_cap_reached`, or a domain error code. The generic
+    "Amber could not import this repository" refusal deliberately has none.
+    Re-importing something the caller can already view answers status ok, action
+    `updated`, with the message "Already backed up. Nothing was changed.".
   - `GET /api/repos` - server-side pagination
     (`page`, `perPage<=200`, `sort`, `dir`, `q`, `forgeId`, `state`, `outcome`,
-    `gone` - true for only the repositories gone upstream, false for the rest),
-    returns rows + total. `sort` includes `fork_parent`, non-forks last. `q` is a case-insensitive substring of the path or
+    `gone` - true for only the repositories gone upstream, false for the rest,
+    `mine` - only the caller's own, and for the admin only `ownerId` and
+    `ownerRemoved` - anyone else sending them is refused), returns rows + total.
+    The list and its total are filtered IN SQL to what the caller can view.
+    Every row also carries `mine`, `isPrivate` and, for the admin only, `owner`
+    (`{ id, email, removed }`). `sort` includes `fork_parent`, non-forks last. `q` is a case-insensitive substring of the path or
     display name; when it is a pasted repository URL (any scheme, scp syntax,
     a `user@` prefix, `.git`, a trailing slash, a query string, or a deeper
     page such as `/tree/main`) it also matches by forge host plus path, so
@@ -616,29 +712,51 @@ Rules that make it safe:
     repo row backing up that upstream on the same forge (path matched without
     regard to case), or null when amber does not track it. `GET
     /api/repos/:id` carries it too, so a row refreshed in place keeps it. `GET /api/repos/:id`, `PATCH /api/repos/:id`
-    (pause/resume, override account, force_anonymous), `DELETE /api/repos/:id`
-    (`?files=true` also removes the backup dir),
-    `POST /api/repos/:id/sync` (sync now), `GET /api/repos/:id/runs` (paged).
-  - Bulk: `POST /api/repos/bulk` `{ ids, action: pause|resume|sync|delete }`.
-  - `GET /api/settings/:scopeType/:scopeId?` + `PUT` same path (validated against
-    registry allowed-scopes), `GET /api/repos/:id/effective-settings` (explain).
+    (pause/resume, override account, force_anonymous, rename `path`),
+    `DELETE /api/repos/:id` (`?files=true` also removes the backup dir),
+    `POST /api/repos/:id/sync` (sync now), `GET /api/repos/:id/runs` (paged; a
+    read, so anyone who can view the repo may see its history). Who may change a
+    repo is in "Permissions"; `path` and a non-null `account_override_id` are the
+    owner's or the admin's only.
+  - Bulk: `POST /api/repos/bulk` `{ ids, action: pause|resume|sync|delete }`
+    answers `{ action, requested, affected, ids, missing, refused? }`. `missing`
+    are ids that do not exist or that the caller cannot view (indistinguishable);
+    `refused` (`{ id, error, message }[]`) are ids the caller can view but may
+    not act on.
+  - `GET /api/settings/:scopeType/:scopeId?` (any user; repo scopes need view
+    access, account scopes the owner or `manage_forges`) and `PUT` (the global
+    scope needs `manage_settings`, the forge scope `manage_forges`, a repo scope
+    the right to edit that repo, an account scope the account's owner or
+    `manage_forges`), validated against registry allowed-scopes;
+    `GET /api/repos/:id/effective-settings` (explain).
   - `GET/POST /api/account-syncs`, `PATCH/DELETE /api/account-syncs/:id`,
     `POST /api/account-syncs/:id/run`. POST takes `accountId` for owned and
     starred syncs (`forgeId` rejected), `namespace` plus `forgeId` and/or
     `accountId` for namespace syncs (both must agree on the forge), and
     `forgeId` plus optional `topN` (default 25) and `windowDays` (default 3)
-    for trending syncs (`accountId`, `namespace` and `visibility` rejected).
+    for trending syncs (`accountId`, `namespace` and `visibility` rejected). Create
+    needs `import`, a trending sync needs `manage_settings`, and a pinned account
+    must be the caller's own. A user lists their own syncs and every trending sync
+    (the admin lists all, with `ownerEmail`); PATCH, DELETE and run are the
+    owner's or the admin's, except that a trending sync is instance-level: anyone
+    with `manage_settings` may change, delete or run one whoever owns it, and
+    nobody without it may.
     `intervalMinutes` defaults to 360, or 1440 for a trending sync. A duplicate
     is a 409. PATCH edits only `visibility`, `enabled`, `intervalMinutes` and,
     on a trending sync, `topN`; the identity fields are stripped.
-  - `GET /api/git-remote` (enabled, username, cloneUrlTemplate, rotatedAt),
-    `PATCH /api/git-remote` `{ username }` (renames the basic-auth user;
-    works whether the remote is enabled or disabled, never touches the
-    password, and answers with the same shape GET does),
-    `POST /api/git-remote/enable|disable|rotate` (enable/rotate return the
-    plaintext password exactly once).
+  - `GET /api/git-remote` - the CALLER'S own credential (`{ enabled, username,
+    hasPassword, rotatedAt, cloneUrlTemplate }`; `enabled` is the instance kill
+    switch; the template carries `{password}` and `{slug}` placeholders),
+    `POST /api/git-remote/rotate` (mint or rotate mine; the only response that
+    carries a password, once, as `{ ...the above, username, password }`),
+    `POST /api/git-remote/revoke` (delete mine) - all need `git` and work while
+    the remote is off - and `POST /api/git-remote/enable|disable` (the kill switch,
+    `manage_settings`). There is no username rename and no path parameter: nothing
+    can name someone else's credential; the admin revokes anyone's with
+    `POST /api/users/:id/revoke-git`.
   - `GET /api/push` (`publicKey`, `devices`: push service host, user agent and
-    last delivery per subscribed browser - never an endpoint or key),
+    last delivery per subscribed browser of the CALLER - never an endpoint or
+    key; subscribe, unsubscribe and test likewise act on the caller's browsers),
     `POST /api/push/subscriptions` (a browser's `{ endpoint, keys }`; https
     endpoints only; idempotent), `POST /api/push/unsubscribe` `{ endpoint }`
     (in the body, since the endpoint is a capability that does not belong in a
@@ -646,8 +764,12 @@ Rules that make it safe:
     `{ sent, failed }`).
   - `GET /api/repos/:id/browse/*` - see "Repository browser".
   - `GET /api/status` - version, queue depth, active syncs, totals (repos, gone
-    repos, disk), breaker state, insecure-mode flag.
-  - `GET /api/events` - SSE stream. Frames are `{ type, at, payload }`, framed
+    repos, disk, filtered to what the caller can view), breaker state,
+    insecure-mode flag.
+  - `GET /api/events` - SSE stream, filtered per user at SEND time (a permission
+    change takes effect on a stream that is already open; a removed user's stream
+    is closed; `account_sync.finished` goes to the sync's owner and the admin;
+    `status.changed` is instance-wide). Frames are `{ type, at, payload }`, framed
     with a named `event:` line so a client can dispatch without parsing first.
     The payload contract is pinned in `shared/src/apiTypes.ts`
     (`eventPayloadSchemas`) and tested on BOTH sides. Every repo-scoped event
@@ -735,9 +857,14 @@ configure.
   `https://<CF_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs` via
   `createRemoteJWKSet` (built-in caching/kid-refresh), `jwtVerify` enforcing
   `iss = https://<team domain>`, `aud = CF_ACCESS_AUD`, exp/nbf with small skew;
-  then required `email` claim must be in `CF_ACCESS_ALLOWED_EMAILS`
-  (comma-separated, case-insensitive). Token from `Cf-Access-Jwt-Assertion` header
-  or `CF_Authorization` cookie. Any failure -> 401, fail closed, log at warn.
+  then the required `email` claim is resolved to an identity (`security/identity.ts`):
+  `AMBER_ADMIN_EMAIL` is the admin (accepted on any valid token; the legacy
+  `CF_ACCESS_ALLOWED_EMAILS` only supplies the admin, as its first entry, when
+  `AMBER_ADMIN_EMAIL` is unset), and anyone else must be a user the Cloudflare Access
+  policy admits (see "Multi-user access control"): not a member is 403 `not_a_user`, a
+  policy that cannot be read is 503 `policy_unavailable`. Token from
+  `Cf-Access-Jwt-Assertion` header or `CF_Authorization` cookie. A bad token -> 401,
+  fail closed, log at warn.
 - Startup refuses to boot when CF vars are missing, UNLESS
   `INSECURE_ALLOW_PUBLIC_ACCESS=1`: then auth is skipped, the server binds
   127.0.0.1 ONLY (hard-coded, overriding PORT/HOST binds), logs a loud warning
@@ -746,7 +873,11 @@ configure.
   banner. Localhost traffic is NEVER otherwise treated as authenticated.
 - Account credentials: AES-256-GCM under `AMBER_SECRET_KEY` (64 hex chars in .env).
   Startup fails fast if the key is missing/malformed when secrets exist.
-- Git remote password: scrypt-hashed (never stored or logged in plaintext).
+- Git remote passwords: one per user, scrypt-hashed (never stored or logged in
+  plaintext), deleted when the user leaves the access policy.
+- Authorization: every route declares its requirement, repo visibility is decided in
+  SQL and by `canView`, and an object a caller cannot see is a 404 (see
+  "Multi-user access control").
 - No secrets in: git argv, stored remote URLs, logs, API responses, error messages.
 - Credential misdirection (a compromised web UI must not be able to exfiltrate a
   stored PAT by pointing it at an attacker host):
@@ -812,7 +943,10 @@ configure.
 - SSRF note: amber's whole job is fetching user-supplied URLs, so outbound requests
   are inherently arbitrary; mitigations: only http(s) protocols allowed
   (GIT_ALLOW_PROTOCOL), no redirects followed by provider API clients beyond same
-  host, and the server runs on an isolated docker network with nothing else
+  host, only the admin or `manage_forges` may introduce a new host, a forge the
+  admin did not explicitly allow is RESTRICTED to public addresses with every
+  request validated and pinned (`security/egress.ts`, see "Forges and outbound
+  requests"), and the server runs on an isolated docker network with nothing else
   listening on trust-by-source.
 
 ## Multi-user access control
@@ -825,7 +959,8 @@ passage is a bug to fix.
 ### Who is a user
 
 - Cloudflare Access is the only list of who may get in. Amber never stores an
-  allow list of its own and `CF_ACCESS_ALLOWED_EMAILS` is gone.
+  allow list of its own; `CF_ACCESS_ALLOWED_EMAILS` is replaced by
+  `AMBER_ADMIN_EMAIL` and survives only as the upgrade fallback described next.
 - The ADMIN is the single email in `AMBER_ADMIN_EMAIL`. It cannot be changed
   from the UI or the API, so no session can promote itself. The admin holds
   every permission, is uncapped, and is accepted on any valid Access JWT
@@ -1096,6 +1231,46 @@ never creates anything:
   the row went away. A stream whose user is removed is closed. `account_sync.finished` goes to the sync's owner and the
   admin. `status.changed` (queue depth, active syncs, breaker) is instance-wide.
 
+### Settled by the implementation
+
+Details this design left open, as the code now does them. Where one narrows or
+extends a rule above, this list is the current behavior.
+
+- POLICY RULES. An `exclude` rule that names an email is SUBTRACTED from the
+  include list: an excluded address is refused at the edge, and git bypasses the
+  edge, so honouring it keeps git from being looser than the web path. A `require`
+  rule cannot be evaluated by Amber; its presence is logged once at warn and the
+  git remote does not enforce it.
+- `policy.stale` (in `GET /api/me` and the Users page) is true when the last
+  refresh failed, when there has never been a good read, or when the copy is
+  older than two background intervals (10 minutes), so a stopped timer does not
+  look healthy. `policy.lastError` carries why, never the API token. In insecure
+  mode the policy is the `INSECURE_USER_EMAILS` list and is never stale.
+- VISIBILITY, as implemented (`sync/syncRepo.ts` and `providers/forks.ts`). An
+  ANONYMOUS successful fetch marks the repo public on any forge. An authenticated
+  success on a forge Amber cannot ask (generic) marks it private. On a forge with
+  a provider, an authenticated success proves nothing and the visibility pass
+  decides: it reads the forge's visibility field, and a DEFINITIVE "not visible"
+  answer (404, or a 401/403 that is not a rate limit) sets `is_private`, while a
+  rate limit, network failure, timeout, 5xx or unparseable body is no answer and
+  leaves the flag alone.
+- ADOPT works on any non-admin user, removed or not; it is not limited to the
+  "owner removed" list the admin finds them through.
+- RUN HISTORY (`GET /api/repos/:id/runs`) is a read: anyone who can view the repo
+  may see it.
+- ACCOUNT EDIT and SET-DEFAULT are owner-only even for the admin; the admin and
+  `manage_forges` can read everyone's accounts and delete them, never edit one
+  or see a secret.
+- TRENDING SYNCS are listed to every user, created and changed with
+  `manage_settings` (whoever owns the row), run with their owner's default account
+  when that owner may use accounts, anonymously otherwise.
+- Turning `git` OFF for a user (`PATCH /api/users/:id`) deletes their git password
+  hash, exactly like a revoke: turning it back on needs a freshly minted password,
+  never the old one. The username survives. Independently, /git refuses a user
+  without `git` with the ordinary 401; see "Git remote, per user".
+- The storage-cap "reached" transition notifies by web push both the user and the
+  admin; dropping back under the cap clears `cap_notified_at`.
+
 ### Insecure mode and tests
 
 - `INSECURE_ALLOW_PUBLIC_ACCESS=1` makes every request the admin, as before.
@@ -1112,7 +1287,15 @@ never creates anything:
 `PORT` (8080), `DATA_DIR` (/data; derives `BACKUPS_DIR=$DATA_DIR/backups`,
 `STATE_DIR=$DATA_DIR/state`, `LOGS_DIR=$DATA_DIR/logs`, each overridable),
 `AMBER_SECRET_KEY`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`,
-`CF_ACCESS_ALLOWED_EMAILS`, `INSECURE_ALLOW_PUBLIC_ACCESS`, `LOG_LEVEL` (info),
+`AMBER_ADMIN_EMAIL` (the admin; required with the two CF_ACCESS vars unless
+insecure mode is on), `CF_API_TOKEN` + `CF_ACCOUNT_ID` + `CF_ACCESS_POLICY_ID`
+(the three that let Amber read the users policy: set all or none, else startup
+refuses; the token's only scope is "Access: Apps and Policies Read"; without
+them Amber is admin-only), `CF_ACCESS_ALLOWED_EMAILS` (LEGACY: when
+`AMBER_ADMIN_EMAIL` is unset its first entry becomes the admin with a deprecation
+warning, the rest are ignored), `INSECURE_ALLOW_PUBLIC_ACCESS`,
+`INSECURE_USER_EMAILS` (insecure mode only: stand-in users for tests and local
+development, see "Insecure mode and tests"), `LOG_LEVEL` (info),
 `PUBLIC_ORIGIN` (used for clone URLs; defaults to http://localhost:8080, so any
 real deployment must set it),
 `WEB_DIST_DIR` (where the built SPA lives; defaults to `web/dist` resolved
@@ -1161,8 +1344,25 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   enable/visibility/interval, plus whole-user-or-organization syncs with an
   optional pinned account, plus trending syncs that add the top N new
   repositories daily; usable with no accounts at all on GitHub), Settings (global editor + scope pickers, each field
-  shows which scope wins), Git Remote (enable, username, rotate, one-time password
-  reveal, copyable clone URLs), About/Status.
+  shows which scope wins), Git Remote (the caller's own username, create/rotate/
+  revoke password, one-time password reveal, copyable clone URL template; the
+  kill switch card shows only to `manage_settings`), Users (admin only: policy
+  status with a refresh button and a link to the Cloudflare policy editor, or the
+  setup instructions when the three CF variables are missing; per user the
+  last seen time, repo count, usage against cap, whether a git password exists,
+  a cap editor, one toggle per permission, "Revoke git password" and "Adopt
+  repos"), About/Status. The Repos list adds an owner column and an owner
+  filter for the admin and a private/public marker; the detail drawer hides
+  Sync, Pause/Resume, Delete and Settings from a viewer who may not change the
+  repo.
+- Identity first: the `me` store (`stores/me.ts`) loads `GET /api/me` before
+  anything else (status poll, SSE) and answers `can(permission)` / `meets(requirement)`.
+  The router guard (`NAV_LINKS` and each route's `meta.requires`) hides nav links
+  and redirects a page the caller may not use to `/`; the same check runs when
+  identity arrives late or a permission is taken away while a page is open. The
+  `not_a_user` and `policy_unavailable` refusals render an AccessScreen instead of
+  the app. A persistent, non-dismissible CapBanner shows while the caller is at
+  or over their cap. This is convenience only: the server enforces everything.
 - SSE store keeps the table live (row-level updates, no refetch storms).
 - The built SPA is served by the server itself (`server/src/web.ts`), so the
   image is a single process: fingerprinted assets get a one-year immutable
@@ -1200,14 +1400,33 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   does not commit anything back.
 - Playwright smoke (`e2e/`), run by the `e2e` job in ci.yml on push and PR:
   - `tests/smoke.spec.ts` drives the BUILT server under node with
-    INSECURE_ALLOW_PUBLIC_ACCESS=1, against the BUILT frontend in a real
+    INSECURE_ALLOW_PUBLIC_ACCESS=1 (so the default identity is the admin), against the BUILT frontend in a real
     browser: insecure banner on every page, import a real public repository
     through the UI, wait for the first sync to succeed, check the listing
     renders it with its denormalized mode and outcome, download a source zip
     and verify it carries both a local file header and an end-of-central-
-    directory record, enable the git remote and read the one-time password,
-    then a real `git clone` with the real binary, a rejected wrong password,
-    and a rejected push.
+    directory record, the admin turns the git remote on and creates their own
+    password on the Git Remote page (read once, username a random 10 character
+    slug), then a real `git clone` with the real binary, a rejected wrong
+    password, and a rejected push.
+  - `tests/multiuser.spec.ts` is the access-control suite, through the real UI
+    with three identities: the admin (the insecure-mode default) and two friends
+    with the default permissions (a browser context or API request carrying
+    `X-Amber-Insecure-User: <email>`, honoured only for the addresses in
+    `INSECURE_USER_EMAILS`, which the Playwright config sets). The admin's Users
+    page lists both and toggles a permission and sets a cap; friend A sees only
+    the nav links their permissions allow and is redirected away from `/users`;
+    A imports from the loopback fixture forge (a new host is refused) and owns
+    the result, re-importing it says "Already backed up"; B sees A's public repo
+    but has no Pause/Delete controls and a direct API call is a 403; the admin
+    turning off B's `view_others_public` makes it a 404 for B; a repo fetched with
+    an account is private and invisible to B; A mints a git password, a real `git
+    clone` works for A's repo and fails for one A cannot view, and the admin
+    revoking A's password from the Users page makes the clone fail; a user at a
+    tiny cap sees the banner and a new import is refused. Fixture forges on
+    loopback are registered by the admin as unrestricted
+    (`allowLoopbackForge` in `tests/helpers.ts`), since a new host is otherwise
+    restricted to public addresses.
   - `tests/browse.spec.ts` drives the Browse tab against repositories the
     suite builds itself and serves over dumb HTTP from a throwaway local
     server (`tests/localGitServer.ts`), so it needs no network: the README in
@@ -1270,4 +1489,9 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   Access application on that host's `/git` path with a Bypass Everyone policy
   so git clients reach HTTP basic auth rather than the SSO page.
 - The deployment `.env` holds only: PORT, AMBER_SECRET_KEY, CF_ACCESS_TEAM_DOMAIN,
-  CF_ACCESS_AUD, CF_ACCESS_ALLOWED_EMAILS, PUBLIC_ORIGIN, LOG_LEVEL.
+  CF_ACCESS_AUD, AMBER_ADMIN_EMAIL, PUBLIC_ORIGIN, LOG_LEVEL, and, to share
+  Amber with other people, CF_API_TOKEN, CF_ACCOUNT_ID and CF_ACCESS_POLICY_ID.
+  The reference setup for sharing is one reusable Access policy listing the
+  friends' email addresses, attached to the Amber application (and not to the
+  `/git` bypass application); removing an address from it removes that person's
+  web and git access within about a minute.

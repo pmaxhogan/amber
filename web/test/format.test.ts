@@ -6,6 +6,7 @@ import {
   formatDuration,
   humanBytes,
   pluralize,
+  refusedReason,
   relativeTime,
   safeFileName,
 } from "../src/lib/format.ts";
@@ -122,5 +123,17 @@ describe("deriveOutcome", () => {
 
   it("infers failure when the last attempt is newer than the last success", () => {
     expect(deriveOutcome({ lastSyncAt: 200, lastSuccessAt: 100, lastError: null })).toBe("error");
+  });
+});
+
+describe("refusedReason", () => {
+  it("joins the distinct server messages", () => {
+    expect(
+      refusedReason([{ message: "Not yours." }, { message: "Not yours." }, { message: "Paused." }]),
+    ).toBe("Not yours. Paused.");
+  });
+
+  it("falls back to a generic sentence when the server gave none", () => {
+    expect(refusedReason([])).toMatch(/repositories you own/);
   });
 });

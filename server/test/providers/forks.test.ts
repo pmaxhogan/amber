@@ -44,8 +44,8 @@ function repo(
 ): number {
   return db.run(
     `INSERT INTO repos (forge_id, path, display_name, slug, short_id, fork_known, fork_parent,
-                        fork_checked_at, account_override_id, force_anonymous, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)`,
+                        fork_checked_at, account_override_id, force_anonymous, created_at, updated_at, owner_user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, (SELECT id FROM users WHERE is_admin = 1))`,
     forgeId,
     path,
     path,
@@ -61,7 +61,7 @@ function repo(
 
 function account(forgeId: number, username: string, isDefault: boolean): number {
   return db.run(
-    "INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+    "INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
     forgeId,
     username,
     new Uint8Array([1, 2, 3]),

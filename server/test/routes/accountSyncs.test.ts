@@ -39,7 +39,7 @@ function seedForge(kind: string, host: string): number {
 
 function seedAccount(forgeId: number, username: string): number {
   return db.run(
-    "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+    "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))",
     forgeId,
     username,
     0,
@@ -334,8 +334,8 @@ describe("DELETE /api/account-syncs/:id", () => {
     });
     const id = created.json<AccountSync>().id;
     db.run(
-      `INSERT INTO repos (forge_id, path, display_name, slug, short_id, managed_by_account_sync_id, origin, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'account_sync', ?, ?)`,
+      `INSERT INTO repos (forge_id, path, display_name, slug, short_id, managed_by_account_sync_id, origin, created_at, updated_at, owner_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, 'account_sync', ?, ?, (SELECT id FROM users WHERE is_admin = 1))`,
       forgeId,
       "octocat/one",
       "one",

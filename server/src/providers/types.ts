@@ -1,4 +1,5 @@
 import type { AccountSyncVisibility, ForgeKind } from "@amber/shared";
+import type { HostResolver, PinnedFetch } from "../security/egress.ts";
 
 /**
  * Forge API clients used by account sync. They only ever read: enumerate the
@@ -82,8 +83,20 @@ export interface DiscoveryContext {
   token: string | null;
   /** Honored for source 'owned'. Starred listings always take everything. */
   visibility: AccountSyncVisibility;
-  /** Defaults to globalThis.fetch. */
+  /** Defaults to globalThis.fetch. Used ONLY for an unrestricted forge. */
   fetch?: ProviderFetch;
+  /**
+   * True for a RESTRICTED forge (allow_private_network = 0). Required, so
+   * every place that builds a context has to decide. When true, every
+   * request (and every redirect hop) is vetted by security/egress.ts and
+   * sent through a connection pinned to the validated address; `fetch` is
+   * ignored, because an arbitrary fetch cannot be pinned.
+   */
+  restricted: boolean;
+  /** Test seam: the egress resolver. Defaults to the system resolver. */
+  resolveHost?: HostResolver;
+  /** Test seam: the pinned transport. Defaults to egress.ts pinnedFetch. */
+  pinnedFetch?: PinnedFetch;
 }
 
 /**

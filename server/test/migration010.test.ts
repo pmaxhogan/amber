@@ -323,13 +323,13 @@ describe("010_users constraints", () => {
       "INSERT INTO accounts (forge_id, username, is_default, owner_user_id, created_at, updated_at) VALUES (?, ?, 1, ?, 1, 1)";
     // The admin already has a default on this forge.
     expect(() => insert(sql, seeded.forgeId, "third", adminId())).toThrow(/UNIQUE/);
-    // An insert that names no owner is the admin's, and is refused the same way.
+    // An insert that names no owner is refused outright, never given to the admin.
     expect(() =>
       insert(
         "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, 'fourth', 1, 1, 1)",
         seeded.forgeId,
       ),
-    ).toThrow(/UNIQUE/);
+    ).toThrow(/accounts.owner_user_id cannot be NULL/);
     expect(insert(sql, seeded.forgeId, "friendly", friend)).toBeGreaterThan(0);
     expect(() => insert(sql, seeded.forgeId, "friendlier", friend)).toThrow(/UNIQUE/);
   });
@@ -341,11 +341,12 @@ describe("010_users constraints", () => {
 
     const sql =
       "INSERT INTO account_syncs (forge_id, account_id, source, namespace, owner_user_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 1)";
-    expect(() => insert(sql, seeded.forgeId, seeded.defaultAccountId, "owned", null, null)).toThrow(
-      /UNIQUE/,
-    );
+    const admin = adminId();
+    expect(() =>
+      insert(sql, seeded.forgeId, seeded.defaultAccountId, "owned", null, admin),
+    ).toThrow(/UNIQUE/);
     // The same name, any case, is a duplicate for the same owner...
-    expect(() => insert(sql, seeded.forgeId, null, "namespace", "nodejs", null)).toThrow(/UNIQUE/);
+    expect(() => insert(sql, seeded.forgeId, null, "namespace", "nodejs", admin)).toThrow(/UNIQUE/);
     // ...and allowed for another owner.
     expect(insert(sql, seeded.forgeId, null, "namespace", "nodejs", friend)).toBeGreaterThan(0);
     expect(() => insert(sql, seeded.forgeId, null, "namespace", "NODEJS", friend)).toThrow(
@@ -367,18 +368,30 @@ describe("010_users constraints", () => {
     ).toThrow(/UNIQUE/);
   });
 
-  it("fills a missing owner with the admin and never lets one be cleared", () => {
+  it("refuses an insert that forgets the owner and never lets one be cleared", () => {
     const seeded = seedAt009();
     migrate(db, log);
     const friend = addUser("friend@example.com");
 
-    const repoId = insert(
-      "INSERT INTO repos (forge_id, path, display_name, slug, short_id, created_at, updated_at) VALUES (?, 'x/new', 'new', 'x-new-dddddddd', 'dddddddd', 1, 1)",
-      seeded.forgeId,
-    );
-    expect(db.get("SELECT owner_user_id FROM repos WHERE id = ?", repoId)).toEqual({
-      owner_user_id: adminId(),
-    });
+    // A forgotten owner fails loudly rather than silently becoming the admin.
+    expect(() =>
+      insert(
+        "INSERT INTO repos (forge_id, path, display_name, slug, short_id, created_at, updated_at) VALUES (?, 'x/new', 'new', 'x-new-dddddddd', 'dddddddd', 1, 1)",
+        seeded.forgeId,
+      ),
+    ).toThrow(/repos.owner_user_id cannot be NULL/);
+    expect(() =>
+      insert(
+        "INSERT INTO repos (forge_id, path, display_name, slug, short_id, owner_user_id, created_at, updated_at) VALUES (?, 'x/null', 'null', 'x-null-ffffffff', 'ffffffff', NULL, 1, 1)",
+        seeded.forgeId,
+      ),
+    ).toThrow(/repos.owner_user_id cannot be NULL/);
+    expect(() =>
+      insert(
+        "INSERT INTO account_syncs (forge_id, source, namespace, created_at, updated_at) VALUES (?, 'namespace', 'denoland', 1, 1)",
+        seeded.forgeId,
+      ),
+    ).toThrow(/account_syncs.owner_user_id cannot be NULL/);
 
     const ownedId = insert(
       "INSERT INTO repos (forge_id, path, display_name, slug, short_id, owner_user_id, created_at, updated_at) VALUES (?, 'x/mine', 'mine', 'x-mine-eeeeeeee', 'eeeeeeee', ?, 1, 1)",
@@ -397,12 +410,15 @@ describe("010_users constraints", () => {
     ] as const) {
       expect(() => db.run(`UPDATE ${table} SET ${column} = NULL`), table).toThrow(/cannot be NULL/);
     }
-    const pushId = insert(
-      "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, updated_at) VALUES ('https://push.example.com/new', 'p', 'a', 1, 1)",
-    );
-    expect(db.get("SELECT user_id FROM push_subscriptions WHERE id = ?", pushId)).toEqual({
-      user_id: adminId(),
-    });
+    expect(() =>
+      insert(
+        "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, updated_at) VALUES ('https://push.example.com/new', 'p', 'a', 1, 1)",
+      ),
+    ).toThrow(/push_subscriptions.user_id cannot be NULL/);
+    // The migration's own backfill still assigned every pre-existing row explicitly.
+    expect(
+      db.get<{ n: number }>("SELECT COUNT(*) AS n FROM repos WHERE owner_user_id IS NULL"),
+    ).toEqual({ n: 0 });
   });
 
   it("refuses an owner that is not a user, and deleting a user who owns something", () => {

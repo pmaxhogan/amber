@@ -34,6 +34,8 @@ export interface SyncForgeRow {
   host: string;
   port: number | null;
   kind: ForgeKind;
+  /** False for a RESTRICTED forge: every fetch goes through security/egress.ts. */
+  allowPrivateNetwork: boolean;
 }
 
 export interface SyncTarget {
@@ -71,12 +73,14 @@ interface RepoDbRow {
   host: string;
   port: number | null;
   kind: string;
+  allow_private_network: number;
 }
 
 const TARGET_SQL = `
   SELECT r.id, r.forge_id, r.path, r.display_name, r.slug, r.account_override_id,
          r.force_anonymous, r.state, r.next_sync_at, r.consecutive_failures,
-         r.default_branch, r.last_success_at, r.gone_at, r.owner_user_id, f.protocol, f.host, f.port, f.kind
+         r.default_branch, r.last_success_at, r.gone_at, r.owner_user_id, f.protocol, f.host, f.port, f.kind,
+         f.allow_private_network
     FROM repos r
     JOIN forges f ON f.id = r.forge_id
    WHERE r.id = ?`;
@@ -109,6 +113,8 @@ export function loadSyncTarget(db: Db, repoId: number): SyncTarget | undefined {
       host: row.host,
       port: row.port,
       kind: row.kind as ForgeKind,
+      // Fail closed: only an explicit 1 lifts the restriction.
+      allowPrivateNetwork: row.allow_private_network === 1,
     },
   };
 }

@@ -57,6 +57,10 @@ export default defineConfig({
       // A throwaway key: this instance stores no real credentials.
       AMBER_SECRET_KEY: "a".repeat(64),
       LOG_LEVEL: "warn",
+      // Insecure mode makes every request the admin; these addresses stand in
+      // for the Access policy, and a request carrying X-Amber-Insecure-User
+      // acts as one of them (tests/multiuser.spec.ts).
+      INSECURE_USER_EMAILS: "friend-a@example.com,friend-b@example.com",
     },
   },
 });

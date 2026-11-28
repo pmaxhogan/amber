@@ -17,6 +17,7 @@ export type DomainErrorCode =
   | "not_a_user"
   | "policy_unavailable"
   | "host_not_enabled"
+  | "host_not_allowed"
   | "storage_cap_reached";
 
 const STATUS_BY_CODE: Record<DomainErrorCode, number> = {
@@ -31,6 +32,7 @@ const STATUS_BY_CODE: Record<DomainErrorCode, number> = {
   not_a_user: 403,
   policy_unavailable: 503,
   host_not_enabled: 403,
+  host_not_allowed: 403,
   storage_cap_reached: 403,
 };
 

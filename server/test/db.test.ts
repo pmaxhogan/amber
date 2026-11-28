@@ -181,7 +181,7 @@ describe("schema constraints", () => {
   it("allows at most one default account per forge", () => {
     const insert = (username: string, isDefault: number) =>
       db.run(
-        "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
         username,
         isDefault,
@@ -196,7 +196,7 @@ describe("schema constraints", () => {
   it("enforces the forge+path uniqueness on repos", () => {
     const insert = (path: string, slug: string, shortId: string) =>
       db.run(
-        "INSERT INTO repos (forge_id, path, display_name, slug, short_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO repos (forge_id, path, display_name, slug, short_id, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))",
         forgeId,
         path,
         path.slice(path.lastIndexOf("/") + 1),
@@ -213,7 +213,7 @@ describe("schema constraints", () => {
   it("enforces foreign keys", () => {
     expect(() =>
       db.run(
-        "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))",
         999,
         "ghost",
         0,

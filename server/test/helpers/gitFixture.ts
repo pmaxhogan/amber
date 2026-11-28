@@ -236,8 +236,8 @@ export function insertRepoRow(
   const path = options.path ?? `fixtures/${options.slug}`;
   const result = db.run(
     `INSERT INTO repos (forge_id, path, display_name, slug, short_id, state, consecutive_failures,
-                        default_branch, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)`,
+                        default_branch, created_at, updated_at, owner_user_id)
+     VALUES (?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))`,
     forgeId,
     path,
     options.displayName ?? options.slug,

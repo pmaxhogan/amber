@@ -98,3 +98,33 @@ export function scratchDir(prefix: string): string {
 export function removeDir(dir: string): void {
   rmSync(dir, { recursive: true, force: true });
 }
+
+/**
+ * Register a loopback fixture server as an UNRESTRICTED forge, as the admin.
+ *
+ * A new host is a restricted forge unless the admin says otherwise, and a
+ * restricted forge may only reach public addresses over plain http(s) on the
+ * default ports (docs/ARCHITECTURE.md "Forges and outbound requests"). The
+ * fixture servers live on 127.0.0.1 and a random port, so each one has to be
+ * allowed explicitly before anything is imported from it. Idempotent.
+ */
+export async function allowLoopbackForge(baseUrl: string, origin: string): Promise<number> {
+  const url = new URL(origin);
+  const response = await fetch(`${baseUrl}/api/forges`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      protocol: url.protocol.replace(":", ""),
+      host: url.hostname,
+      port: Number(url.port),
+      kind: "generic",
+      allowPrivateNetwork: true,
+    }),
+  });
+  if (response.status !== 200 && response.status !== 201) {
+    throw new Error(
+      `POST /api/forges failed with ${String(response.status)}: ${await response.text()}`,
+    );
+  }
+  return ((await response.json()) as { id: number }).id;
+}

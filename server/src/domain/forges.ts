@@ -1,5 +1,6 @@
 import type { CreateForge, Forge, ForgeKind, ForgeProtocol, UpdateForge } from "@amber/shared";
 import type { Db } from "../db/db.ts";
+import { vetRestrictedTarget, type HostResolver } from "../security/egress.ts";
 import {
   conflict,
   DomainError,
@@ -157,21 +158,28 @@ export function assertMaySetPrivateNetwork(user: User, wanted: boolean | undefin
 
 /**
  * EGRESS SEAM. Called right before a NEW forge row is created, by the forges
- * API and by import's new-host path, outside any database transaction so it
- * may resolve DNS. Today it checks nothing: the egress wave fills it in
- * (security/egress.ts: a restricted forge must be plain https on 443 or http
- * on 80, its host must not be an IP literal, and every address it resolves
- * to must be public). It throws a DomainError to refuse.
+ * API and by import's new-host path, outside any database transaction because
+ * it resolves DNS. A RESTRICTED forge (every forge not created by the admin
+ * with allowPrivateNetwork) must pass security/egress.ts vetRestrictedTarget:
+ * plain https on 443 or http on 80, a DNS name rather than an IP literal, and
+ * every address it resolves to public. The same rule runs again before every
+ * outbound request (sync/syncRepo.ts, providers/http.ts); this creation check
+ * only stops an unusable forge from being created. Throws a DomainError
+ * (`host_not_allowed`) to refuse.
  */
 export async function assertForgeAllowed(
   origin: ForgeOrigin,
   actor: User,
   options: { allowPrivateNetwork: boolean },
+  resolver?: HostResolver,
 ): Promise<void> {
-  void origin;
-  void actor;
-  void options;
-  await Promise.resolve();
+  if (options.allowPrivateNetwork) {
+    // Unrestricted forges are the admin's alone, and are not checked at all.
+    // Re-asserted here so no caller can skip the check by passing the flag.
+    assertMaySetPrivateNetwork(actor, true);
+    return;
+  }
+  await vetRestrictedTarget(origin, resolver);
 }
 
 /**

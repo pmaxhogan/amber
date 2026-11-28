@@ -575,14 +575,15 @@ CREATE INDEX idx_push_subscriptions_user ON push_subscriptions (user_id);
 DELETE FROM kv WHERE key IN ('git_remote.username', 'git_remote.password_hash', 'git_remote.rotated_at');
 
 -- NOT NULL in effect, enforced by the database rather than by every caller
--- remembering to: an insert that leaves the owner NULL gets the admin, and an
--- update can never clear it. The fill runs as an UPDATE, so the per-owner
--- unique indexes above are checked against the real owner and still refuse a
--- duplicate.
-CREATE TRIGGER trg_repos_owner_fill AFTER INSERT ON repos
+-- remembering to (SQLite cannot add NOT NULL to an existing column without a
+-- table rebuild, and a rebuild of accounts would cascade into account_syncs).
+-- An insert or update that leaves the owner NULL is REFUSED: a forgotten owner
+-- must fail loudly, never be silently handed to the admin. The backfill above
+-- assigns the placeholder admin explicitly, before these triggers exist.
+CREATE TRIGGER trg_repos_owner_required BEFORE INSERT ON repos
   WHEN NEW.owner_user_id IS NULL
 BEGIN
-  UPDATE repos SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1) WHERE id = NEW.id;
+  SELECT RAISE(ABORT, 'repos.owner_user_id cannot be NULL');
 END;
 CREATE TRIGGER trg_repos_owner_keep BEFORE UPDATE OF owner_user_id ON repos
   WHEN NEW.owner_user_id IS NULL
@@ -590,10 +591,10 @@ BEGIN
   SELECT RAISE(ABORT, 'repos.owner_user_id cannot be NULL');
 END;
 
-CREATE TRIGGER trg_accounts_owner_fill AFTER INSERT ON accounts
+CREATE TRIGGER trg_accounts_owner_required BEFORE INSERT ON accounts
   WHEN NEW.owner_user_id IS NULL
 BEGIN
-  UPDATE accounts SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1) WHERE id = NEW.id;
+  SELECT RAISE(ABORT, 'accounts.owner_user_id cannot be NULL');
 END;
 CREATE TRIGGER trg_accounts_owner_keep BEFORE UPDATE OF owner_user_id ON accounts
   WHEN NEW.owner_user_id IS NULL
@@ -601,11 +602,10 @@ BEGIN
   SELECT RAISE(ABORT, 'accounts.owner_user_id cannot be NULL');
 END;
 
-CREATE TRIGGER trg_account_syncs_owner_fill AFTER INSERT ON account_syncs
+CREATE TRIGGER trg_account_syncs_owner_required BEFORE INSERT ON account_syncs
   WHEN NEW.owner_user_id IS NULL
 BEGIN
-  UPDATE account_syncs SET owner_user_id = (SELECT id FROM users WHERE is_admin = 1)
-   WHERE id = NEW.id;
+  SELECT RAISE(ABORT, 'account_syncs.owner_user_id cannot be NULL');
 END;
 CREATE TRIGGER trg_account_syncs_owner_keep BEFORE UPDATE OF owner_user_id ON account_syncs
   WHEN NEW.owner_user_id IS NULL
@@ -613,11 +613,10 @@ BEGIN
   SELECT RAISE(ABORT, 'account_syncs.owner_user_id cannot be NULL');
 END;
 
-CREATE TRIGGER trg_push_subscriptions_user_fill AFTER INSERT ON push_subscriptions
+CREATE TRIGGER trg_push_subscriptions_user_required BEFORE INSERT ON push_subscriptions
   WHEN NEW.user_id IS NULL
 BEGIN
-  UPDATE push_subscriptions SET user_id = (SELECT id FROM users WHERE is_admin = 1)
-   WHERE id = NEW.id;
+  SELECT RAISE(ABORT, 'push_subscriptions.user_id cannot be NULL');
 END;
 CREATE TRIGGER trg_push_subscriptions_user_keep BEFORE UPDATE OF user_id ON push_subscriptions
   WHEN NEW.user_id IS NULL

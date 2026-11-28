@@ -7,6 +7,7 @@ import {
 } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
+import type { HostResolver, PinnedFetch } from "../security/egress.ts";
 import {
   buildSlug as domainBuildSlug,
   generateShortId as domainGenerateShortId,
@@ -73,6 +74,9 @@ export interface DiscoveryDeps {
   random?: () => number;
   /** Passed through to the provider, so tests can supply a MockAgent fetch. */
   fetch?: ProviderFetch;
+  /** Egress test seams for restricted forges (security/egress.ts). */
+  resolveHost?: HostResolver;
+  pinnedFetch?: PinnedFetch;
   /**
    * The importer and discovery share these; discovery reaches them through a
    * seam so tests do not need the whole domain layer wired up.
@@ -121,6 +125,7 @@ interface ForgeRow {
   host: string;
   port: number | null;
   kind: ForgeKind;
+  allow_private_network: number;
 }
 
 interface ManagedRepoRow {
@@ -352,7 +357,7 @@ export async function runAccountSyncDetailed(
   const startedAt = now();
   try {
     const forge = db.get<ForgeRow>(
-      "SELECT id, protocol, host, port, kind FROM forges WHERE id = ?",
+      "SELECT id, protocol, host, port, kind, allow_private_network FROM forges WHERE id = ?",
       row.forge_id,
     );
     if (forge === undefined) {
@@ -424,6 +429,10 @@ export async function runAccountSyncDetailed(
       // Visibility is an owned-sync concept; a starred list is whatever it is.
       visibility: row.source === "starred" || row.source === "trending" ? "all" : row.visibility,
       fetch: deps.fetch,
+      // Fail closed: only an explicit 1 lifts the egress guard.
+      restricted: forge.allow_private_network !== 1,
+      resolveHost: deps.resolveHost,
+      pinnedFetch: deps.pinnedFetch,
     };
 
     const iterable = listingFor(provider, context, row, startedAt);

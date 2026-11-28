@@ -1,5 +1,6 @@
 import { createServer } from "node:net";
 import { test as base } from "@playwright/test";
+import { allowLoopbackForge } from "./helpers.ts";
 import { HOSTILE, buildHostileRepo, type HostileBuild } from "./hostileRepo.ts";
 import {
   RICH,
@@ -58,6 +59,7 @@ async function listRows(): Promise<Row[]> {
 }
 
 async function importAndSync(server: LocalGitServer, names: string[]): Promise<Row[]> {
+  await allowLoopbackForge(baseUrl, server.origin);
   const text = names.map((name) => server.urlFor(name)).join("\n");
   const response = await fetch(`${baseUrl}/api/import`, {
     method: "POST",

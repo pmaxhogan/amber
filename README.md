@@ -41,7 +41,12 @@ out as a read-only git remote.
   branch, so a repository with thousands of branches stays small.
 - **Layered settings.** Configure at the global, forge, account, or repository
   scope. The narrowest scope wins, and the UI shows you which one did.
-- **Read-only git remote.** `git clone` straight from your backup.
+- **Read-only git remote.** `git clone` straight from your backup, with a
+  personal credential per person.
+- **Share it with friends.** Add a few people and decide what each may do:
+  see each other's public repositories, import, browse, export, clone over git,
+  with a storage cap per person. Everyone's own repositories and credentials
+  stay theirs.
 - **Exports.** Download the source tree or the entire backup directory as zip,
   tar.gz, or 7z.
 - **Resilient scheduling.** Persistent per-repo schedules, exponential backoff
@@ -61,8 +66,8 @@ automatically.
 curl -fsSLO https://raw.githubusercontent.com/pmaxhogan/amber/main/deploy/docker-compose.example.yml
 curl -fsSL https://raw.githubusercontent.com/pmaxhogan/amber/main/.env.example -o .env
 # Edit docker-compose.example.yml: point the volume and env_file at your data
-# directory and set user: to its owner. Fill in AMBER_SECRET_KEY and the
-# Cloudflare Access settings in .env, then:
+# directory and set user: to its owner. Fill in AMBER_SECRET_KEY, your
+# AMBER_ADMIN_EMAIL and the Cloudflare Access settings in .env, then:
 docker compose -f docker-compose.example.yml up -d
 ```
 
@@ -80,9 +85,38 @@ docker compose -f docker-compose.local.yml up --build
 
 Amber has no built-in login. It expects to sit behind an authenticating proxy;
 the supported setup is a Cloudflare Tunnel with a Cloudflare Access application
-in front of it, and the server verifies the Access JWT on every request.
+in front of it, and the server verifies the Access JWT on every request. The
+one address in `AMBER_ADMIN_EMAIL` is the admin.
 [`deploy/docker-compose.example.yml`](deploy/docker-compose.example.yml) is a
 starting point for a real deployment.
+
+### Sharing Amber with other people
+
+By default Amber is admin-only. To let a few friends in:
+
+1. Set `AMBER_ADMIN_EMAIL` (for example `you@example.com`) in `.env`. The admin
+   holds every permission, is never capped, and cannot be locked out by a
+   policy edit or a Cloudflare API outage.
+2. In Cloudflare Zero Trust, create a reusable Access policy that lists your
+   friends' email addresses (explicit email rules, for example
+   `friend@example.com`) and attach it to the Amber Access application. Other
+   rule types (domains, groups, everyone) cannot be read by Amber, so someone
+   admitted only by one of those is refused.
+3. Create an API token with exactly one permission, "Access: Apps and Policies
+   Read", and set `CF_API_TOKEN`, `CF_ACCOUNT_ID` and `CF_ACCESS_POLICY_ID` (the
+   policy's id) in `.env`. Set all three or none. Restart Amber.
+4. Open the Users page. Amber reads the policy every five minutes (the page has a refresh
+   button), and each address in it appears with the default permissions and a
+   default storage cap of 5 GB. The admin adjusts the
+   permissions and the cap per person there, can revoke someone's git password,
+   and can adopt the repositories of a user who has left.
+5. Each person creates their own git password on the Git Remote page (shown
+   once). It only reaches the repositories that person can see. The admin turns
+   the git remote on or off for everyone.
+
+Removing an email from the policy removes that person's web and git access
+within about a minute, and deletes their git password. Their repositories stay
+and keep syncing until the admin adopts or deletes them.
 
 For local development you can set `INSECURE_ALLOW_PUBLIC_ACCESS=1`, which skips
 authentication entirely. Amber then binds `127.0.0.1` only, no matter what

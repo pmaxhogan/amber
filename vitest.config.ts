@@ -22,6 +22,8 @@ export default defineConfig({
           root: "./server",
           environment: "node",
           include: ["test/**/*.test.ts"],
+          // Replaces the egress guard's resolver so no test can reach real DNS.
+          setupFiles: ["./test/setup/noRealDns.ts"],
           // Integration tests create real git repos and sqlite files in temp dirs.
           testTimeout: 30_000,
           hookTimeout: 30_000,

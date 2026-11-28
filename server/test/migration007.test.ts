@@ -128,7 +128,7 @@ describe("007_gone_and_push", () => {
     migrate(db, log);
 
     const insert =
-      "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, updated_at) VALUES (?, 'k', 'a', 1, 1)";
+      "INSERT INTO push_subscriptions (endpoint, p256dh, auth, created_at, updated_at, user_id) VALUES (?, 'k', 'a', 1, 1, (SELECT id FROM users WHERE is_admin = 1))";
     expect(db.all("SELECT * FROM push_subscriptions")).toEqual([]);
     db.run(insert, "https://push.example/one");
     expect(() => db.run(insert, "https://push.example/one")).toThrow(/UNIQUE/);

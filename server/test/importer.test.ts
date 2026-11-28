@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../src/db/db.ts";
 import { createAccount, deleteAccount } from "../src/domain/accounts.ts";
-import { listForges } from "../src/domain/forges.ts";
+import { listForges, upsertForge } from "../src/domain/forges.ts";
 import {
   commitImport,
   previewImport,
@@ -12,6 +12,10 @@ import {
 import { getRepo, listRepos } from "../src/domain/repos.ts";
 import { createTempDb, TEST_SECRET_KEY, type TempDb } from "./helpers.ts";
 import { adminOf } from "./helpers/users.ts";
+import { usePublicDns } from "./helpers/egress.ts";
+
+// Forge creation vets the host (security/egress.ts); every name is public here.
+usePublicDns();
 
 const KEY = Buffer.from(TEST_SECRET_KEY, "hex");
 const NOW = 1_700_000_000_000;
@@ -147,6 +151,14 @@ describe("commitImport creates forges and repos", () => {
   });
 
   it("keeps hosts, protocols, and ports apart", async () => {
+    // Import only ever creates RESTRICTED forges, which must use the standard
+    // port, so the odd-port origin is one the admin created unrestricted.
+    upsertForge(db, {
+      protocol: "https",
+      host: "git.example.com",
+      port: 8443,
+      allowPrivateNetwork: true,
+    });
     await commitImport(
       db,
       adminOf(db),
@@ -159,6 +171,14 @@ describe("commitImport creates forges and repos", () => {
     );
     expect(imported()).toHaveLength(3);
     expect(all().total).toBe(3);
+  });
+
+  it("refuses a new odd-port host even for the admin, with host_not_allowed", async () => {
+    const result = await commitImport(db, adminOf(db), "https://git.example.com:8443/a/b", {
+      now: NOW,
+    });
+    expect(result.results[0]).toMatchObject({ action: "failed", code: "host_not_allowed" });
+    expect(listForges(db).some((forge) => forge.host === "git.example.com")).toBe(false);
   });
 
   it("reports created, updated, and failed counts", async () => {

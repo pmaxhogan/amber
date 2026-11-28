@@ -18,6 +18,10 @@ import { loadSyncTarget, resolveRepoAccount } from "../../src/sync/repoStore.ts"
 import { asUser } from "../helpers/accessFixtures.ts";
 import { createTempApp, seedForge, type TempApp } from "../helpers.ts";
 import { adminOf, makeUser } from "../helpers/users.ts";
+import { usePublicDns } from "../helpers/egress.ts";
+
+// Forge creation vets the host (security/egress.ts); every name is public here.
+usePublicDns();
 
 /**
  * Who owns what, and whose token fetches what: accounts, forges, account

@@ -89,15 +89,30 @@ export const IMPORT_FAILURE_LABELS: Record<ImportFailureKind, string> = {
 };
 
 /**
- * Name why an import line failed, from the line's message. The import results
- * carry the server's wording and no machine-readable code, so this reads the
- * wording; a line it does not recognise is the generic "could not import".
+ * Name why an import line failed. The server sets a machine-readable `code` on
+ * a refusal it wants named (`host_not_enabled`, `storage_cap_reached`); the
+ * generic "could not import" refusal deliberately has none. A line without a
+ * code falls back to reading the wording, and anything unrecognised is the
+ * generic "could not import".
  */
-export function importFailureKind(message: string | undefined): ImportFailureKind {
+export function importFailureKind(
+  code: string | undefined,
+  message?: string | undefined,
+): ImportFailureKind {
+  if (code === "host_not_enabled" || code === "storage_cap_reached") return code;
+  if (code !== undefined) return "not_imported";
   const text = (message ?? "").toLowerCase();
   if (text.includes("host") && text.includes("not enabled")) return "host_not_enabled";
   if (text.includes("storage") && (text.includes("cap") || text.includes("limit"))) {
     return "storage_cap_reached";
   }
   return "not_imported";
+}
+
+/** One sentence naming why a bulk action skipped repositories, from the server's own messages. */
+export function refusedReason(refused: readonly { message: string }[]): string {
+  const messages = [...new Set(refused.map((entry) => entry.message))];
+  return messages.length === 0
+    ? "You can only change repositories you own, unless you have been given more access."
+    : messages.join(" ");
 }

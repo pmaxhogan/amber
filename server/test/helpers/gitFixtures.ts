@@ -114,19 +114,32 @@ export function createTestDb(dir: string): Db {
   return db;
 }
 
+/**
+ * A forge for the sync fixtures. UNRESTRICTED by default: these syncs fetch
+ * from local file:// origins, which the egress guard (rightly) refuses for a
+ * restricted forge. Tests of the guard pass `allowPrivateNetwork: false`.
+ */
 export function insertForge(
   db: Db,
-  values: { protocol?: string; host: string; port?: number | null; kind?: string } = {
+  values: {
+    protocol?: string;
+    host: string;
+    port?: number | null;
+    kind?: string;
+    allowPrivateNetwork?: boolean;
+  } = {
     host: "example.test",
   },
 ): number {
   const now = Date.now();
   return db.run(
-    "INSERT INTO forges (protocol, host, port, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    `INSERT INTO forges (protocol, host, port, kind, allow_private_network, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     values.protocol ?? "https",
     values.host,
     values.port ?? null,
     values.kind ?? "generic",
+    values.allowPrivateNetwork === false ? 0 : 1,
     now,
     now,
   ).lastInsertRowid;
@@ -141,8 +154,8 @@ export function insertRepo(
   const slug = values.slug ?? `${values.path.replace(/[^a-z0-9]+/gi, "-")}-${shortId}`;
   return db.run(
     `INSERT INTO repos (forge_id, path, display_name, slug, short_id, state, next_sync_at,
-                        consecutive_failures, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+                        consecutive_failures, created_at, updated_at, owner_user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, (SELECT id FROM users WHERE is_admin = 1))`,
     values.forgeId,
     values.path,
     values.path.slice(values.path.lastIndexOf("/") + 1),

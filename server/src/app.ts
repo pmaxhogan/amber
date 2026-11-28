@@ -196,13 +196,26 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
   // refuses it. Installed in insecure mode too, where there is no token.
   await app.register(identityPlugin, { config: ctx.config, db: ctx.db, policy, now });
   /**
-   * The coarse authorization check for every /api request. At the root, by
-   * PATH, for the same reason the boot check is: an /api route registered
-   * outside the apiRoutes plugin must not slip past enforcement while looking
-   * declared in the route table. Runs after identity, so request.user is set.
+   * The coarse authorization check for every /api request. At the root, for
+   * the same reason the boot check is: an /api route registered outside the
+   * apiRoutes plugin must not slip past enforcement while looking declared in
+   * the route table. Runs after identity, so request.user is set.
+   *
+   * Whether a request is an /api request is decided by the route the router
+   * MATCHED, never by the raw URL alone. The router percent-decodes before it
+   * matches, so `/%61pi/users` reaches the `/api/users` handler while its raw
+   * URL does not start with `/api`: a check keyed on the raw URL waved that
+   * through with no permission check at all. The raw path is still consulted
+   * so an unknown /api path gets the pinned 404 only for an accepted identity,
+   * and any route that declares an authz requirement is enforced wherever it
+   * is mounted.
    */
   app.addHook("onRequest", async (request, reply) => {
-    if (!isApiPath(requestPathname(request.url))) {
+    const matched = request.is404 ? undefined : request.routeOptions.url;
+    const matchedApi = matched !== undefined && isApiPath(matched);
+    const declared =
+      !request.is404 && (request.routeOptions.config as { authz?: unknown }).authz !== undefined;
+    if (!matchedApi && !declared && !isApiPath(requestPathname(request.url))) {
       return undefined;
     }
     return enforceRouteAuthz(request, reply);

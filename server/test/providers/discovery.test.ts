@@ -150,7 +150,7 @@ function seed(options: { kind?: string; secret?: Uint8Array | null } = {}): {
     1,
   ).lastInsertRowid;
   const accountId = db.run(
-    "INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))",
     forgeId,
     "octocat",
     options.secret ?? null,
@@ -167,8 +167,8 @@ function createSync(
   overrides: { visibility?: string; enabled?: number; intervalMinutes?: number } = {},
 ): number {
   return db.run(
-    `INSERT INTO account_syncs (forge_id, account_id, source, visibility, enabled, interval_minutes, next_run_at, created_at, updated_at)
-     VALUES ((SELECT forge_id FROM accounts WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO account_syncs (forge_id, account_id, source, visibility, enabled, interval_minutes, next_run_at, created_at, updated_at, owner_user_id)
+     VALUES ((SELECT forge_id FROM accounts WHERE id = ?), ?, ?, ?, ?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))`,
     accountId,
     accountId,
     source,
@@ -296,8 +296,8 @@ describe("runAccountSync, owned", () => {
     const { forgeId, accountId } = seed();
     const syncId = createSync(accountId);
     const manual = db.run(
-      `INSERT INTO repos (forge_id, path, display_name, slug, short_id, state, next_sync_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'paused', ?, ?, ?)`,
+      `INSERT INTO repos (forge_id, path, display_name, slug, short_id, state, next_sync_at, created_at, updated_at, owner_user_id)
+       VALUES (?, ?, ?, ?, ?, 'paused', ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))`,
       forgeId,
       "octocat/one",
       "one",
@@ -399,7 +399,7 @@ describe("runAccountSync, owned", () => {
       1,
     ).lastInsertRowid;
     const accountId = db.run(
-      "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))",
       forgeId,
       "maintainer",
       1,
@@ -647,8 +647,8 @@ describe("runAccountSync, starred", () => {
     const { forgeId, accountId } = seed();
     const syncId = createSync(accountId, "starred");
     db.run(
-      `INSERT INTO repos (forge_id, path, display_name, slug, short_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO repos (forge_id, path, display_name, slug, short_id, created_at, updated_at, owner_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))`,
       forgeId,
       "nodejs/node",
       "node",
@@ -752,7 +752,7 @@ describe("scheduling helpers", () => {
     const owned = createSync(accountId, "owned");
     const starred = createSync(accountId, "starred");
     const disabled = db.run(
-      `INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO accounts (forge_id, username, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, ?, (SELECT id FROM users WHERE is_admin = 1))`,
       forgeId,
       "other",
       0,
@@ -809,8 +809,8 @@ describe("runAccountSync, namespace", () => {
   ) {
     return db.run(
       `INSERT INTO account_syncs (forge_id, account_id, source, namespace, visibility, enabled,
-         interval_minutes, created_at, updated_at)
-       VALUES (?, ?, 'namespace', ?, 'all', 1, 360, 1, 1)`,
+         interval_minutes, created_at, updated_at, owner_user_id)
+       VALUES (?, ?, 'namespace', ?, 'all', 1, 360, 1, 1, (SELECT id FROM users WHERE is_admin = 1))`,
       forgeId,
       accountId,
       namespace,
@@ -819,7 +819,7 @@ describe("runAccountSync, namespace", () => {
 
   function insertAccount(forgeId: number, username: string, isDefault = 0): number {
     return db.run(
-      "INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1)",
+      "INSERT INTO accounts (forge_id, username, secret_enc, is_default, created_at, updated_at, owner_user_id) VALUES (?, ?, ?, ?, 1, 1, (SELECT id FROM users WHERE is_admin = 1))",
       forgeId,
       username,
       new Uint8Array([9]),
@@ -978,8 +978,8 @@ describe("runAccountSync, trending", () => {
 
   function createTrending(forgeId: number, topN = 10, windowDays = 3): number {
     return db.run(
-      `INSERT INTO account_syncs (forge_id, source, top_n, window_days, enabled, interval_minutes, created_at, updated_at)
-       VALUES (?, 'trending', ?, ?, 1, 1440, 1, 1)`,
+      `INSERT INTO account_syncs (forge_id, source, top_n, window_days, enabled, interval_minutes, created_at, updated_at, owner_user_id)
+       VALUES (?, 'trending', ?, ?, 1, 1440, 1, 1, (SELECT id FROM users WHERE is_admin = 1))`,
       forgeId,
       topN,
       windowDays,

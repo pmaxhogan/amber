@@ -88,7 +88,12 @@ async function runImport(): Promise<void> {
         ? [pluralize(namespaces, "user or organization", "users or organizations")]
         : []),
     ].join(" and ");
-    if (result.failed > 0) {
+    if (result.failed === 0 && result.created === 0 && result.updated > 0) {
+      toast.info(
+        "Already backed up",
+        "Nothing was changed: every repository on the list is already in Amber.",
+      );
+    } else if (result.failed > 0) {
       toast.warn(
         `Imported ${result.created + result.updated}, ${result.failed} failed`,
         "Check the results table for the lines that did not import.",
@@ -226,7 +231,7 @@ function statusIcon(status: string): string {
       <h2>Import results</h2>
       <p class="import-summary">
         <span class="chip chip--ok">{{ committed.created }} created</span>
-        <span class="chip chip--warning">{{ committed.updated }} updated</span>
+        <span class="chip chip--neutral">{{ committed.updated }} updated</span>
         <span class="chip chip--error">{{ committed.failed }} failed</span>
       </p>
       <DataTable
@@ -260,7 +265,7 @@ function statusIcon(status: string): string {
               data-testid="import-failure"
             >
               <Tag
-                :value="IMPORT_FAILURE_LABELS[importFailureKind(data.message)]"
+                :value="IMPORT_FAILURE_LABELS[importFailureKind(data.code, data.message)]"
                 severity="danger"
               />
               <span v-if="data.message">{{ data.message }}</span>
@@ -335,6 +340,10 @@ function statusIcon(status: string): string {
   background: var(--amber-success-bg);
 }
 
+.chip--neutral {
+  color: var(--p-text-muted-color);
+}
+
 .chip--warning {
   color: var(--amber-warn);
   background: var(--amber-warn-bg);
@@ -364,8 +373,7 @@ function statusIcon(status: string): string {
   color: var(--amber-error);
 }
 
-:deep(.import-row--warning),
-:deep(.import-row--updated) {
+:deep(.import-row--warning) {
   background: var(--amber-warn-bg);
 }
 

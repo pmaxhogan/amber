@@ -36,6 +36,9 @@ export function context(overrides: Partial<DiscoveryContext> = {}): DiscoveryCon
     username: "octocat",
     token: null,
     visibility: "all",
+    // Unrestricted unless a test asks: these exercise the provider clients,
+    // and the egress guard has its own tests (egress.test.ts).
+    restricted: false,
     ...overrides,
   };
 }

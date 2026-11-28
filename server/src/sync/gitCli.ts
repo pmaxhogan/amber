@@ -26,6 +26,13 @@ export interface GitRunOptions {
   timeoutMs?: number;
   /** Extra -c overrides on top of the pinned hardening set. */
   config?: Record<string, string>;
+  /**
+   * Ordered -c entries appended after everything else, for multi-valued keys
+   * where order matters (security/egress.ts gitPinConfig: an empty
+   * http.curloptResolve reset, then the pin). Being last on the command line
+   * they win over repository config and over `config` above.
+   */
+  configList?: readonly (readonly [string, string])[];
   env?: Record<string, string>;
   maxBufferBytes?: number;
   /** Fed to the child's stdin, which is closed immediately when absent. */
@@ -307,6 +314,9 @@ function configArgs(runtime: GitRuntime, options: GitRunOptions): string[] {
 
   const args: string[] = [];
   for (const [key, value] of Object.entries(config)) {
+    args.push("-c", `${key}=${value}`);
+  }
+  for (const [key, value] of options.configList ?? []) {
     args.push("-c", `${key}=${value}`);
   }
   return args;

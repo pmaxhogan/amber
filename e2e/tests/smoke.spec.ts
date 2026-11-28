@@ -24,6 +24,7 @@ import {
 test.describe.configure({ mode: "serial" });
 
 let gitRemotePassword: string | null = null;
+let gitRemoteUsername: string | null = null;
 
 test("shows the insecure mode banner on every page", async ({ page }) => {
   await page.goto("/");
@@ -93,40 +94,52 @@ test("exports the source tree as a valid zip", async ({ request }) => {
   expect(body.includes(Buffer.from([0x50, 0x4b, 0x05, 0x06]))).toBe(true);
 });
 
-test("enables the git remote and reveals the password exactly once", async ({ page, request }) => {
-  // Start from off, so a retry of this test enables a remote that is already
-  // on and finds no button. Disabling also destroys the old password hash,
-  // which is what makes the reveal below a genuinely fresh one.
-  await request.post("/api/git-remote/disable");
+test("creates a personal git password and reveals it exactly once", async ({ page, request }) => {
+  // The admin owns the kill switch. Turning it on is idempotent, so a retry of
+  // this test finds it on already.
+  const enabled = await request.post("/api/git-remote/enable");
+  expect(enabled.status()).toBe(200);
 
   await page.goto("/git-remote");
+  await expect(page.getByTestId("remote-state")).toHaveText("remote on");
 
-  await page.getByRole("button", { name: "Enable read-only remote" }).click();
-  await page.getByRole("button", { name: "Enable and show the password" }).click();
+  // Each person mints their own credential; there is no instance-wide one.
+  const rotateButton = page.getByRole("button", { name: /^(Create|Rotate) password$/ });
+  await rotateButton.click();
+  // A retry finds a password already set and asked to confirm the rotation.
+  const confirm = page.getByRole("button", { name: "Rotate and show the new password" });
+  if (await confirm.isVisible().catch(() => false)) await confirm.click();
 
   const reveal = page.getByTestId("password-reveal");
   await expect(reveal).toBeVisible();
 
-  const password = await reveal.getByRole("textbox", { name: "Git remote password" }).inputValue();
+  const password = await reveal.getByRole("textbox", { name: "Git password" }).inputValue();
   // base58: 32 characters with no look-alikes.
   expect(password).toMatch(/^[1-9A-HJ-NP-Za-km-z]{20,}$/);
   gitRemotePassword = password;
 
+  // The username is a random 10 character slug, never derived from the email.
+  const username = (await page.getByTestId("git-username").textContent())?.trim() ?? "";
+  expect(username).toMatch(/^[a-z0-9]{10}$/);
+  gitRemoteUsername = username;
+
   await page.reload();
   // Shown once and only once: a reload must not surface it again.
   await expect(page.getByTestId("password-reveal")).toHaveCount(0);
+  await expect(page.getByTestId("git-username")).toHaveText(username);
 });
 
 test("serves a real clone and refuses a push", async ({ request, baseURL }) => {
   expect(gitRemotePassword).not.toBeNull();
   const password = gitRemotePassword!;
+  const username = gitRemoteUsername!;
 
   const rows = await fetchRepos(request);
   const repo = rows.find((row) => row.path === FIXTURE_PATH);
   expect(repo).toBeDefined();
 
   const origin = new URL(baseURL ?? "http://127.0.0.1:8099");
-  const cloneUrl = `${origin.protocol}//amber:${encodeURIComponent(password)}@${origin.host}/git/${repo!.slug}.git`;
+  const cloneUrl = `${origin.protocol}//${username}:${encodeURIComponent(password)}@${origin.host}/git/${repo!.slug}.git`;
 
   const dir = scratchDir("clone");
   try {
