@@ -586,7 +586,14 @@ onMounted(() => void load());
   align-items: flex-start;
 }
 
+/* The switch must keep its width: as a shrinkable flex item it collapsed in a
+   narrow column and sat on top of the first letters of its label. */
+.perm :deep(.p-toggleswitch) {
+  flex: none;
+}
+
 .perm label {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 0.1rem;
