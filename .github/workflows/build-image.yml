@@ -108,7 +108,7 @@ jobs:
             echo "git in the image ignores http.curloptResolve"
             exit 1
           fi
-          echo "$pinned" | grep -Eq "404|not found
+          echo "$pinned" | grep -Eiq "404|not found"
           docker logs amber-smoke
 
       - name: Tear down the smoke container
