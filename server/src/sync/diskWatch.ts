@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
-import { readdir, rm, statfs } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, readdir, realpath, rm, statfs, unlink } from "node:fs/promises";
+import { dirname, join, sep } from "node:path";
 import type { Db } from "../db/db.ts";
 import { CAP_CEILING_FACTOR } from "../domain/caps.ts";
 import { getUser, userCapBytes, userUsageBytes } from "../domain/users.ts";
@@ -203,34 +203,99 @@ export async function startDiskWatch(options: DiskWatchOptions): Promise<DiskWat
   };
 }
 
+/** Which on-disk layout a backup has: its git dir is `dir` (bare) or `dir/.git`. */
+export type RepoLayout = "bare" | "worktree";
+
+/** A real directory, not a symlink to one (lstat never follows the link). */
+async function isRealDirectory(path: string): Promise<boolean> {
+  try {
+    return (await lstat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Remove what a killed fetch leaves behind: git's temporary packs
  * (`objects/pack/tmp_*`, `objects/incoming-*` quarantines) and git-lfs's
  * partial downloads (`lfs/tmp`, `lfs/incomplete`). Complete objects and refs
  * are left alone, so the backup that existed before the sync is untouched.
- * Works for both layouts (bare, and a working tree's `.git`).
+ *
+ * HOSTILE INPUT. In the `full` layout `dir` is a WORKING TREE, which holds
+ * whatever the upstream committed: an `objects/` directory, or symlinks
+ * named `lfs` or `objects` pointing anywhere the amber uid can write. So:
+ * - exactly ONE git dir is cleaned, chosen from the layout the sync engine
+ *   already detected (bare: `dir`; worktree: `dir/.git`), never by probing
+ *   the working tree;
+ * - the git dir and every directory walked (`objects`, `objects/pack`, `lfs`)
+ *   must be a real directory by lstat, and a symlink anywhere is skipped;
+ * - every removal target is lstat-checked and its realpath must stay under
+ *   the git dir's realpath, and `rm` is only ever handed a path whose every
+ *   component was checked, so no link is followed.
  */
-export async function cleanupPartialFetch(dir: string): Promise<void> {
-  for (const gitDir of [dir, join(dir, ".git")]) {
-    const objects = join(gitDir, "objects");
-    if (!existsSync(objects)) {
-      continue;
+export async function cleanupPartialFetch(dir: string, layout: RepoLayout): Promise<void> {
+  const gitDir = layout === "bare" ? dir : join(dir, ".git");
+  if (!(await isRealDirectory(gitDir))) {
+    return;
+  }
+  let root: string;
+  try {
+    root = await realpath(gitDir);
+  } catch {
+    return;
+  }
+  const inside = async (path: string): Promise<boolean> => {
+    try {
+      const resolved = await realpath(path);
+      return resolved === root || resolved.startsWith(`${root}${sep}`);
+    } catch {
+      return false;
     }
-    const removals: string[] = [];
+  };
+
+  const candidates: string[] = [];
+  const objects = join(gitDir, "objects");
+  if (await isRealDirectory(objects)) {
     for (const name of await readdir(objects).catch(() => [] as string[])) {
       if (name.startsWith("incoming-")) {
-        removals.push(join(objects, name));
+        candidates.push(join(objects, name));
       }
     }
     const pack = join(objects, "pack");
-    for (const name of await readdir(pack).catch(() => [] as string[])) {
-      if (name.startsWith("tmp_")) {
-        removals.push(join(pack, name));
+    if (await isRealDirectory(pack)) {
+      for (const name of await readdir(pack).catch(() => [] as string[])) {
+        if (name.startsWith("tmp_")) {
+          candidates.push(join(pack, name));
+        }
       }
     }
+  }
+  const lfs = join(gitDir, "lfs");
+  if (await isRealDirectory(lfs)) {
     for (const name of ["tmp", "incomplete"]) {
-      removals.push(join(gitDir, "lfs", name));
+      candidates.push(join(lfs, name));
     }
-    await Promise.all(removals.map((path) => rm(path, { recursive: true, force: true })));
+  }
+
+  for (const target of candidates) {
+    let stats;
+    try {
+      stats = await lstat(target);
+    } catch {
+      continue;
+    }
+    if (stats.isSymbolicLink()) {
+      // A link is removed as a link, never followed: unlink, not rm -r.
+      if (await inside(dirname(target))) {
+        await unlink(target).catch(() => undefined);
+      }
+      continue;
+    }
+    if (!(await inside(target))) {
+      continue;
+    }
+    // rm with recursive does not follow symlinks INSIDE the tree it removes
+    // (it unlinks them), and the target itself is a checked real entry.
+    await rm(target, { recursive: true, force: true });
   }
 }

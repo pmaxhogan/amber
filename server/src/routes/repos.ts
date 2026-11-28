@@ -60,10 +60,10 @@ export function createBackupFileRemover(config: Config): RepoFileRemover {
  * Object-level rules (docs/ARCHITECTURE.md "Multi-user access control"):
  * - Every route first requires that the caller can VIEW the repo; one they
  *   cannot answers exactly like one that does not exist.
- * - Pause, resume, sync now, turning force_anonymous ON, clearing the
- *   override and delete: the owner, the admin, or modify_others
- *   (requireRepoEdit).
- * - Changing `path`, SETTING an override or turning force_anonymous OFF
+ * - Pause, resume, sync now, turning force_anonymous ON and delete: the
+ *   owner, the admin, or modify_others (requireRepoEdit).
+ * - Changing `path`, setting OR clearing an override, or turning
+ *   force_anonymous OFF
  *   decides what the owner's token fetches: the owner or the admin only
  *   (requireRepoOwnerOrAdmin), and the
  *   override must be an account the repo's owner owns (domain/repos.ts).
@@ -142,18 +142,17 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
     // admin's call too. On an adopted repo the owner is the admin, and a
     // modify_others user must not be able to point the admin's token at a
     // path a removed user chose. Turning it ON only takes a credential away.
+    // CLEARING an override is the same shape: the repo falls back to the
+    // owner's default account, which can be wider than the pinned one. So
+    // EVERY change to accountOverrideId is the owner's or the admin's.
     if (
       patch.path !== undefined ||
       patch.forceAnonymous === false ||
-      (patch.accountOverrideId !== undefined && patch.accountOverrideId !== null)
+      patch.accountOverrideId !== undefined
     ) {
       requireRepoOwnerOrAdmin(request, id);
     }
-    if (
-      patch.state !== undefined ||
-      patch.forceAnonymous !== undefined ||
-      patch.accountOverrideId === null
-    ) {
+    if (patch.state !== undefined || patch.forceAnonymous !== undefined) {
       requireRepoEdit(request, id);
     }
     updateRepo(db, id, patch, { viewer: user });

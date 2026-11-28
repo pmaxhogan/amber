@@ -39,6 +39,7 @@ import {
   DiskBudgetError,
   minFreeBytesFor,
   startDiskWatch,
+  type DiskWatch,
   type FreeBytesProbe,
 } from "./diskWatch.ts";
 import {
@@ -319,180 +320,196 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
   // The disk guard runs for the whole sync, every git call carrying its
   // signal: an owner's in-flight growth past twice their cap, or the volume
   // dropping below min_free_disk_gb, kills the running git process tree.
-  const watch = await startDiskWatch({
-    db,
-    ownerUserId: target.repo.ownerUserId,
-    dir,
-    backupsDir: deps.backupsDir,
-    minFreeBytes: minFreeBytesFor(settings.min_free_disk_gb),
-    ...(deps.diskWatch?.pollMs === undefined ? {} : { pollMs: deps.diskWatch.pollMs }),
-    ...(deps.diskWatch?.freeBytes === undefined ? {} : { freeBytes: deps.diskWatch.freeBytes }),
-    ...(deps.diskWatch?.sizeOf === undefined ? {} : { sizeOf: deps.diskWatch.sizeOf }),
-  });
+  // Started INSIDE the try, so a failure to start it still closes the run;
+  // stopped only once the final size is recorded on the repo row (below), so
+  // the owner's other syncs in flight always see this sync's growth in one of
+  // the two places, never in neither.
+  let watch: DiskWatch | undefined;
+  let run: SyncRun;
   try {
-    stats = await performSync(deps, target, settings, log, watch.signal);
-  } catch (cause) {
-    outcome = "error";
-    // An egress refusal is "network": Amber would not connect. It is not a
-    // kind that can make a repository gone, and it takes the ordinary failure
-    // backoff, so a refused host is not re-resolved any faster than a dead one.
-    // A disk stop is "disk": no breaker effect, never a reason to call the
-    // repo gone, the ordinary failure backoff.
-    const diskStop =
-      cause instanceof DiskBudgetError
-        ? cause
-        : watch.signal.aborted && watch.signal.reason instanceof DiskBudgetError
-          ? watch.signal.reason
-          : undefined;
-    errorKind =
-      diskStop !== undefined
-        ? "disk"
-        : cause instanceof GitError
-          ? cause.kind
-          : cause instanceof EgressRefusedError
-            ? "network"
-            : "other";
-    if (diskStop !== undefined || (cause instanceof GitError && cause.kind === "timeout")) {
-      // A killed fetch leaves temporary packs and partial LFS downloads;
-      // what was backed up before this sync is untouched.
-      await cleanupPartialFetch(dir).catch((cleanupError: unknown) => {
-        log.warn({ err: cleanupError }, "could not remove a killed fetch's partial files");
+    try {
+      watch = await startDiskWatch({
+        db,
+        ownerUserId: target.repo.ownerUserId,
+        dir,
+        backupsDir: deps.backupsDir,
+        minFreeBytes: minFreeBytesFor(settings.min_free_disk_gb),
+        ...(deps.diskWatch?.pollMs === undefined ? {} : { pollMs: deps.diskWatch.pollMs }),
+        ...(deps.diskWatch?.freeBytes === undefined ? {} : { freeBytes: deps.diskWatch.freeBytes }),
+        ...(deps.diskWatch?.sizeOf === undefined ? {} : { sizeOf: deps.diskWatch.sizeOf }),
       });
-    }
-    const failure: unknown = diskStop ?? cause;
-    error = scrubCredentials(failure instanceof Error ? failure.message : String(failure)).slice(
-      0,
-      MAX_STORED_ERROR_CHARS,
-    );
-    if (cause instanceof EgressRefusedError) {
-      // The stored error (visible to whoever can see the repo) names only the
-      // reason; the addresses that caused it go to the server log alone.
-      log.warn(
-        { runId, host: cause.host, reason: cause.reason, addresses: cause.addresses },
-        "egress guard refused a restricted forge",
+      stats = await performSync(deps, target, settings, log, watch.signal);
+    } catch (cause) {
+      outcome = "error";
+      // An egress refusal is "network": Amber would not connect. It is not a
+      // kind that can make a repository gone, and it takes the ordinary failure
+      // backoff, so a refused host is not re-resolved any faster than a dead one.
+      // A disk stop is "disk": no breaker effect, never a reason to call the
+      // repo gone, the ordinary failure backoff.
+      const diskStop =
+        cause instanceof DiskBudgetError
+          ? cause
+          : watch?.signal.aborted === true && watch.signal.reason instanceof DiskBudgetError
+            ? watch.signal.reason
+            : undefined;
+      errorKind =
+        diskStop !== undefined
+          ? "disk"
+          : cause instanceof GitError
+            ? cause.kind
+            : cause instanceof EgressRefusedError
+              ? "network"
+              : "other";
+      if (diskStop !== undefined || (cause instanceof GitError && cause.kind === "timeout")) {
+        // A killed fetch leaves temporary packs and partial LFS downloads;
+        // what was backed up before this sync is untouched.
+        // The layout the sync engine itself detected decides the one git dir
+        // that is cleaned: in `full` mode `dir` is a working tree full of
+        // upstream-controlled files and links (diskWatch.ts).
+        const layout = detectLayout(dir);
+        await (layout === undefined ? Promise.resolve() : cleanupPartialFetch(dir, layout)).catch(
+          (cleanupError: unknown) => {
+            log.warn({ err: cleanupError }, "could not remove a killed fetch's partial files");
+          },
+        );
+      }
+      const failure: unknown = diskStop ?? cause;
+      error = scrubCredentials(failure instanceof Error ? failure.message : String(failure)).slice(
+        0,
+        MAX_STORED_ERROR_CHARS,
       );
+      if (cause instanceof EgressRefusedError) {
+        // The stored error (visible to whoever can see the repo) names only the
+        // reason; the addresses that caused it go to the server log alone.
+        log.warn(
+          { runId, host: cause.host, reason: cause.reason, addresses: cause.addresses },
+          "egress guard refused a restricted forge",
+        );
+      }
+      log.warn({ runId, errorKind, err: error }, "sync failed");
     }
-    log.warn({ runId, errorKind, err: error }, "sync failed");
-  } finally {
-    watch.stop();
-  }
 
-  let diskUsageBytes: number | null = null;
-  try {
-    if (existsSync(dir)) {
-      diskUsageBytes = await directorySizeBytes(dir);
+    let diskUsageBytes: number | null = null;
+    try {
+      if (existsSync(dir)) {
+        diskUsageBytes = await directorySizeBytes(dir);
+      }
+    } catch {
+      // Disk usage is a nicety; never fail a good sync over it.
     }
-  } catch {
-    // Disk usage is a nicety; never fail a good sync over it.
-  }
 
-  const finishedAt = now();
-  const intervalMs = settings.sync_interval_minutes * 60_000;
-  const consecutiveFailures = outcome === "success" ? 0 : target.repo.consecutiveFailures + 1;
+    const finishedAt = now();
+    const intervalMs = settings.sync_interval_minutes * 60_000;
+    const consecutiveFailures = outcome === "success" ? 0 : target.repo.consecutiveFailures + 1;
 
-  // Gone: it synced before, and the forge has kept saying it is not there for
-  // hours (or said outright that it was taken down). sync/gone.ts owns the rule.
-  const goneReason =
-    outcome === "success"
-      ? null
-      : judgeGone({
-          errorKind,
-          error,
-          forgeKind: target.forge.kind,
-          lastSuccessAt: target.repo.lastSuccessAt,
-          goneAt: target.repo.goneAt,
-          consecutiveFailures,
-          unreachableSince: unreachableSince(db, repoId, runId) ?? startedAt,
-          now: finishedAt,
-        });
-  const becameGone = goneReason !== null;
-  const goneSince = becameGone ? finishedAt : target.repo.goneAt;
+    // Gone: it synced before, and the forge has kept saying it is not there for
+    // hours (or said outright that it was taken down). sync/gone.ts owns the rule.
+    const goneReason =
+      outcome === "success"
+        ? null
+        : judgeGone({
+            errorKind,
+            error,
+            forgeKind: target.forge.kind,
+            lastSuccessAt: target.repo.lastSuccessAt,
+            goneAt: target.repo.goneAt,
+            consecutiveFailures,
+            unreachableSince: unreachableSince(db, repoId, runId) ?? startedAt,
+            now: finishedAt,
+          });
+    const becameGone = goneReason !== null;
+    const goneSince = becameGone ? finishedAt : target.repo.goneAt;
 
-  const nextSyncAt =
-    outcome === "success"
-      ? finishedAt + jitteredIntervalMs(intervalMs, random)
-      : finishedAt +
-        backoffDelayMs(
-          consecutiveFailures,
-          goneRecheckCapMs(intervalMs, goneSince, finishedAt),
-          random,
-        ) *
-          (errorKind === "rate_limited" ? RATE_LIMIT_BACKOFF_FACTOR : 1);
+    const nextSyncAt =
+      outcome === "success"
+        ? finishedAt + jitteredIntervalMs(intervalMs, random)
+        : finishedAt +
+          backoffDelayMs(
+            consecutiveFailures,
+            goneRecheckCapMs(intervalMs, goneSince, finishedAt),
+            random,
+          ) *
+            (errorKind === "rate_limited" ? RATE_LIMIT_BACKOFF_FACTOR : 1);
 
-  const run = db.tx(() => {
-    const finished = finishSyncRun(db, runId, {
-      finishedAt,
-      outcome,
-      error,
-      errorKind,
-      bytesFetched: stats.bytesFetched,
-      durationMs: finishedAt - startedAt,
-      refsChanged: stats.refsChanged,
-      paranoidArchived: stats.paranoidArchived,
+    run = db.tx(() => {
+      const finished = finishSyncRun(db, runId, {
+        finishedAt,
+        outcome,
+        error,
+        errorKind,
+        bytesFetched: stats.bytesFetched,
+        durationMs: finishedAt - startedAt,
+        refsChanged: stats.refsChanged,
+        paranoidArchived: stats.paranoidArchived,
+      });
+      applyRunToRepo(db, repoId, {
+        now: finishedAt,
+        outcome,
+        error,
+        nextSyncAt,
+        consecutiveFailures,
+        diskUsageBytes,
+        defaultBranch: stats.defaultBranch ?? target.repo.defaultBranch,
+        lastFetchHead: stats.lastFetchHead,
+        goneAt: becameGone ? finishedAt : null,
+        fetchedPath: target.repo.path,
+      });
+      enforceRunRetention(db, repoId, finishedAt);
+      if (outcome === "success") {
+        recordFetchVisibility(db, target, stats.anonymous, finishedAt);
+      }
+      return finished;
     });
-    applyRunToRepo(db, repoId, {
-      now: finishedAt,
-      outcome,
-      error,
-      nextSyncAt,
-      consecutiveFailures,
-      diskUsageBytes,
-      defaultBranch: stats.defaultBranch ?? target.repo.defaultBranch,
-      lastFetchHead: stats.lastFetchHead,
-      goneAt: becameGone ? finishedAt : null,
-      fetchedPath: target.repo.path,
-    });
-    enforceRunRetention(db, repoId, finishedAt);
-    if (outcome === "success") {
-      recordFetchVisibility(db, target, stats.anonymous, finishedAt);
-    }
-    return finished;
-  });
 
-  // Usage just changed: tell a user who crossed their cap, once.
-  const capTransition =
-    target.repo.ownerUserId === null
-      ? null
-      : refreshCapState(db, target.repo.ownerUserId, finishedAt);
-  const finishedMeta: EventMeta =
-    capTransition === "reached" && target.repo.ownerUserId !== null
-      ? { capReachedUserId: target.repo.ownerUserId }
-      : {};
+    // Usage just changed: tell a user who crossed their cap, once.
+    const capTransition =
+      target.repo.ownerUserId === null
+        ? null
+        : refreshCapState(db, target.repo.ownerUserId, finishedAt);
+    const finishedMeta: EventMeta =
+      capTransition === "reached" && target.repo.ownerUserId !== null
+        ? { capReachedUserId: target.repo.ownerUserId }
+        : {};
 
-  deps.events?.publish(
-    "sync.finished",
-    {
-      repoId,
-      runId,
-      outcome,
-      errorKind,
-      durationMs: run.durationMs,
-      refsChanged: run.refsChanged,
-      paranoidArchived: run.paranoidArchived,
-      diskUsageBytes,
-      slug: target.repo.slug,
-    },
-    finishedMeta,
-  );
-  if (becameGone) {
-    log.warn(
-      { runId, errorKind, reason: goneReason, path: target.repo.path, host: target.forge.host },
-      "repository is gone upstream, keeping the backup",
+    deps.events?.publish(
+      "sync.finished",
+      {
+        repoId,
+        runId,
+        outcome,
+        errorKind,
+        durationMs: run.durationMs,
+        refsChanged: run.refsChanged,
+        paranoidArchived: run.paranoidArchived,
+        diskUsageBytes,
+        slug: target.repo.slug,
+      },
+      finishedMeta,
     );
-    deps.events?.publish("repo.gone", {
-      repoId,
-      slug: target.repo.slug,
-      path: target.repo.path,
-      host: target.forge.host,
-      errorKind,
-      reason: goneReason,
-    });
-  } else if (outcome === "success" && target.repo.goneAt !== null) {
-    log.info({ runId, path: target.repo.path }, "repository is reachable upstream again");
-  }
-  log.info({ runId, outcome, refsChanged: run.refsChanged }, "sync finished");
+    if (becameGone) {
+      log.warn(
+        { runId, errorKind, reason: goneReason, path: target.repo.path, host: target.forge.host },
+        "repository is gone upstream, keeping the backup",
+      );
+      deps.events?.publish("repo.gone", {
+        repoId,
+        slug: target.repo.slug,
+        path: target.repo.path,
+        host: target.forge.host,
+        errorKind,
+        reason: goneReason,
+      });
+    } else if (outcome === "success" && target.repo.goneAt !== null) {
+      log.info({ runId, path: target.repo.path }, "repository is reachable upstream again");
+    }
+    log.info({ runId, outcome, refsChanged: run.refsChanged }, "sync finished");
 
-  return run;
+    return run;
+  } finally {
+    // Only now: the final size is on the repo row (applyRunToRepo above), so
+    // the owner's other syncs in flight never lose sight of this growth.
+    watch?.stop();
+  }
 }
 
 async function performSync(

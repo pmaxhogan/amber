@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SyncRun } from "@amber/shared";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -283,6 +283,82 @@ describe("aborting git", () => {
   });
 });
 
+describe("the watch's lifecycle inside a sync", () => {
+  async function setup(): Promise<{ owner: User; repoId: number; repoDir: string; url: string }> {
+    const owner = makeUser(db, "life@example.com", {}, { capBytes: 100 * GB });
+    const origin = await createOrigin(join(root, "origin"));
+    await origin.commitFile("README.md", "hi\n", "initial");
+    db.run("UPDATE forges SET allow_private_network = 1 WHERE id = ?", forgeId);
+    const repoId = createRepo(db, { forgeId, path: "a/life", ownerUserId: owner.id }).id;
+    const slug = db.get<{ slug: string }>("SELECT slug FROM repos WHERE id = ?", repoId)?.slug;
+    return { owner, repoId, repoDir: join(root, "backups", String(slug)), url: origin.url };
+  }
+
+  it("closes the run when the watch itself cannot start", async () => {
+    const { repoId, repoDir, url } = await setup();
+    mkdirSync(repoDir, { recursive: true });
+    const run = await syncRepo({
+      repoId,
+      db,
+      backupsDir: join(root, "backups"),
+      stateDir: join(root, "state"),
+      logger: silentLog,
+      settings: fixedSettings({ min_free_disk_gb: 0 }),
+      credentials: () => undefined,
+      remoteUrl: url,
+      allowFileProtocol: true,
+      diskWatch: {
+        sizeOf: () => {
+          throw new Error("probe exploded");
+        },
+      },
+    });
+    expect(run.outcome).toBe("error");
+    expect(
+      db.get<{ open: number }>(
+        "SELECT COUNT(*) AS open FROM sync_runs WHERE repo_id = ? AND finished_at IS NULL",
+        repoId,
+      )?.open,
+    ).toBe(0);
+  });
+
+  it("stays registered until the final size is on the repo row", async () => {
+    const { owner, repoId, url } = await setup();
+    const seen: { inFlight: number; usage: number | null }[] = [];
+    const run = await syncRepo({
+      repoId,
+      db,
+      backupsDir: join(root, "backups"),
+      stateDir: join(root, "state"),
+      logger: silentLog,
+      settings: fixedSettings({ min_free_disk_gb: 0 }),
+      credentials: () => undefined,
+      remoteUrl: url,
+      allowFileProtocol: true,
+      events: {
+        publish(type) {
+          if (type === "sync.finished") {
+            seen.push({
+              inFlight: inFlightSyncCount(owner.id),
+              usage:
+                db.get<{ u: number | null }>(
+                  "SELECT disk_usage_bytes AS u FROM repos WHERE id = ?",
+                  repoId,
+                )?.u ?? null,
+            });
+          }
+        },
+      },
+    });
+    expect(run.outcome).toBe("success");
+    // At the moment the size was already recorded, the growth was still counted.
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.inFlight).toBe(1);
+    expect(seen[0]?.usage).toBeGreaterThan(0);
+    expect(inFlightSyncCount(owner.id)).toBe(0);
+  });
+});
+
 describe("cleanupPartialFetch", () => {
   it("removes temporary packs, quarantines and partial LFS, and nothing else", async () => {
     const dir = join(root, "bare");
@@ -294,12 +370,105 @@ describe("cleanupPartialFetch", () => {
     writeFileSync(join(dir, "objects", "pack", "pack-good.pack"), "x");
     writeFileSync(join(dir, "lfs", "incomplete", "abc"), "x");
     writeFileSync(join(dir, "lfs", "objects", "keep"), "x");
-    await cleanupPartialFetch(dir);
+    await cleanupPartialFetch(dir, "bare");
     expect(existsSync(join(dir, "objects", "pack", "tmp_pack_1"))).toBe(false);
     expect(existsSync(join(dir, "objects", "incoming-xyz"))).toBe(false);
     expect(existsSync(join(dir, "lfs", "incomplete"))).toBe(false);
     expect(existsSync(join(dir, "objects", "pack", "pack-good.pack"))).toBe(true);
     expect(existsSync(join(dir, "lfs", "objects", "keep"))).toBe(true);
+  });
+});
+
+describe("cleanupPartialFetch with hostile working-tree content", () => {
+  /** A directory outside the repo that the cleanup must never touch. */
+  function victim(): string {
+    const outside = join(root, "victim");
+    mkdirSync(join(outside, "tmp"), { recursive: true });
+    mkdirSync(join(outside, "incomplete"), { recursive: true });
+    mkdirSync(join(outside, "incoming-x"), { recursive: true });
+    mkdirSync(join(outside, "pack"), { recursive: true });
+    writeFileSync(join(outside, "tmp", "precious"), "x");
+    writeFileSync(join(outside, "incomplete", "precious"), "x");
+    writeFileSync(join(outside, "incoming-x", "precious"), "x");
+    writeFileSync(join(outside, "pack", "tmp_precious"), "x");
+    writeFileSync(join(outside, "tmp_precious"), "x");
+    return outside;
+  }
+
+  function untouched(outside: string): void {
+    for (const file of [
+      "tmp/precious",
+      "incomplete/precious",
+      "incoming-x/precious",
+      "pack/tmp_precious",
+      "tmp_precious",
+    ]) {
+      expect(existsSync(join(outside, file)), file).toBe(true);
+    }
+  }
+
+  it("cleans only .git in a working tree, never the checked-out objects/ or lfs links", async () => {
+    const outside = victim();
+    const dir = join(root, "worktree");
+    // What an upstream can commit: a real objects/ tree and symlinks.
+    mkdirSync(join(dir, "objects", "pack"), { recursive: true });
+    mkdirSync(join(dir, "objects", "incoming-y"), { recursive: true });
+    writeFileSync(join(dir, "objects", "pack", "tmp_committed"), "x");
+    symlinkSync(outside, join(dir, "lfs"));
+    // And git's own dir, with a real partial pack to remove.
+    mkdirSync(join(dir, ".git", "objects", "pack"), { recursive: true });
+    writeFileSync(join(dir, ".git", "objects", "pack", "tmp_pack_1"), "x");
+
+    await cleanupPartialFetch(dir, "worktree");
+
+    untouched(outside);
+    expect(existsSync(join(dir, "objects", "pack", "tmp_committed"))).toBe(true);
+    expect(existsSync(join(dir, "objects", "incoming-y"))).toBe(true);
+    expect(existsSync(join(dir, ".git", "objects", "pack", "tmp_pack_1"))).toBe(false);
+  });
+
+  it("never follows a symlinked objects, pack or lfs dir, in either layout", async () => {
+    const outside = victim();
+    for (const layout of ["bare", "worktree"] as const) {
+      const dir = join(root, `linked-${layout}`);
+      const gitDir = layout === "bare" ? dir : join(dir, ".git");
+      mkdirSync(gitDir, { recursive: true });
+      symlinkSync(outside, join(gitDir, "objects"));
+      symlinkSync(outside, join(gitDir, "lfs"));
+      await cleanupPartialFetch(dir, layout);
+      untouched(outside);
+
+      rmSync(join(gitDir, "objects"));
+      mkdirSync(join(gitDir, "objects"));
+      symlinkSync(join(outside, "pack"), join(gitDir, "objects", "pack"));
+      await cleanupPartialFetch(dir, layout);
+      untouched(outside);
+    }
+  });
+
+  it("removes a planted tmp_* or incoming-* symlink as a link, never its target", async () => {
+    const outside = victim();
+    const dir = join(root, "planted");
+    mkdirSync(join(dir, "objects", "pack"), { recursive: true });
+    mkdirSync(join(dir, "lfs"), { recursive: true });
+    symlinkSync(join(outside, "tmp"), join(dir, "objects", "pack", "tmp_evil"));
+    symlinkSync(join(outside, "incoming-x"), join(dir, "objects", "incoming-evil"));
+    symlinkSync(join(outside, "incomplete"), join(dir, "lfs", "incomplete"));
+    await cleanupPartialFetch(dir, "bare");
+    untouched(outside);
+    expect(existsSync(join(dir, "objects", "pack", "tmp_evil"))).toBe(false);
+  });
+
+  it("does nothing when the git dir itself is a symlink", async () => {
+    const outside = victim();
+    const dir = join(root, "gitlink");
+    mkdirSync(dir);
+    mkdirSync(join(outside, "objects", "pack"), { recursive: true });
+    writeFileSync(join(outside, "objects", "pack", "tmp_inside_victim"), "x");
+    symlinkSync(outside, join(dir, ".git"));
+    await cleanupPartialFetch(dir, "worktree");
+    untouched(outside);
+    expect(existsSync(join(outside, "objects", "pack", "tmp_inside_victim"))).toBe(true);
   });
 });
 

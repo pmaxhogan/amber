@@ -18,7 +18,9 @@ import type { Db } from "../db/db.ts";
 import {
   canView,
   hasPermission,
+  isAdminOnlyRepo,
   isRepoOwner,
+  loadRepoAccessFacts,
   maySeeGone,
   visibleRepoSqlFilter,
 } from "../security/authz.ts";
@@ -358,7 +360,11 @@ export function getRepoFor(db: Db, id: number, viewer: User): Repo | undefined {
   const row = db.get<RepoRow>(`SELECT ${REPO_COLUMNS} FROM repos WHERE repos.id = ?`, id);
   if (
     row === undefined ||
-    !canView(viewer, { ownerUserId: row.owner_user_id, isPrivate: row.is_private !== 0 })
+    !canView(viewer, {
+      ownerUserId: row.owner_user_id,
+      isPrivate: row.is_private !== 0,
+      adminOnly: isAdminOnlyRepo(db, row.forge_id, row.owner_user_id),
+    })
   ) {
     return undefined;
   }
@@ -497,7 +503,12 @@ export function listRepos(db: Db, viewer: User, query: RepoListQuery): Page<Repo
   // Sorting by gone_at would order the visible rows by a fact the Removed
   // page keeps behind `view_removed` (which repos are gone, and since when),
   // so it is refused the same way rather than silently ignored.
-  if ((query.gone === true || query.sort === "gone_at") && !hasPermission(viewer, "view_removed")) {
+  // ANY use of the gone filter, not only gone=true: the difference between
+  // gone=false and the unfiltered list is exactly the gone repos.
+  if (
+    (query.gone !== undefined || query.sort === "gone_at") &&
+    !hasPermission(viewer, "view_removed")
+  ) {
     throw forbidden('The Removed page needs the "view_removed" permission.', {
       permission: "view_removed",
     });
@@ -610,8 +621,12 @@ export function listRepos(db: Db, viewer: User, query: RepoListQuery): Page<Repo
       cloneMode: resolved?.clone_mode,
       syncEnabled: resolved?.sync_enabled,
       lastOutcome: row.last_outcome === null ? undefined : (row.last_outcome as SyncOutcome),
+      // The error kind (not_found, auth) is how "gone" shows before goneAt
+      // does: hidden on someone else's repo without view_removed.
       lastErrorKind:
-        row.last_error_kind === null ? undefined : (row.last_error_kind as SyncErrorKind),
+        row.last_error_kind === null || !maySeeGone(viewer, { ownerUserId: row.owner_user_id })
+          ? undefined
+          : (row.last_error_kind as SyncErrorKind),
     };
   });
 
@@ -835,6 +850,7 @@ export function updateRepo(
             canView(options.viewer, {
               ownerUserId: clash.owner_user_id,
               isPrivate: clash.is_private !== 0,
+              adminOnly: isAdminOnlyRepo(db, existing.forgeId, clash.owner_user_id),
             });
           throw conflict(
             visible
@@ -961,14 +977,7 @@ export async function bulkRepoAction(
   const now = Date.now();
 
   for (const id of ids) {
-    const facts = db.get<{ owner_user_id: number | null; is_private: number }>(
-      "SELECT owner_user_id, is_private FROM repos WHERE id = ?",
-      id,
-    );
-    const access =
-      facts === undefined
-        ? undefined
-        : { ownerUserId: facts.owner_user_id, isPrivate: facts.is_private !== 0 };
+    const access = loadRepoAccessFacts(db, id);
     if (access === undefined || !canView(viewer, access)) {
       missing.push(id);
       continue;
@@ -1064,6 +1073,8 @@ export function listSyncRuns(
     db.get<{ owner_user_id: number | null }>("SELECT owner_user_id FROM repos WHERE id = ?", repoId)
       ?.owner_user_id ?? null;
   const redact = viewer !== undefined && !isOwnerOrAdmin(owner, viewer);
+  // errorKind says not_found or auth, which is what makes a repo gone.
+  const hideKind = viewer !== undefined && !maySeeGone(viewer, { ownerUserId: owner });
   const total =
     db.get<{ count: number }>("SELECT COUNT(*) AS count FROM sync_runs WHERE repo_id = ?", repoId)
       ?.count ?? 0;
@@ -1079,6 +1090,7 @@ export function listSyncRuns(
   );
   const runs = rows
     .map(toSyncRun)
-    .map((run) => (redact && run.error !== null ? { ...run, error: OWNER_ONLY_ERROR } : run));
+    .map((run) => (redact && run.error !== null ? { ...run, error: OWNER_ONLY_ERROR } : run))
+    .map((run) => (hideKind && run.errorKind !== null ? { ...run, errorKind: null } : run));
   return { rows: runs, total, page: query.page, perPage: query.perPage };
 }

@@ -1,6 +1,7 @@
 import type { ForgeKind } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
+import { ownerMayUseForgeSql } from "../domain/forges.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
 import { buildBaseUrl, providerForKind, resolveToken } from "./discovery.ts";
@@ -114,6 +115,7 @@ export async function resolveGoneOwners(
             AND (r.owner_checked_at IS NULL
                  OR r.owner_checked_at <= ?
                  OR r.owner_checked_at < r.gone_at)
+            AND ${ownerMayUseForgeSql("r", "f")}
           ORDER BY r.owner_checked_at IS NOT NULL, r.owner_checked_at, r.id`,
         startedAt - OWNER_RECHECK_MS,
       )
@@ -197,10 +199,13 @@ export async function resolveGoneOwners(
           GoneRow &
             Pick<DueRow, "forge_id" | "account_override_id" | "force_anonymous" | "owner_user_id">
         >(
-          `SELECT id, owner_gone, forge_id, account_override_id, force_anonymous, owner_user_id
-             FROM repos
-            WHERE forge_id = ? AND gone_at IS NOT NULL
-              AND lower(substr(path, 1, instr(path, '/') - 1)) = ?`,
+          `SELECT r.id, r.owner_gone, r.forge_id, r.account_override_id, r.force_anonymous,
+                  r.owner_user_id
+             FROM repos r
+             JOIN forges f ON f.id = r.forge_id
+            WHERE r.forge_id = ? AND r.gone_at IS NOT NULL
+              AND lower(substr(r.path, 1, instr(r.path, '/') - 1)) = ?
+              AND ${ownerMayUseForgeSql("r", "f")}`,
           row.forge_id,
           owner.toLowerCase(),
         )

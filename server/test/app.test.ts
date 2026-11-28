@@ -94,7 +94,14 @@ describe("trusted proxies (TRUSTED_PROXY_CIDRS)", () => {
   });
 
   it("refuses an entry that is not an address or CIDR", () => {
-    for (const bad of ["10.0.0.0/33", "example.com", "10.0.0.0/x", "::1/129"]) {
+    for (const bad of [
+      "10.0.0.0/33",
+      "example.com",
+      "10.0.0.0/x",
+      "::1/129",
+      "fe80::1%eth0",
+      "fe80::%en0/64",
+    ]) {
       expect(() => ranges(bad)).toThrow(/TRUSTED_PROXY_CIDRS/);
     }
   });

@@ -10,6 +10,7 @@ import {
   markFirstCloneRefused,
   remainingAllowanceBytes,
 } from "../domain/caps.ts";
+import { ADMIN_ONLY_FORGE_ERROR, ownerMayUseForge } from "../domain/forges.ts";
 import { resolveGlobalSettings, resolveSettings } from "../domain/settings.ts";
 import { isAtOrOverCap } from "../domain/users.ts";
 import { lookupRepoInfo } from "../providers/forks.ts";
@@ -496,6 +497,22 @@ export class Scheduler {
       (await isBelowDiskFloor(this.#options.backupsDir, minFreeBytes, this.#options.freeDiskBytes))
     ) {
       return refuse(DISK_FLOOR_ERROR);
+    }
+    // An unrestricted forge is the admin's alone (domain/forges.ts). Refused
+    // HERE, before the size lookup below, which would otherwise call the
+    // forge's API from Amber's LAN position on a non-admin's behalf.
+    const forgeRow = db.get<{ allow_private_network: number; owner_user_id: number | null }>(
+      `SELECT f.allow_private_network, r.owner_user_id
+         FROM repos r JOIN forges f ON f.id = r.forge_id WHERE r.id = ?`,
+      repoId,
+    );
+    if (
+      forgeRow !== undefined &&
+      !ownerMayUseForge(db, forgeRow.owner_user_id, {
+        allowPrivateNetwork: forgeRow.allow_private_network === 1,
+      })
+    ) {
+      return refuse(ADMIN_ONLY_FORGE_ERROR);
     }
     if (owner === null) {
       return true;

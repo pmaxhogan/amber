@@ -2,7 +2,7 @@ import type { ForgeKind } from "@amber/shared";
 import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
 import { resolveRepoAccountId } from "../domain/credentials.ts";
-import { effectiveIsPrivate } from "../domain/forges.ts";
+import { effectiveIsPrivate, ownerMayUseForgeSql } from "../domain/forges.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
 import { buildBaseUrl, providerForKind, resolveToken } from "./discovery.ts";
@@ -290,7 +290,9 @@ export async function lookupRepoInfo(
   const cooldowns = deps.cooldowns ?? processLookupLimits.cooldowns;
   const budgets = deps.anonymousBudget ?? processLookupLimits.anonymousBudget;
   const row = db.get<PendingRow>(
-    `SELECT ${PENDING_COLUMNS} FROM repos r JOIN forges f ON f.id = r.forge_id WHERE r.id = ?`,
+    // Never on behalf of a non-admin on an unrestricted forge (domain/forges.ts).
+    `SELECT ${PENDING_COLUMNS} FROM repos r JOIN forges f ON f.id = r.forge_id
+      WHERE r.id = ? AND ${ownerMayUseForgeSql("r", "f")}`,
     repoId,
   );
   if (row === undefined) {
@@ -354,9 +356,10 @@ export async function resolvePendingForks(
         `SELECT ${PENDING_COLUMNS}
            FROM repos r
            JOIN forges f ON f.id = r.forge_id
-          WHERE (r.fork_known = 0 AND (r.fork_checked_at IS NULL OR r.fork_checked_at <= ?))
-             OR r.visibility_checked_at IS NULL
-             OR r.visibility_checked_at <= ?
+          WHERE ((r.fork_known = 0 AND (r.fork_checked_at IS NULL OR r.fork_checked_at <= ?))
+                 OR r.visibility_checked_at IS NULL
+                 OR r.visibility_checked_at <= ?)
+            AND ${ownerMayUseForgeSql("r", "f")}
           ORDER BY r.visibility_checked_at IS NOT NULL,
                    r.fork_checked_at IS NOT NULL OR r.fork_known = 1,
                    COALESCE(r.visibility_checked_at, 0), r.fork_checked_at, r.id`,

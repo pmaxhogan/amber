@@ -1142,11 +1142,12 @@ Rules that are not toggles:
   it. `browse`, `export` and `git` still gate those three surfaces, even on
   owned repos.
 - OTHERS' REPOS. `modify_others` on a repo the caller can view allows
-  settings, pause, resume, sync now, `force_anonymous` and delete. It does NOT
-  allow changing `path` or setting `account_override_id`: both decide what the
-  OWNER'S token fetches, so they are owner or admin only, and an override may
-  only name an account the repo's owner owns. Anyone allowed to edit may clear
-  an override.
+  settings, pause, resume, sync now, turning `force_anonymous` ON and delete.
+  It does NOT allow changing `path`, setting or clearing `account_override_id`,
+  or turning `force_anonymous` OFF: each decides what the OWNER'S token fetches
+  (clearing an override falls back to the owner's default account, which can
+  be wider than the pinned one), so they are owner or admin only, and an
+  override may only name an account the repo's owner owns.
 - OWNER-DERIVED FIELDS. A viewer who is neither the owner nor the admin reads
   `accountOverrideId`, `managedByAccountSyncId` and `ownerGone` as null, and
   `lastError` (and each run's `error` in the run history) as a fixed marker
@@ -1181,11 +1182,14 @@ Rules that are not toggles:
   scheduler skips it, and `POST /api/account-syncs/:id/run` answers 409
   `owner_cannot_import` (the owner's permission decides, not the caller's).
   Admin-owned syncs are unaffected.
-- Without `view_removed`, `GET /api/status` reports `goneRepos: 0` and
-  `GET /api/repos?sort=gone_at` is refused (403, like `gone=true`). On repos
-  the caller does NOT own, `goneAt` reads null, and neither the `repo.gone`
-  event nor the gone web push is delivered about them. A user always sees gone
-  state for the repos they own.
+- Without `view_removed`, `GET /api/status` reports `goneRepos: 0`, and ANY
+  use of the `gone` list filter (`gone=true` or `gone=false`, whose difference
+  from the unfiltered list is exactly the gone repos) and `sort=gone_at` is
+  refused (403). On repos the caller does NOT own, `goneAt` reads null, the
+  error kind (`lastErrorKind` in the list, `errorKind` in the run history;
+  not_found and auth are how "gone" shows first) is hidden, and neither the
+  `repo.gone` event nor the gone web push is delivered about them. A user
+  always sees gone state for the repos they own.
 
 ### Credentials are per user
 
@@ -1263,9 +1267,18 @@ an access-control decision.
   unrestricted forge whose owner is not the admin, and an account sync run
   refuses the same way ("This forge reaches private networks and is for the
   Amber admin's own use", error kind `other`: no breaker effect, never a gone
-  signal). If the admin flips a restricted forge to unrestricted while
-  non-admins own repos there, those repos simply stop syncing with that error
-  until the admin adopts or deletes them.
+  signal). The scheduler refuses the same way BEFORE its first-clone size
+  lookup, and every background pass that asks a forge API on a repo's behalf
+  (fork parent, visibility, size, gone owner: `providers/forks.ts`,
+  `providers/owners.ts`) skips such repos in SQL (`ownerMayUseForgeSql`), so
+  nothing is asked from Amber's LAN position for anyone but the admin. If the
+  admin flips a restricted forge to unrestricted while non-admins own repos
+  there, those repos simply stop syncing with that error, and they become
+  visible to the ADMIN ONLY, their owner included (`RepoAccessFacts.adminOnly`
+  in the one visibility rule, `canView` and `visibleRepoSqlFilter`, so lists,
+  totals, detail, runs, browse, export, the git remote and events all follow),
+  until the admin adopts or deletes them. Import re-checks the forge inside
+  each line's transaction, so a forge flipped mid-import is still refused.
 - Flipping a forge to unrestricted also sets `is_private = 1` on every repo of
   that forge, in the same transaction.
 - Web push endpoints are vetted by the same rule (https on 443, a public DNS
@@ -1334,7 +1347,22 @@ never creates anything:
   gone signal, the ordinary failure backoff), and its partial files are
   removed: git's temporary packs (`objects/pack/tmp_*`, `objects/incoming-*`)
   and git-lfs's `lfs/tmp` and `lfs/incomplete`. The same cleanup runs after a
-  sync that timed out. Complete objects and refs are never touched, so the
+  sync that timed out. The cleanup treats the tree as hostile: in `full` mode
+  the backup directory is a working tree holding whatever the upstream
+  committed (an `objects/` directory, symlinks named `lfs` or `objects`), so
+  exactly ONE git dir is cleaned, chosen from the detected layout (bare: the
+  directory; worktree: its `.git`), every directory walked must be a real
+  directory by lstat, every target must resolve under the git dir's realpath,
+  and a symlink is removed as a link, never followed. The watch is started
+  inside the sync's error handling (a failure to start it still closes the
+  run) and stays registered until the final size is on the repo row, so an
+  owner's other syncs in flight never miss this sync's growth.
+- SIZING. The in-flight budget lets each capped user grow to twice their cap,
+  so caps should be sized so that the sum of (2 x cap) over all users stays
+  below the free space minus the floor; otherwise one user's allowed growth can
+  hold the volume under the floor and stop everyone's syncs, the admin's
+  included. The floor measures the BACKUPS volume only (where state and logs
+  live is not checked), and a statfs failure fails open (no refusal). Complete objects and refs are never touched, so the
   backup that existed before is intact. `GET /api/status` gives the admin
   `disk: { freeBytes, minFreeBytes, belowFloor }` (absent for everyone else,
   and when the volume cannot be read; an unreadable volume is not treated as
@@ -1481,6 +1509,18 @@ already know the exact path to ask, so it cannot be used to list anything, but
 it is a one-bit oracle. Likewise a forge login (forge plus username) can be
 registered by only one user: a second registration is a 409, which says that
 login is already registered by someone.
+
+Further limits an operator should know:
+
+- `GET /api/forges` lists every forge's host to every user, so the host names
+  of the admin's LAN forges are visible to everyone who can sign in (their
+  repositories are not).
+- A `manage_forges` user's restricted forge must resolve to public addresses,
+  but that includes this deployment's OWN public address (a hairpin through
+  the edge), and whatever answers there. An operator who cares should not
+  grant `manage_forges`.
+- Any container on the network listed in `TRUSTED_PROXY_CIDRS` can set the
+  address the git throttle sees; keep that range to the proxy alone.
 
 ### Insecure mode and tests
 

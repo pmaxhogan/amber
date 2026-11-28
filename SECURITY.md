@@ -254,6 +254,22 @@ refused, and that refusal tells the caller that someone on this Amber backs up
 that exact path (they must already know the exact path to ask). A forge login can
 likewise be registered by only one user.
 
+- Size caps so that the sum of twice each user's cap stays below the free space
+  minus `min_free_disk_gb`: the in-flight budget allows each user up to twice
+  their cap, and one user holding the volume under the floor stops everyone's
+  syncs. The floor measures the backups volume only, and a statfs failure fails
+  open.
+- `GET /api/forges` shows every forge host name to every user, so the names of
+  your LAN forges are visible (their repositories are not: a repository on an
+  unrestricted forge that is not the admin's is visible to the admin alone).
+- A `manage_forges` user's restricted forge may still reach this deployment's
+  own public address (a hairpin); do not grant `manage_forges` if that matters.
+- Any container on the trusted proxy network can choose the address the git
+  throttle sees; keep `TRUSTED_PROXY_CIDRS` to the proxy alone.
+- The partial-download cleanup after a stopped or timed-out sync never follows a
+  symlink and only touches the repository's own git directory, so content an
+  upstream commits into a working tree cannot steer it elsewhere.
+
 ## Hardening recommendations for self-hosters
 
 - **Put an authenticating proxy in front of it, always.** Amber assumes one.

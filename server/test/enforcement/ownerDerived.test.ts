@@ -58,8 +58,9 @@ beforeEach(async () => {
     repoId,
   );
   temp.db.run(
-    `INSERT INTO sync_runs (repo_id, started_at, finished_at, outcome, error, created_at, updated_at)
-     VALUES (?, 5, 6, 'error', ?, 5, 6)`,
+    `INSERT INTO sync_runs (repo_id, started_at, finished_at, outcome, error, error_kind,
+                            created_at, updated_at)
+     VALUES (?, 5, 6, 'error', ?, 'not_found', 5, 6)`,
     repoId,
     SECRET_ERROR,
   );
@@ -139,6 +140,34 @@ describe("owner-derived repo fields", () => {
     // too was asked with Alice's account and stays hers.
     makeUser(temp.db, BOB, { view_removed: true });
     expect(await get(BOB, url)).toMatchObject({ goneAt: 100, ownerGone: null });
+  });
+
+  it("hide the error kind (how gone shows first) without view_removed, and refuse gone=", async () => {
+    const runsUrl = `/api/repos/${String(repoId)}/runs`;
+    type Runs = { rows: { errorKind: string | null }[] };
+    expect(((await get(BOB, runsUrl)) as Runs).rows.map((run) => run.errorKind)).toEqual([null]);
+    const listed = (await get(BOB, "/api/repos")) as { rows: Record<string, unknown>[] };
+    expect(listed.rows.find((row) => row.id === repoId)?.lastErrorKind).toBeUndefined();
+    for (const email of [ALICE, null]) {
+      expect(((await get(email, runsUrl)) as Runs).rows.map((run) => run.errorKind)).toEqual([
+        "not_found",
+      ]);
+    }
+
+    // gone=false would diff out the gone repos just as well as gone=true.
+    for (const query of ["gone=false", "gone=true"]) {
+      const response = await temp.app.inject({
+        method: "GET",
+        url: `/api/repos?${query}`,
+        headers: asUser(BOB),
+      });
+      expect(response.statusCode, query).toBe(403);
+    }
+    makeUser(temp.db, BOB, { view_removed: true });
+    expect(((await get(BOB, runsUrl)) as Runs).rows.map((run) => run.errorKind)).toEqual([
+      "not_found",
+    ]);
+    expect((await get(BOB, "/api/repos?gone=false")) as object).toBeDefined();
   });
 
   it("leave a repo without an error with a null lastError for everyone", async () => {

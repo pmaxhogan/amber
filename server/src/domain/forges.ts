@@ -164,6 +164,17 @@ export function assertMayUseForge(user: User, forge: { allowPrivateNetwork?: boo
   }
 }
 
+/**
+ * SQL for "this repo's owner may use its forge" (ownerMayUseForge), with `r`
+ * the repos alias and `f` the forges alias. For the background passes that
+ * talk to a forge on a repo's behalf (fork parent, visibility, size, gone
+ * owner): on an unrestricted forge only the admin's repos are ever asked
+ * about, since every such call leaves from Amber's LAN position.
+ */
+export function ownerMayUseForgeSql(r: string, f: string): string {
+  return `(${f}.allow_private_network = 0 OR ${r}.owner_user_id IN (SELECT id FROM users WHERE is_admin = 1))`;
+}
+
 /** Stored on a repo whose owner may not use its (unrestricted) forge. */
 export const ADMIN_ONLY_FORGE_ERROR =
   "This forge reaches private networks and is for the Amber admin's own use, so it does not " +

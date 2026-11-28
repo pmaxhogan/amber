@@ -25,6 +25,11 @@ export function parseProxyRange(entry: string): ProxyRange | null {
   const text = entry.trim();
   const slash = text.indexOf("/");
   const address = slash === -1 ? text : text.slice(0, slash);
+  // A zone id ("fe80::1%eth0") parses as an address but BlockList never
+  // matches it, so it would be an entry that silently trusts nobody.
+  if (address.includes("%")) {
+    return null;
+  }
   const family = isIP(address);
   if (family !== 4 && family !== 6) {
     return null;

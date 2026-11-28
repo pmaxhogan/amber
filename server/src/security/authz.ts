@@ -178,6 +178,28 @@ export interface RepoAccessFacts {
   id: number;
   ownerUserId: number | null;
   isPrivate: boolean;
+  /**
+   * The repo is on an UNRESTRICTED forge (allow_private_network = 1) and its
+   * owner is not the admin. Such a row should not exist (only the admin may
+   * import there, domain/forges.ts mayUseForge), but rows from before that
+   * rule, or on a forge flipped later, do: what was fetched from Amber's LAN
+   * position is the admin's alone, so it is visible to the admin only, not
+   * even to its owner. Required, so no caller can forget it.
+   */
+  adminOnly: boolean;
+}
+
+/** RepoAccessFacts.adminOnly for one row. */
+export function isAdminOnlyRepo(db: Db, forgeId: number, ownerUserId: number | null): boolean {
+  const row = db.get<{ allow_private_network: number; is_admin: number | null }>(
+    `SELECT f.allow_private_network,
+            (SELECT is_admin FROM users WHERE id = ?) AS is_admin
+       FROM forges f WHERE f.id = ?`,
+    ownerUserId,
+    forgeId,
+  );
+  // An unknown forge is treated as unrestricted: fail closed.
+  return (row === undefined || row.allow_private_network !== 0) && row?.is_admin !== 1;
 }
 
 /**
@@ -186,13 +208,16 @@ export interface RepoAccessFacts {
  */
 export function canView(
   user: User,
-  repo: Pick<RepoAccessFacts, "ownerUserId" | "isPrivate">,
+  repo: Pick<RepoAccessFacts, "ownerUserId" | "isPrivate" | "adminOnly">,
 ): boolean {
   if (user.removedAt !== null) {
     return false;
   }
   if (user.isAdmin) {
     return true;
+  }
+  if (repo.adminOnly) {
+    return false;
   }
   if (repo.ownerUserId !== null && repo.ownerUserId === user.id) {
     return true;
@@ -217,13 +242,20 @@ export function isRepoOwner(user: User, repo: Pick<RepoAccessFacts, "ownerUserId
 }
 
 export function loadRepoAccessFacts(db: Db, id: number): RepoAccessFacts | undefined {
-  const row = db.get<{ id: number; owner_user_id: number | null; is_private: number }>(
-    "SELECT id, owner_user_id, is_private FROM repos WHERE id = ?",
-    id,
-  );
+  const row = db.get<{
+    id: number;
+    owner_user_id: number | null;
+    is_private: number;
+    forge_id: number;
+  }>("SELECT id, owner_user_id, is_private, forge_id FROM repos WHERE id = ?", id);
   return row === undefined
     ? undefined
-    : { id: row.id, ownerUserId: row.owner_user_id, isPrivate: row.is_private !== 0 };
+    : {
+        id: row.id,
+        ownerUserId: row.owner_user_id,
+        isPrivate: row.is_private !== 0,
+        adminOnly: isAdminOnlyRepo(db, row.forge_id, row.owner_user_id),
+      };
 }
 
 function dbOf(request: FastifyRequest): Db {
@@ -299,5 +331,10 @@ export function visibleRepoSqlFilter(user: User, alias = "repos"): SqlFilter {
   if (user.permissions.view_others_private) {
     clauses.push(`${alias}.is_private = 1`);
   }
-  return { sql: `(${clauses.join(" OR ")})`, params: [user.id] };
+  // RepoAccessFacts.adminOnly, as SQL: never a non-admin-owned repo on an
+  // unrestricted forge, whoever asks (the admin returned above).
+  const notAdminOnly =
+    `(${alias}.forge_id IN (SELECT id FROM forges WHERE allow_private_network = 0)` +
+    ` OR ${alias}.owner_user_id IN (SELECT id FROM users WHERE is_admin = 1))`;
+  return { sql: `((${clauses.join(" OR ")}) AND ${notAdminOnly})`, params: [user.id] };
 }

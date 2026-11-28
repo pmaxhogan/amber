@@ -435,12 +435,28 @@ describe("changing a repo", () => {
     });
     expect(asOwner.json()).toMatchObject({ accountOverrideId: alicesAccount.id });
 
-    // ...and anyone allowed to edit may clear it.
-    const cleared = await call("mod", "PATCH", `/api/repos/${String(alicePublic)}`, {
+    // ...and clearing it is the owner's or the admin's call too: it falls back
+    // to the owner's default account, which can be wider than the pinned one.
+    const clearedByMod = await call("mod", "PATCH", `/api/repos/${String(alicePublic)}`, {
       accountOverrideId: null,
     });
-    expect(cleared.statusCode).toBe(200);
-    expect(cleared.json()).toMatchObject({ accountOverrideId: null });
+    expect(clearedByMod.statusCode).toBe(403);
+    expect(clearedByMod.json()).toMatchObject({ details: { requires: "owner" } });
+    expect(
+      temp.db.get("SELECT account_override_id AS a FROM repos WHERE id = ?", alicePublic),
+    ).toEqual({ a: alicesAccount.id });
+    for (const who of ["alice", "admin"] as const) {
+      temp.db.run(
+        "UPDATE repos SET account_override_id = ? WHERE id = ?",
+        alicesAccount.id,
+        alicePublic,
+      );
+      const cleared = await call(who, "PATCH", `/api/repos/${String(alicePublic)}`, {
+        accountOverrideId: null,
+      });
+      expect(cleared.statusCode, who).toBe(200);
+      expect(cleared.json()).toMatchObject({ accountOverrideId: null });
+    }
   });
 
   const DELETE_STATUS: Record<Exclude<Who, "removed">, [Expect, Expect]> = {

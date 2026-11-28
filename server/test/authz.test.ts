@@ -10,6 +10,7 @@ import {
   requireRepoOwnerOrAdmin,
   requireRepoView,
   isAuthzRequirement,
+  loadRepoAccessFacts,
   meetsRequirement,
   visibleRepoSqlFilter,
   type AuthzRequirement,
@@ -405,10 +406,18 @@ describe("object-level helpers", () => {
   });
 
   it("canView follows the visibility rule exactly", () => {
-    const mine = { ownerUserId: 10, isPrivate: true };
-    const othersPublic = { ownerUserId: 11, isPrivate: false };
-    const othersPrivate = { ownerUserId: 11, isPrivate: true };
-    const ownerless = { ownerUserId: null, isPrivate: true };
+    const mine = { ownerUserId: 10, isPrivate: true, adminOnly: false };
+    const othersPublic = { ownerUserId: 11, isPrivate: false, adminOnly: false };
+    const othersPrivate = { ownerUserId: 11, isPrivate: true, adminOnly: false };
+    const ownerless = { ownerUserId: null, isPrivate: true, adminOnly: false };
+    // A non-admin's repo on an unrestricted forge: the admin's alone, not even
+    // its owner's (RepoAccessFacts.adminOnly).
+    const lan = { ownerUserId: 10, isPrivate: false, adminOnly: true };
+    expect(canView(base, lan)).toBe(false);
+    expect(canView(withPerms({ view_others_public: true, view_others_private: true }), lan)).toBe(
+      false,
+    );
+    expect(canView({ ...base, isAdmin: true }, lan)).toBe(true);
 
     expect(canView(base, mine)).toBe(true);
     expect(canView(base, othersPublic)).toBe(false);
@@ -427,18 +436,27 @@ describe("object-level helpers", () => {
     const forgeId = seedForge(db);
     const admin = getAdminUser(db);
     const friend = findUserByEmail(db, DEFAULT_USER)!;
-    const rows: { owner: number; isPrivate: number }[] = [
+    const lanForge = db.run(
+      `INSERT INTO forges (protocol, host, port, kind, allow_private_network, created_at, updated_at)
+       VALUES ('http', 'gitea.lan.example.com', NULL, 'gitea', 1, 1, 1)`,
+    ).lastInsertRowid;
+    const rows: { owner: number; isPrivate: number; forge?: number }[] = [
       { owner: admin.id, isPrivate: 1 },
       { owner: admin.id, isPrivate: 0 },
       { owner: friend.id, isPrivate: 1 },
       { owner: friend.id, isPrivate: 0 },
+      // On an unrestricted forge: the admin's rows follow the ordinary rule,
+      // a friend's is the admin's alone, not even the friend's own.
+      { owner: admin.id, isPrivate: 1, forge: lanForge },
+      { owner: friend.id, isPrivate: 1, forge: lanForge },
+      { owner: friend.id, isPrivate: 0, forge: lanForge },
     ];
     rows.forEach((row, index) => {
       db.run(
         `INSERT INTO repos (forge_id, path, display_name, slug, short_id, owner_user_id, is_private,
                             created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1)`,
-        forgeId,
+        row.forge ?? forgeId,
         `o/r${String(index)}`,
         `r${String(index)}`,
         `o-r${String(index)}-aaaaaaa${String(index)}`,
@@ -464,14 +482,17 @@ describe("object-level helpers", () => {
         )
         .map((row) => row.id);
       const expected = db
-        .all<{ id: number; owner_user_id: number; is_private: number }>(
-          "SELECT id, owner_user_id, is_private FROM repos ORDER BY id",
-        )
-        .filter((row) =>
-          canView(user, { ownerUserId: row.owner_user_id, isPrivate: row.is_private === 1 }),
-        )
+        .all<{ id: number }>("SELECT id FROM repos ORDER BY id")
+        .filter((row) => {
+          const facts = loadRepoAccessFacts(db, row.id);
+          return facts !== undefined && canView(user, facts);
+        })
         .map((row) => row.id);
       expect(visible).toEqual(expected);
+      if (!user.isAdmin) {
+        // Neither the friend's two LAN rows, whatever the permissions.
+        expect(visible.filter((id) => id >= 6)).toEqual([]);
+      }
     }
     expect(() => visibleRepoSqlFilter(admin, "repos; DROP TABLE repos")).toThrow(/unsafe/);
   });

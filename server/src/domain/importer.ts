@@ -10,7 +10,7 @@ import {
   type ParsedRepoUrl,
 } from "@amber/shared";
 import type { Db } from "../db/db.ts";
-import { canView } from "../security/authz.ts";
+import { canView, isAdminOnlyRepo } from "../security/authz.ts";
 import { findOwnAccountByUsername } from "./accounts.ts";
 import { ownerMayUseAccounts } from "./credentials.ts";
 import { DomainError } from "./errors.ts";
@@ -20,6 +20,7 @@ import {
   detectForgeKind,
   findForge,
   HOST_NOT_ENABLED_MESSAGE,
+  assertMayUseForge,
   mayAddForges,
   mayUseForge,
   upsertForge,
@@ -438,6 +439,8 @@ function commitNamespaceLine(
 ): NamespaceOutcome {
   return db.tx(() => {
     const forge = upsertForge(db, originOf(parsed));
+    // As in commitLine: decided again inside the transaction (mayUseForge).
+    assertMayUseForge(importer, forge);
     const { accountId, warning } = prefixAccount(
       db,
       importer,
@@ -510,6 +513,7 @@ function commitLine(
         const visible = canView(importer, {
           ownerUserId: existing.owner_user_id,
           isPrivate: existing.is_private !== 0,
+          adminOnly: isAdminOnlyRepo(db, known.id, existing.owner_user_id),
         });
         return visible
           ? {
@@ -527,6 +531,9 @@ function commitLine(
     }
 
     const forge = known ?? upsertForge(db, originOf(parsed));
+    // Re-checked inside the transaction: vetNewHosts decided outside it, and
+    // the admin may have flipped the forge to unrestricted since.
+    assertMayUseForge(importer, forge);
     const { accountId, warning } = prefixAccount(
       db,
       importer,
