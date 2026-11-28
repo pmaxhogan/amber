@@ -214,6 +214,64 @@ function describe(status: number, kind: ProviderErrorKind, url: string, hint?: s
 }
 
 /**
+ * The most a provider response body may be. A hostile forge API (any
+ * restricted forge a manage_forges user added, say) could otherwise stream an
+ * endless body into response.json() and exhaust the process's memory.
+ * 32 MB is far beyond any real page of repository metadata.
+ */
+export const MAX_PROVIDER_BODY_BYTES = 32 * 1024 * 1024;
+
+/** An error body is only ever read to classify it; a little is plenty. */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
+/**
+ * Read at most `limit` bytes of a body as UTF-8 text. Returns null when the
+ * body is larger (the rest is cancelled, never buffered), or the text read so
+ * far when `truncate` is set. A declared Content-Length over the limit is
+ * refused before reading anything.
+ */
+export async function readBodyCapped(
+  response: Response,
+  limit: number,
+  truncate = false,
+): Promise<string | null> {
+  const declared = Number(response.headers.get("content-length") ?? "");
+  if (!truncate && Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  const body = response.body;
+  if (body === null) {
+    return "";
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (total + value.byteLength > limit) {
+        await reader.cancel().catch(() => undefined);
+        if (!truncate) {
+          return null;
+        }
+        chunks.push(value.subarray(0, limit - total));
+        total = limit;
+        break;
+      }
+      chunks.push(value);
+      total += value.byteLength;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks, total).toString("utf8");
+}
+
+/**
  * One GET returning JSON. Redirects are followed only within the same origin,
  * at most MAX_REDIRECTS deep. Errors always come back as ProviderError so the
  * caller can classify without touching HTTP details.
@@ -262,12 +320,15 @@ export async function getJson<T>(
       const target = new URL(location, currentUrl).toString();
       // Following a redirect off-origin would hand the credential to another host.
       assertSameOrigin(target, currentUrl);
+      // A redirect's body is never read, and must not be left buffering.
+      await response.body?.cancel().catch(() => undefined);
       currentUrl = target;
       continue;
     }
 
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
+      const body =
+        (await readBodyCapped(response, MAX_ERROR_BODY_BYTES, true).catch(() => "")) ?? "";
       const kind =
         options.classify?.(response.status, response.headers, body) ??
         classifyStatus(response.status, response.headers, body);
@@ -280,8 +341,19 @@ export async function getJson<T>(
 
     let data: T;
     try {
-      data = (await response.json()) as T;
+      const text = await readBodyCapped(response, MAX_PROVIDER_BODY_BYTES);
+      if (text === null) {
+        throw new ProviderError(
+          `Forge returned more than ${String(MAX_PROVIDER_BODY_BYTES / 1024 / 1024)} MB for ` +
+            new URL(currentUrl).pathname,
+          { kind: "invalid_response", status: response.status },
+        );
+      }
+      data = JSON.parse(text) as T;
     } catch (cause) {
+      if (cause instanceof ProviderError) {
+        throw cause;
+      }
       throw new ProviderError(
         `Forge returned a non-JSON body for ${new URL(currentUrl).pathname}`,
         {

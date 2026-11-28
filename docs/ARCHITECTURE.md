@@ -301,6 +301,7 @@ default, allowed scopes, and UI metadata (label, description, group). Keys:
 | `max_concurrent_syncs`     | 8       | global    |
 | `max_concurrent_per_forge` | 4       | global    |
 | `default_user_storage_cap_gb` | 5    | global    |
+| `min_free_disk_gb`            | 5    | global    |
 
 Resolution order (narrowest wins): repo -> effective account (the account the repo's
 fetches would use, by the credential rule in "Credentials are per user": the OWNER's
@@ -433,13 +434,14 @@ directory names never collide regardless of sanitization overlaps.
   (bare to mirror, say) from being silently overridden by config left behind by
   the previous mode.
 - Which forges get LFS at all is an egress decision (see "Forges and outbound
-  requests"): an unrestricted forge runs git-lfs as configured; a well-known
-  public forge runs it with the endpoint forced on the command line,
+  requests"): unrestricted and well-known public forges run git-lfs, ALWAYS
+  with the endpoint forced on the command line,
   `-c lfs.url=<remote>.git/info/lfs`, so a repository's `.lfsconfig` (or a
-  `remote.<name>.lfsurl`) cannot point git-lfs at another host (command-line
-  config outranks `.lfsconfig`, and `lfs.url` outranks the per-remote key,
-  git-lfs-config(5)); every other restricted forge skips git-lfs entirely,
-  whatever `lfs_enabled` says.
+  `remote.<name>.lfsurl`) cannot point git-lfs, and the owner's credential,
+  at another host, the LAN included (command-line config outranks
+  `.lfsconfig`, and `lfs.url` outranks the per-remote key, git-lfs-config(5));
+  every other restricted forge skips git-lfs entirely, whatever `lfs_enabled`
+  says.
 - LFS fetch failures are non-fatal: they are logged at warn and the sync still
   records success. An LFS server that is down, rate limiting, or refusing a
   token must not cost the run its git objects, which are the part that matters.
@@ -569,11 +571,15 @@ switch (`git_remote.enabled`, admin only) decides whether they answer. Endpoints
   still applies), so someone spraying guesses from a shared address cannot lock
   a user out of an address they already log in from. The challenge leg (no
   credentials) is never throttled, since a real clone always starts with it.
-  Both maps are bounded. The address is `request.ip` with `trustProxy` set to a
-  function that believes exactly ONE hop, and only from a loopback or private
-  peer (`trustNearestProxy` in `app.ts`): behind cloudflared that is the client
-  address Cloudflare reported, never the left-most `X-Forwarded-For` entry a
-  client writes itself. A function rather than a hop count because Fastify 5
+  Both maps are bounded, and an IPv6 client is keyed by its /64 in both (a
+  host routinely holds a whole /64 and could take a fresh address per guess).
+  The address is `request.ip`, with `trustProxy` set to a function
+  (`security/trustedProxies.ts`) that believes exactly ONE hop, and only from a
+  peer in the `TRUSTED_PROXY_CIDRS` allow list (default loopback only): behind
+  cloudflared that is the client address Cloudflare reported, never the
+  left-most `X-Forwarded-For` entry a client writes itself, and a LAN client
+  (or every client behind docker's bridge NAT) that is not the listed proxy
+  cannot set its own. A function rather than a hop count because Fastify 5
   treats a numeric `trustProxy` as "trust nothing".
 - Visibility: after authentication the slug must resolve and the user must be
   able to view that repo (`canView`); anything else is the same 404 as an
@@ -977,6 +983,12 @@ configure.
     injects them.
   - The `raw` endpoint cannot serve active content (see "Repository
     browser").
+- Provider API responses are read through a 32 MB cap (`providers/http.ts`
+  `readBodyCapped`) before they are parsed, on every path including pinned
+  restricted-forge requests: a hostile forge API cannot exhaust memory with an
+  endless body. A larger body, or a declared Content-Length over the cap, is a
+  provider error (`invalid_response`); an error body is read only up to 64 KB,
+  and a redirect's body is never read.
 - SSRF note: amber's whole job is fetching user-supplied URLs, so outbound requests
   are inherently arbitrary; mitigations: only http(s) protocols allowed
   (GIT_ALLOW_PROTOCOL), no redirects followed by provider API clients beyond same
@@ -1136,10 +1148,17 @@ Rules that are not toggles:
   only name an account the repo's owner owns. Anyone allowed to edit may clear
   an override.
 - OWNER-DERIVED FIELDS. A viewer who is neither the owner nor the admin reads
-  `accountOverrideId` and `managedByAccountSyncId` as null, and `lastError`
-  (and each run's `error` in the run history) as a fixed marker ("The last
-  sync failed. The details are visible to the repository's owner.") whenever
-  there is one: those values were chosen or learned with the owner's account.
+  `accountOverrideId`, `managedByAccountSyncId` and `ownerGone` as null, and
+  `lastError` (and each run's `error` in the run history) as a fixed marker
+  ("The last sync failed. The details are visible to the repository's owner.")
+  whenever there is one: those values were chosen or learned with the owner's
+  account.
+- FORCE ANONYMOUS. Turning `force_anonymous` ON takes a credential away, so
+  `modify_others` may do it. Turning it OFF lets the repo resolve the owner's
+  own default account, exactly like setting an override, so it is the owner's
+  or the admin's call (403 otherwise); on an adopted repo that keeps a
+  `modify_others` user from pointing the admin's token at a path a removed
+  user chose.
 - A PATH CHANGE resets `is_private` to 1 and clears `visibility_checked_at`:
   the row now names a different upstream and nothing is known about it. It
   also puts the repo back through the first-clone cap gate, and is refused
@@ -1163,8 +1182,10 @@ Rules that are not toggles:
   `owner_cannot_import` (the owner's permission decides, not the caller's).
   Admin-owned syncs are unaffected.
 - Without `view_removed`, `GET /api/status` reports `goneRepos: 0` and
-  `GET /api/repos?sort=gone_at` is refused (403, like `gone=true`). `goneAt`
-  stays on rows the caller can already see.
+  `GET /api/repos?sort=gone_at` is refused (403, like `gone=true`). On repos
+  the caller does NOT own, `goneAt` reads null, and neither the `repo.gone`
+  event nor the gone web push is delivered about them. A user always sees gone
+  state for the repos they own.
 
 ### Credentials are per user
 
@@ -1207,7 +1228,7 @@ an access-control decision.
 
   | tier | which forges | DNS check and pin | git redirects | git-lfs |
   | --- | --- | --- | --- | --- |
-  | unrestricted | `allow_private_network = 1` (admin only) | no | `initial` | as configured |
+  | unrestricted | `allow_private_network = 1` (set by the admin, used by the admin only) | no | `initial` | yes, endpoint forced with `-c lfs.url=<remote>.git/info/lfs` |
   | well-known public | restricted, https on the default port, host exactly github.com, gitlab.com, bitbucket.org or codeberg.org | yes | `initial` | yes, endpoint forced with `-c lfs.url=<remote>.git/info/lfs` |
   | restricted | every other restricted forge | yes | none (`http.followRedirects=false`) | skipped |
 
@@ -1231,6 +1252,22 @@ an access-control decision.
   forge. A host on a private network or an odd port must first be created on
   the forges page by the admin with "allow private network" switched on; the
   import then finds it.
+- UNRESTRICTED FORGES ARE FOR THE ADMIN'S OWN USE. Amber fetches from its own
+  network position, so on such a forge an anonymous clone already reaches
+  whatever that position reaches; a user who could import there could back up,
+  own and browse internal repositories. Only the admin may own repos, accounts
+  or account syncs on one: anyone else's import line is refused with
+  `host_not_enabled` (the same text an unknown host gets, so the refusal says
+  nothing about the LAN), and so is creating an account or an account sync
+  there (403). As defence in depth the sync itself refuses to fetch a repo on an
+  unrestricted forge whose owner is not the admin, and an account sync run
+  refuses the same way ("This forge reaches private networks and is for the
+  Amber admin's own use", error kind `other`: no breaker effect, never a gone
+  signal). If the admin flips a restricted forge to unrestricted while
+  non-admins own repos there, those repos simply stop syncing with that error
+  until the admin adopts or deletes them.
+- Flipping a forge to unrestricted also sets `is_private = 1` on every repo of
+  that forge, in the same transaction.
 - Web push endpoints are vetted by the same rule (https on 443, a public DNS
   name), at subscribe time and again at every send, with the connection
   pinned (see "Web push").
@@ -1277,6 +1314,31 @@ never creates anything:
   finishing after the rename does not clear it). `last_success_at` is left
   alone, so gone detection is unaffected. An owner already at or over their
   cap cannot rename at all: 403 `storage_cap_reached`.
+- IN-FLIGHT BUDGET AND FREE-SPACE FLOOR (`sync/diskWatch.ts`). The ceiling
+  below only decides whether a sync may START, and one sync can still fill the
+  volume (a tiny repository with huge LFS content, which no forge size
+  includes; an endless packfile from a hostile forge), as can several parallel
+  syncs of one owner. A full volume also stops SQLite (EDQUOT) and crash-loops
+  the whole instance. So while a sync runs, a timer (2 s) checks:
+  - a capped (non-admin) owner's growth: the sum, over ALL of their syncs in
+    flight, of each repo directory's growth since its sync started, against
+    `2 x cap - usage`. Past it the sync that noticed is killed (its git process
+    tree, through an AbortSignal every git call of the sync carries) with
+    "Storage cap exceeded"; the others notice on their next poll.
+  - the free space on the backups volume (statfs) against the global-only
+    setting `min_free_disk_gb` (default 5, 0 turns it off), for EVERY sync, the
+    admin's included. Below it the sync is killed with "Disk nearly full", and
+    the scheduler does not start one at all (refused before it starts, like
+    the cap gates: no run row, no breaker effect, normal schedule).
+  A killed sync is a failed run of kind `disk` (no breaker effect, never a
+  gone signal, the ordinary failure backoff), and its partial files are
+  removed: git's temporary packs (`objects/pack/tmp_*`, `objects/incoming-*`)
+  and git-lfs's `lfs/tmp` and `lfs/incomplete`. The same cleanup runs after a
+  sync that timed out. Complete objects and refs are never touched, so the
+  backup that existed before is intact. `GET /api/status` gives the admin
+  `disk: { freeBytes, minFreeBytes, belowFloor }` (absent for everyone else,
+  and when the volume cannot be read; an unreadable volume is not treated as
+  full).
 - HARD CEILING. While a non-admin owner's usage is at or above TWICE their
   cap, none of their repos syncs: each due sync is refused before it starts,
   recorded on the repo as "Storage cap exceeded" (`last_error`, no run row, so
@@ -1446,7 +1508,10 @@ warning, the rest are ignored), `INSECURE_ALLOW_PUBLIC_ACCESS`,
 `INSECURE_USER_EMAILS` (insecure mode only: stand-in users for tests and local
 development, see "Insecure mode and tests"), `LOG_LEVEL` (info),
 `PUBLIC_ORIGIN` (used for clone URLs; defaults to http://localhost:8080, so any
-real deployment must set it),
+real deployment must set it), `TRUSTED_PROXY_CIDRS` (comma separated addresses
+or CIDRs whose nearest X-Forwarded-For hop is believed; default loopback only,
+`127.0.0.0/8,::1`; set it to the range the reverse proxy connects from, see
+"Git remote"),
 `WEB_DIST_DIR` (where the built SPA lives; defaults to `web/dist` resolved
 against the server module, which is correct both inside the image and when
 running from the repo - a deployment never needs to set it, which is why it is

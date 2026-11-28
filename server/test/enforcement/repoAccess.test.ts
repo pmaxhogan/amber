@@ -322,6 +322,28 @@ describe("changing a repo", () => {
     },
   );
 
+  it("lets only the owner and the admin turn force_anonymous OFF", async () => {
+    temp.db.run("UPDATE repos SET force_anonymous = 1 WHERE id = ?", alicePublic);
+    // Off would let the repo resolve the owner's own default account, like an
+    // override: modify_others may not decide that.
+    const asMod = await call("mod", "PATCH", `/api/repos/${String(alicePublic)}`, {
+      forceAnonymous: false,
+    });
+    expect(asMod.statusCode).toBe(403);
+    expect(asMod.json()).toMatchObject({ details: { requires: "owner" } });
+    expect(temp.db.get("SELECT force_anonymous AS f FROM repos WHERE id = ?", alicePublic)).toEqual(
+      { f: 1 },
+    );
+    for (const who of ["alice", "admin"] as const) {
+      temp.db.run("UPDATE repos SET force_anonymous = 1 WHERE id = ?", alicePublic);
+      const off = await call(who, "PATCH", `/api/repos/${String(alicePublic)}`, {
+        forceAnonymous: false,
+      });
+      expect(off.statusCode, who).toBe(200);
+      expect(off.json()).toMatchObject({ forceAnonymous: false });
+    }
+  });
+
   it("lets only the owner and the admin change the path, which resets visibility", async () => {
     temp.db.run("UPDATE repos SET visibility_checked_at = 5 WHERE id = ?", alicePublic);
     const asMod = await call("mod", "PATCH", `/api/repos/${String(alicePublic)}`, {

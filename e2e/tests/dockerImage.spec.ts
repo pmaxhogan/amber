@@ -76,5 +76,18 @@ test.describe("docker image", () => {
       "curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/ || true",
     );
     expect(root).toBe("200");
+
+    // The egress pin relies on this git's libcurl honouring
+    // http.curloptResolve: a name that cannot resolve, pinned to the
+    // container's own Amber, must reach it (a 404 from /git) rather than fail
+    // to resolve.
+    const pinned = await exec(
+      "sh",
+      "-c",
+      "git -c http.curloptResolve= -c http.curloptResolve=pinned.example.invalid:8080:127.0.0.1 " +
+        "ls-remote http://pinned.example.invalid:8080/git/none.git 2>&1 || true",
+    );
+    expect(pinned).not.toContain("Could not resolve host");
+    expect(pinned).toMatch(/404|not found/i);
   });
 });

@@ -4,7 +4,7 @@ import { generateVAPIDKeys, sendNotification } from "web-push";
 import type { Db } from "../db/db.ts";
 import { getAdminUser, getUser, listUsers } from "../domain/users.ts";
 import type { EventMeta } from "../events.ts";
-import { canView, loadRepoAccessFacts } from "../security/authz.ts";
+import { canView, loadRepoAccessFacts, maySeeGone } from "../security/authz.ts";
 import {
   EgressRefusedError,
   pinnedHttpsAgent,
@@ -456,7 +456,9 @@ export function createPushNotifier(options: PushNotifierOptions): PushNotifier {
           }
           const theirs = batch.filter((repo) => {
             const facts = loadRepoAccessFacts(db, repo.repoId);
-            return facts !== undefined && canView(user, facts);
+            // Their own gone repos always; anyone else's only with
+            // view_removed, like the repo.gone event.
+            return facts !== undefined && canView(user, facts) && maySeeGone(user, facts);
           });
           if (theirs.length === 0) {
             continue;

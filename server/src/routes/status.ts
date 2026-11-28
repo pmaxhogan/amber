@@ -1,7 +1,9 @@
 import type { Status } from "@amber/shared";
 import type { FastifyPluginAsync } from "fastify";
 import { countGoneRepos, countRepos, totalDiskUsageBytes } from "../domain/repos.ts";
+import { resolveGlobalSettings } from "../domain/settings.ts";
 import { requireRequestUser } from "../security/authz.ts";
+import { minFreeBytesFor, statfsFreeBytes } from "../sync/diskWatch.ts";
 
 /**
  * /api/status totals, queue depth, and breaker state.
@@ -19,11 +21,29 @@ import { requireRequestUser } from "../security/authz.ts";
  */
 export const statusRoutes: FastifyPluginAsync = async (app) => {
   const { db, config, version, scheduler } = app.amber;
+  const freeDiskBytes = app.amber.freeDiskBytes ?? statfsFreeBytes;
 
-  app.get("/status", { config: { authz: "user" } }, (request): Status => {
+  app.get("/status", { config: { authz: "user" } }, async (request): Promise<Status> => {
     const user = requireRequestUser(request);
     const queue = scheduler?.status() ?? { queueDepth: 0, activeSyncs: 0, breakerOpen: false };
+    // The free-space floor is instance health: the admin's to see. A volume
+    // that cannot be read simply leaves the field out.
+    let disk: Status["disk"];
+    if (user.isAdmin) {
+      try {
+        const freeBytes = Math.floor(await freeDiskBytes(config.backupsDir));
+        const minFreeBytes = minFreeBytesFor(resolveGlobalSettings(db).min_free_disk_gb);
+        disk = {
+          freeBytes,
+          minFreeBytes,
+          belowFloor: minFreeBytes > 0 && freeBytes < minFreeBytes,
+        };
+      } catch {
+        disk = undefined;
+      }
+    }
     return {
+      ...(disk === undefined ? {} : { disk }),
       version,
       insecureMode: config.insecureMode,
       queueDepth: queue.queueDepth,

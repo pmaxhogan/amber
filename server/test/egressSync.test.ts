@@ -299,6 +299,21 @@ describe("the well-known public forge tier", () => {
     }
   });
 
+  it("forces the LFS endpoint on an unrestricted forge too", async (context) => {
+    resetLfsProbe();
+    if (!(await isGitLfsAvailable({ stateDir: join(root, "state") }))) {
+      context.skip();
+      return;
+    }
+    const run = await sync(repoOn("git.example.org", false));
+    expect(run.outcome).toBe("success");
+    const lfs = networkCalls().filter((args) => subcommand(args) === "lfs");
+    expect(lfs).toHaveLength(1);
+    // A repository's .lfsconfig must not steer git-lfs (and the owner's
+    // credential) anywhere, LAN included, on any tier that runs it.
+    expect(configOf(lfs[0] ?? []).at(-1)).toMatch(/^lfs\.url=.*git\.example\.org.*\/info\/lfs$/);
+  });
+
   it("still refuses a well-known host that resolves privately", async () => {
     const run = await sync(seededGithubRepo(), {
       resolveHost: fakeDns({ "github.com": ["10.0.0.1"] }),

@@ -16,6 +16,12 @@ import { lookupRepoInfo } from "../providers/forks.ts";
 import type { RepoInfo } from "../providers/types.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { jitteredIntervalMs } from "./backoff.ts";
+import {
+  DISK_FLOOR_ERROR,
+  isBelowDiskFloor,
+  minFreeBytesFor,
+  type FreeBytesProbe,
+} from "./diskWatch.ts";
 import { shutdownGit } from "./gitCli.ts";
 import {
   countForgesWithRepos,
@@ -63,6 +69,10 @@ export interface SchedulerOptions {
   /** How long stop() waits for running syncs before killing git. */
   shutdownGraceMs?: number;
   allowFileProtocol?: boolean;
+  /** Test seam: free bytes on the backups volume (statfs by default). */
+  freeDiskBytes?: FreeBytesProbe;
+  /** Test seam: the in-sync disk guard's poll interval and probes. */
+  diskWatch?: SyncRepoDeps["diskWatch"];
   /**
    * Asks the forge about one repository right before a capped owner's first
    * clone, for its size (and, while at it, its visibility). Injectable so the
@@ -468,18 +478,28 @@ export class Scheduler {
     const { db } = this.#options;
     const facts = firstCloneFacts(db, repoId);
     const owner = facts.cappedOwner;
-    if (owner === null) {
-      return true;
-    }
     const refuse = (message: string): false => {
       const now = this.#now();
       const retryAt =
         now + jitteredIntervalMs(settings.sync_interval_minutes * 60_000, this.#options.random);
       markFirstCloneRefused(db, repoId, message, retryAt, now);
-      this.#log.info({ repoId, ownerUserId: owner.id }, "sync refused by the storage cap");
+      this.#log.info({ repoId, ownerUserId: owner?.id ?? null }, "sync refused before it started");
       this.#options.events?.publish("repo.updated", { repoId });
       return false;
     };
+    // THE FREE-SPACE FLOOR, for every sync, the admin's included: a full
+    // volume would stop SQLite and take the whole instance down. The running
+    // sync is watched too (sync/diskWatch.ts); this keeps one from starting.
+    const minFreeBytes = minFreeBytesFor(settings.min_free_disk_gb);
+    if (
+      minFreeBytes > 0 &&
+      (await isBelowDiskFloor(this.#options.backupsDir, minFreeBytes, this.#options.freeDiskBytes))
+    ) {
+      return refuse(DISK_FLOOR_ERROR);
+    }
+    if (owner === null) {
+      return true;
+    }
     // THE HARD CEILING (domain/caps.ts isAtCapCeiling), for every sync of a
     // capped owner's repo, not only first clones. Refused like the gate below:
     // no run row, so no backoff growth and no breaker effect, retried on the
@@ -533,6 +553,7 @@ export class Scheduler {
       settings: this.#options.settings,
       credentials: this.#options.credentials,
       allowFileProtocol: this.#options.allowFileProtocol,
+      ...(this.#options.diskWatch === undefined ? {} : { diskWatch: this.#options.diskWatch }),
       now: this.#options.now,
       random: this.#options.random,
     });

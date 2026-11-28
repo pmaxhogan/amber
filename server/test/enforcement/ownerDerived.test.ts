@@ -120,6 +120,27 @@ describe("owner-derived repo fields", () => {
     }
   });
 
+  it("hide another owner's gone state without view_removed, and ownerGone always", async () => {
+    temp.db.run(
+      "UPDATE repos SET gone_at = 100, owner_gone = 1, owner_checked_at = 200 WHERE id = ?",
+      repoId,
+    );
+    const url = `/api/repos/${String(repoId)}`;
+    expect(await get(ALICE, url)).toMatchObject({ goneAt: 100, ownerGone: true });
+    expect(await get(null, url)).toMatchObject({ goneAt: 100, ownerGone: true });
+    expect(await get(BOB, url)).toMatchObject({ goneAt: null, ownerGone: null });
+    const list = (await get(BOB, "/api/repos")) as { rows: Record<string, unknown>[] };
+    expect(list.rows.find((row) => row.id === repoId)).toMatchObject({
+      goneAt: null,
+      ownerGone: null,
+    });
+
+    // view_removed shows that it is gone; whether the upstream owner is gone
+    // too was asked with Alice's account and stays hers.
+    makeUser(temp.db, BOB, { view_removed: true });
+    expect(await get(BOB, url)).toMatchObject({ goneAt: 100, ownerGone: null });
+  });
+
   it("leave a repo without an error with a null lastError for everyone", async () => {
     temp.db.run("UPDATE repos SET last_error = NULL WHERE id = ?", repoId);
     expect(await get(BOB, `/api/repos/${String(repoId)}`)).toMatchObject({ lastError: null });

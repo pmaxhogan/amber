@@ -191,6 +191,20 @@ export const settingsRegistry = {
       unit: "GB",
     },
   }),
+  min_free_disk_gb: defineSetting({
+    schema: z.number().min(0),
+    default: 5,
+    scopes: GLOBAL_ONLY,
+    ui: {
+      label: "Minimum free disk space",
+      description:
+        "No sync starts, and a running one is stopped, while the backups volume has less free space than this. A full disk would take every backup down with it, so this applies to everyone, the admin included. 0 turns it off.",
+      group: "Performance",
+      control: "number",
+      min: 0,
+      unit: "GB",
+    },
+  }),
 } as const;
 
 export type SettingsRegistry = typeof settingsRegistry;

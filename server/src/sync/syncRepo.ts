@@ -13,6 +13,7 @@ import type { Logger } from "pino";
 import type { Db } from "../db/db.ts";
 import { getCredential, markAccountUsed } from "../domain/accounts.ts";
 import { refreshCapState } from "../domain/caps.ts";
+import { ADMIN_ONLY_FORGE_ERROR, ownerMayUseForge } from "../domain/forges.ts";
 import { resolveSettings } from "../domain/settings.ts";
 import type { EventMeta } from "../events.ts";
 import { isPlausibleRef } from "../gitRef.ts";
@@ -33,6 +34,13 @@ import {
   RATE_LIMIT_BACKOFF_FACTOR,
 } from "./backoff.ts";
 import { directorySizeBytes } from "./diskUsage.ts";
+import {
+  cleanupPartialFetch,
+  DiskBudgetError,
+  minFreeBytesFor,
+  startDiskWatch,
+  type FreeBytesProbe,
+} from "./diskWatch.ts";
 import {
   classifyGitFailure,
   expectedHostForRemote,
@@ -101,6 +109,12 @@ export interface SyncRepoDeps {
   resolveHost?: HostResolver;
   /** Test-only: the git binary to run, so a test can record the exact argv. */
   gitBinary?: string;
+  /** Test seams for the in-sync disk guard (sync/diskWatch.ts). */
+  diskWatch?: {
+    pollMs?: number;
+    freeBytes?: FreeBytesProbe;
+    sizeOf?: (dir: string) => Promise<number>;
+  };
 }
 
 /** Repo-level git config applied once when paranoid mode is turned on. */
@@ -302,20 +316,51 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
 
   const dir = repoDir(deps.backupsDir, target.repo.slug);
 
+  // The disk guard runs for the whole sync, every git call carrying its
+  // signal: an owner's in-flight growth past twice their cap, or the volume
+  // dropping below min_free_disk_gb, kills the running git process tree.
+  const watch = await startDiskWatch({
+    db,
+    ownerUserId: target.repo.ownerUserId,
+    dir,
+    backupsDir: deps.backupsDir,
+    minFreeBytes: minFreeBytesFor(settings.min_free_disk_gb),
+    ...(deps.diskWatch?.pollMs === undefined ? {} : { pollMs: deps.diskWatch.pollMs }),
+    ...(deps.diskWatch?.freeBytes === undefined ? {} : { freeBytes: deps.diskWatch.freeBytes }),
+    ...(deps.diskWatch?.sizeOf === undefined ? {} : { sizeOf: deps.diskWatch.sizeOf }),
+  });
   try {
-    stats = await performSync(deps, target, settings, log);
+    stats = await performSync(deps, target, settings, log, watch.signal);
   } catch (cause) {
     outcome = "error";
     // An egress refusal is "network": Amber would not connect. It is not a
     // kind that can make a repository gone, and it takes the ordinary failure
     // backoff, so a refused host is not re-resolved any faster than a dead one.
+    // A disk stop is "disk": no breaker effect, never a reason to call the
+    // repo gone, the ordinary failure backoff.
+    const diskStop =
+      cause instanceof DiskBudgetError
+        ? cause
+        : watch.signal.aborted && watch.signal.reason instanceof DiskBudgetError
+          ? watch.signal.reason
+          : undefined;
     errorKind =
-      cause instanceof GitError
-        ? cause.kind
-        : cause instanceof EgressRefusedError
-          ? "network"
-          : "other";
-    error = scrubCredentials(cause instanceof Error ? cause.message : String(cause)).slice(
+      diskStop !== undefined
+        ? "disk"
+        : cause instanceof GitError
+          ? cause.kind
+          : cause instanceof EgressRefusedError
+            ? "network"
+            : "other";
+    if (diskStop !== undefined || (cause instanceof GitError && cause.kind === "timeout")) {
+      // A killed fetch leaves temporary packs and partial LFS downloads;
+      // what was backed up before this sync is untouched.
+      await cleanupPartialFetch(dir).catch((cleanupError: unknown) => {
+        log.warn({ err: cleanupError }, "could not remove a killed fetch's partial files");
+      });
+    }
+    const failure: unknown = diskStop ?? cause;
+    error = scrubCredentials(failure instanceof Error ? failure.message : String(failure)).slice(
       0,
       MAX_STORED_ERROR_CHARS,
     );
@@ -328,6 +373,8 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
       );
     }
     log.warn({ runId, errorKind, err: error }, "sync failed");
+  } finally {
+    watch.stop();
   }
 
   let diskUsageBytes: number | null = null;
@@ -453,11 +500,25 @@ async function performSync(
   target: SyncTarget,
   settings: ResolvedSettings,
   log: Logger,
+  signal: AbortSignal,
 ): Promise<SyncStats> {
   const now = deps.now ?? Date.now;
   const mode: CloneMode = settings.clone_mode;
   const dir = repoDir(deps.backupsDir, target.repo.slug);
   const remote = deps.remoteUrl ?? buildRemoteUrl(target.forge, target.repo.path);
+  // An unrestricted forge is the admin's alone (domain/forges.ts
+  // mayUseForge). Checked here, before anything touches the network, so a
+  // repo that slipped through (or a forge flipped to unrestricted later) is
+  // never fetched from Amber's LAN position for someone else. Kind "other":
+  // no breaker effect, and never a reason to call the repo gone. Only a
+  // network remote is a LAN position: a file:// remote exists only under the
+  // test-only allowFileProtocol (GIT_ALLOW_PROTOCOL refuses it otherwise).
+  if (
+    /^https?:\/\//i.test(remote) &&
+    !ownerMayUseForge(deps.db, target.repo.ownerUserId, target.forge)
+  ) {
+    throw new Error(ADMIN_ONLY_FORGE_ERROR);
+  }
   // Restricted forge: resolve and vet the host NOW, once per sync, and pin
   // every network git call below to the addresses that passed. Throws before
   // anything touches the network or the disk.
@@ -476,6 +537,8 @@ async function performSync(
     logger: log,
     stateDir: deps.stateDir,
     allowFileProtocol: deps.allowFileProtocol,
+    // The disk guard's kill switch, on every git call of this sync.
+    signal,
     ...(deps.gitBinary === undefined ? {} : { binary: deps.gitBinary }),
   };
   const authed: GitRunOptions = /^https?:\/\//i.test(remote)
@@ -532,15 +595,21 @@ async function performSync(
   }
 
   if (settings.lfs_enabled) {
-    if (egress.tier === "unrestricted") {
-      await fetchLfs(settings.paranoid, defaultBranch, authed, log);
-    } else if (egress.tier === "well_known") {
-      // The endpoint is forced on the command line so the repository's own
-      // .lfsconfig cannot send git-lfs to another server.
+    if (egress.tier === "unrestricted" || egress.tier === "well_known") {
+      // On EVERY tier that runs git-lfs the endpoint is forced on the command
+      // line, so the repository's own .lfsconfig (or remote.origin.lfsurl)
+      // cannot send git-lfs, and the owner's credential with it, to another
+      // server. That matters on an unrestricted forge too: its repos are as
+      // hostile as anyone's, and there git-lfs could reach the LAN.
       await fetchLfs(
         settings.paranoid,
         defaultBranch,
-        { ...authed, configList: [...egressConfig, ...lfsEndpointConfig(remote)] },
+        // Only http(s) remotes get one: a file:// remote (tests, with
+        // allowFileProtocol) uses git-lfs's local transfer, which has no
+        // URL to force and no other host to be steered to.
+        /^https?:\/\//i.test(remote)
+          ? { ...authed, configList: [...egressConfig, ...lfsEndpointConfig(remote)] }
+          : authed,
         log,
       );
     } else {

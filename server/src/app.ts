@@ -17,7 +17,7 @@ import {
   type AuthzRequirement,
 } from "./security/authz.ts";
 import { cfAccessPlugin, requestPathname, type CfAccessKeyGetter } from "./security/cfAccess.ts";
-import { classifyAddress } from "./security/egress.ts";
+import { proxyTrustFunction } from "./security/trustedProxies.ts";
 import { identityPlugin } from "./security/identity.ts";
 import { APP_VERSION } from "./version.ts";
 import { webPlugin } from "./web.ts";
@@ -53,6 +53,8 @@ export interface AppContext {
   now: () => number;
   /** Every route as registered, for the authz table test. */
   routes: RegisteredRoute[];
+  /** Test seam: free bytes on the backups volume, for /api/status. statfs by default. */
+  freeDiskBytes?: (dir: string) => Promise<number>;
 }
 
 export interface RegisteredRoute {
@@ -76,6 +78,8 @@ export interface BuildAppDeps {
   accessPolicyFetch?: PolicyFetch;
   /** Test seam: the clock the membership rule and last_seen_at run on. */
   now?: () => number;
+  /** Test seam: free bytes on the backups volume (statfs by default). */
+  freeDiskBytes?: (dir: string) => Promise<number>;
 }
 
 declare module "fastify" {
@@ -95,29 +99,6 @@ export type AmberApp = FastifyInstance<
 export const INSECURE_BANNER =
   "INSECURE_ALLOW_PUBLIC_ACCESS is set: authentication is disabled and the server " +
   "is bound to 127.0.0.1 only. Never expose this port.";
-
-/**
- * Which proxy hops Fastify may believe X-Forwarded-For from: ONE hop, the
- * immediate peer, and only while that peer is on a loopback or private
- * address. The reference deployment is cloudflared -> Amber, so request.ip
- * becomes the address cloudflared reported (the right-most X-Forwarded-For
- * entry). Trusting every hop (the old `trustProxy: true`) made request.ip the
- * LEFT-most entry, which the client writes itself, so a caller could choose
- * whose git throttle bucket its failures landed in. A numeric hop count is no
- * option: Fastify 5 treats one as "trust nothing", since a count alone cannot
- * tell a proxy from a direct client. A direct client on a public address is
- * never trusted, so it cannot spoof one either.
- */
-export function trustNearestProxy(address: string, hop: number): boolean {
-  if (hop !== 0) {
-    return false;
-  }
-  const bare = address.toLowerCase().startsWith("::ffff:") ? address.slice(7) : address;
-  const kind = classifyAddress(bare);
-  return (
-    kind === "loopback" || kind === "private" || kind === "unique_local" || kind === "link_local"
-  );
-}
 
 /**
  * Build the Fastify instance. Exported separately from index.ts so tests can
@@ -170,11 +151,14 @@ export async function buildApp(deps: BuildAppDeps): Promise<AmberApp> {
     routes: [],
     version: deps.version ?? APP_VERSION,
     ...(deps.scheduler === undefined ? {} : { scheduler: deps.scheduler }),
+    ...(deps.freeDiskBytes === undefined ? {} : { freeDiskBytes: deps.freeDiskBytes }),
   };
 
   const app = Fastify({
     loggerInstance: deps.log,
-    trustProxy: trustNearestProxy,
+    // TRUSTED_PROXY_CIDRS (security/trustedProxies.ts): only a listed peer's
+    // nearest X-Forwarded-For hop is believed. request.ip keys the git throttle.
+    trustProxy: proxyTrustFunction(config.trustedProxies),
   });
 
   app.decorate("amber", ctx);

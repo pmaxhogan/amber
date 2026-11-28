@@ -98,6 +98,17 @@ jobs:
           fi
           docker exec amber-smoke git lfs version
           docker exec amber-smoke sh -c 'command -v 7z || command -v 7za'
+          # The egress pin (security/egress.ts gitPinConfig) relies on this
+          # git's libcurl honouring http.curloptResolve. Pin a name that cannot
+          # resolve to the container's own Amber: a 404 from Amber proves the
+          # pin was used, "Could not resolve host" proves it was not.
+          pinned="$(docker exec amber-smoke sh -c 'git -c http.curloptResolve= -c http.curloptResolve=pinned.example.invalid:8080:127.0.0.1 ls-remote http://pinned.example.invalid:8080/git/none.git 2>&1 || true')"
+          echo "$pinned"
+          if echo "$pinned" | grep -q "Could not resolve host"; then
+            echo "git in the image ignores http.curloptResolve"
+            exit 1
+          fi
+          echo "$pinned" | grep -Eq "404|not found
           docker logs amber-smoke
 
       - name: Tear down the smoke container

@@ -9,7 +9,7 @@ import {
   isUniqueViolation,
   notFound,
 } from "./errors.ts";
-import type { User } from "./users.ts";
+import { getUser, type User } from "./users.ts";
 
 /**
  * A forge is an origin: protocol, host, port. Those three are IMMUTABLE after
@@ -141,6 +141,49 @@ export function mayAddForges(user: User): boolean {
 
 export function hostNotEnabled(): DomainError {
   return new DomainError("host_not_enabled", HOST_NOT_ENABLED_MESSAGE);
+}
+
+/**
+ * An UNRESTRICTED forge (`allow_private_network = 1`) is for the admin's own
+ * use. Amber fetches from its own network position, so on such a forge an
+ * anonymous clone already reaches whatever that position reaches: a user who
+ * could import there could back up, own and browse internal repositories
+ * the admin never meant to share. Only the admin may own repos, accounts or
+ * account syncs on one; anyone else is told the host is not enabled, the
+ * same answer an unknown host gets, so the refusal says nothing about the LAN.
+ */
+export function mayUseForge(user: User, forge: { allowPrivateNetwork?: boolean }): boolean {
+  // Unknown counts as unrestricted: fail closed.
+  return forge.allowPrivateNetwork === false || user.isAdmin;
+}
+
+/** mayUseForge, or the host_not_enabled refusal. */
+export function assertMayUseForge(user: User, forge: { allowPrivateNetwork?: boolean }): void {
+  if (!mayUseForge(user, forge)) {
+    throw hostNotEnabled();
+  }
+}
+
+/** Stored on a repo whose owner may not use its (unrestricted) forge. */
+export const ADMIN_ONLY_FORGE_ERROR =
+  "This forge reaches private networks and is for the Amber admin's own use, so it does not " +
+  "sync for anyone else. The admin can adopt the repository or delete it.";
+
+/**
+ * Whether the owner of a repo or account sync on `forge` may still fetch from
+ * it. A forge flipped to unrestricted after non-admins imported from it lands
+ * here: their repos stop syncing with ADMIN_ONLY_FORGE_ERROR.
+ */
+export function ownerMayUseForge(
+  db: Db,
+  ownerUserId: number | null,
+  forge: { allowPrivateNetwork: boolean },
+): boolean {
+  if (!forge.allowPrivateNetwork) {
+    return true;
+  }
+  const owner = ownerUserId === null ? undefined : getUser(db, ownerUserId);
+  return owner !== undefined && owner.isAdmin;
 }
 
 /**
@@ -282,6 +325,17 @@ export function updateForge(db: Db, id: number, patch: UpdateForge): Forge {
         now,
         id,
       );
+      if (patch.allowPrivateNetwork) {
+        // Now unrestricted: network position is the credential, so nothing
+        // on this forge may stay public (effectiveIsPrivate). In the same
+        // transaction, so no reader ever sees an unrestricted forge with a
+        // public repo on it.
+        db.run(
+          "UPDATE repos SET is_private = 1, updated_at = ? WHERE forge_id = ? AND is_private = 0",
+          now,
+          id,
+        );
+      }
       changed = true;
     }
     return changed ? requireForge(db, id) : existing;

@@ -20,6 +20,8 @@
  * Every map is bounded: the oldest insertion is evicted first.
  */
 
+import { isIP } from "node:net";
+
 export interface AuthThrottleOptions {
   /** Failures allowed in a burst, per (address, username). */
   capacity?: number;
@@ -46,12 +48,67 @@ export const DEFAULT_KNOWN_GOOD_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_ENTRIES = 10_000;
 
 /**
+ * The address a bucket is keyed on. An IPv6 client is aggregated to its /64:
+ * a single host is routinely handed a whole /64 and can pick a fresh address
+ * from it for every attempt, which would otherwise be a fresh bucket each
+ * time. An IPv4-mapped IPv6 address is keyed as the IPv4 address it carries.
+ * Anything unparseable is keyed as written.
+ */
+export function addressKey(ip: string): string {
+  const bare = ip.trim().toLowerCase().replace(/%.*$/, "");
+  if (isIP(bare) !== 6) {
+    return bare;
+  }
+  if (bare.startsWith("::ffff:") && isIP(bare.slice(7)) === 4) {
+    return bare.slice(7);
+  }
+  const groups = expandIpv6(bare);
+  return groups === null ? bare : `${groups.slice(0, 4).join(":")}::/64`;
+}
+
+/** Eight 16-bit groups as lower-case hex without leading zeros, or null. */
+function expandIpv6(text: string): string[] | null {
+  let head = text;
+  let tail: string[] = [];
+  const lastColon = text.lastIndexOf(":");
+  const maybeV4 = text.slice(lastColon + 1);
+  if (isIP(maybeV4) === 4) {
+    const [a, b, c, d] = maybeV4.split(".").map(Number) as [number, number, number, number];
+    tail = [((a << 8) | b).toString(16), ((c << 8) | d).toString(16)];
+    head = text.slice(0, lastColon + 1);
+    if (!head.endsWith("::")) {
+      head = head.slice(0, -1);
+    }
+  }
+  const halves = head.split("::");
+  if (halves.length > 2) {
+    return null;
+  }
+  const split = (part: string | undefined): string[] =>
+    part === undefined || part === "" ? [] : part.split(":");
+  const left = split(halves[0]);
+  const right = [...split(halves[1]), ...tail];
+  const fill = 8 - left.length - right.length;
+  if (fill < 0 || (halves.length === 1 && fill !== 0)) {
+    return null;
+  }
+  const groups = [
+    ...left,
+    ...new Array<string>(halves.length === 2 ? fill : 0).fill("0"),
+    ...right,
+  ];
+  return groups.length === 8
+    ? groups.map((group) => Number.parseInt(group, 16).toString(16))
+    : null;
+}
+
+/**
  * The pair key. A username is client-chosen text, so it is capped: the slug
  * format is 10 characters, and anything far longer cannot be a real one.
  * NUL never appears in an address, so the two parts cannot run together.
  */
 export function pairKey(ip: string, username: string): string {
-  return `${ip}\u0000${username.slice(0, 64)}`;
+  return `${addressKey(ip)}\u0000${username.slice(0, 64)}`;
 }
 
 function insertBounded<V>(map: Map<string, V>, key: string, value: V, max: number): void {
@@ -122,7 +179,7 @@ export class AuthThrottle {
 
   /** True while the address bucket alone still has budget. */
   allowAddress(ip: string): boolean {
-    return this.#peek(ip, this.#addressCapacity);
+    return this.#peek(addressKey(ip), this.#addressCapacity);
   }
 
   /**
@@ -140,7 +197,7 @@ export class AuthThrottle {
 
   /** Spend a token from both buckets. Called only when an attempt actually failed. */
   recordFailure(ip: string, username: string): void {
-    const address = this.#bucket(ip, this.#addressCapacity);
+    const address = this.#bucket(addressKey(ip), this.#addressCapacity);
     address.tokens = Math.max(0, address.tokens - 1);
     const pair = this.#bucket(pairKey(ip, username), this.#capacity);
     pair.tokens = Math.max(0, pair.tokens - 1);
@@ -160,7 +217,8 @@ export class AuthThrottle {
   /** Seconds until the attempt would be allowed again, for Retry-After. */
   retryAfterSeconds(ip: string, username?: string): number {
     const waits: number[] = [];
-    for (const key of username === undefined ? [ip] : [ip, pairKey(ip, username)]) {
+    const address = addressKey(ip);
+    for (const key of username === undefined ? [address] : [address, pairKey(ip, username)]) {
       const bucket = this.#buckets.get(key);
       if (bucket === undefined || bucket.tokens > 0) {
         continue;

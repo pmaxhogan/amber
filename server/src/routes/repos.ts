@@ -60,10 +60,12 @@ export function createBackupFileRemover(config: Config): RepoFileRemover {
  * Object-level rules (docs/ARCHITECTURE.md "Multi-user access control"):
  * - Every route first requires that the caller can VIEW the repo; one they
  *   cannot answers exactly like one that does not exist.
- * - Pause, resume, sync now, force_anonymous, clearing the override and
- *   delete: the owner, the admin, or modify_others (requireRepoEdit).
- * - Changing `path` or SETTING an override decides what the owner's token
- *   fetches: the owner or the admin only (requireRepoOwnerOrAdmin), and the
+ * - Pause, resume, sync now, turning force_anonymous ON, clearing the
+ *   override and delete: the owner, the admin, or modify_others
+ *   (requireRepoEdit).
+ * - Changing `path`, SETTING an override or turning force_anonymous OFF
+ *   decides what the owner's token fetches: the owner or the admin only
+ *   (requireRepoOwnerOrAdmin), and the
  *   override must be an account the repo's owner owns (domain/repos.ts).
  */
 export const repoRoutes: FastifyPluginAsync = async (app) => {
@@ -135,8 +137,14 @@ export const repoRoutes: FastifyPluginAsync = async (app) => {
     // Visibility first, so an invisible id is a 404 whatever the body says.
     requireRepoView(request, id);
     const patch = parseBody(updateRepoSchema, request);
+    // Turning force_anonymous OFF lets the repo resolve the owner's default
+    // account, exactly like setting an override, so it is the owner's or the
+    // admin's call too. On an adopted repo the owner is the admin, and a
+    // modify_others user must not be able to point the admin's token at a
+    // path a removed user chose. Turning it ON only takes a credential away.
     if (
       patch.path !== undefined ||
+      patch.forceAnonymous === false ||
       (patch.accountOverrideId !== undefined && patch.accountOverrideId !== null)
     ) {
       requireRepoOwnerOrAdmin(request, id);

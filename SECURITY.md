@@ -79,7 +79,8 @@ closed: someone admitted only by a domain or group rule is refused.
   adopts a departed user's repositories they are set to fetch anonymously, so
   the admin's own token never starts fetching paths someone else chose. Fields
   learned with the owner's account (the pinned account, the managing sync, sync
-  error text) are hidden from everyone but the owner and the admin.
+  error text, whether the upstream owner is gone) are hidden from everyone but
+  the owner and the admin, and only they may turn "fetch anonymously" off.
 - **New hosts.** Only the admin, or a user with `manage_forges`, can introduce a
   new host. See "Outbound requests" below for what a restricted forge may reach.
 - **Storage caps.** Each non-admin user has a cap (a per-user value, else a
@@ -88,6 +89,15 @@ closed: someone admitted only by a domain or group rule is refused.
   rename under the cap goes back through the first-clone checks. At TWICE the
   cap every sync of that user's repositories pauses until usage drops or the
   cap is raised, so no one user can fill the disk for everyone.
+- **Disk.** While a sync runs, a capped user's syncs together may grow by at most
+  twice their cap minus their usage, and every sync (the admin's too) stops when
+  the backups volume drops below `min_free_disk_gb` (default 5 GB); a sync is
+  not started below it either. The stopped git process tree is killed and its
+  partial download removed, so a single huge repository or LFS object cannot
+  fill the disk and take the database down with it.
+- **Gone state.** That someone else's repository went gone upstream (its date,
+  the live event, the push notification) is shown only to people with
+  `view_removed`; everyone always sees it for their own.
 - **Email addresses** must be plain ASCII. An identity whose address is not is
   refused, never matched to anyone (Unicode case folding could otherwise turn a
   lookalike into the admin's address).
@@ -173,8 +183,9 @@ as a scrypt hash (N=2^15, r=8, p=1), compared with `timingSafeEqual`, with
 failure throttling per address and per (address, username): a success clears only
 its own pair, never the address, and an address a user has logged in from before
 stays open to them when someone else sprays it. The address is the one the
-nearest proxy reported (one trusted hop, from a loopback or private peer), never a
-client-written `X-Forwarded-For` entry. An unknown username still costs a full hash so response
+nearest proxy reported (one trusted hop, and only from a peer listed in
+`TRUSTED_PROXY_CIDRS`, default loopback only), never a client-written
+`X-Forwarded-For` entry; IPv6 clients are counted per /64. An unknown username still costs a full hash so response
 time does not reveal which usernames exist. After authentication the same
 access policy check as the web applies, then the repository must be one the user
 can view, or the answer is the same 404 as an unknown one. A credential stops
@@ -216,10 +227,16 @@ Three tiers, because libcurl resolves a redirect target itself, unvalidated:
   `.lfsconfig`, so a hostile repository cannot point git-lfs elsewhere. The
   batch API's download URLs are still the forge's to choose; that is accepted
   for these hosts only.
-- **Unrestricted** (`allow_private_network`, admin only): no DNS check or pin,
-  redirects and LFS as git does them. Repositories on such a forge are always
-  treated as private, since reaching them anonymously only proves that Amber's
-  network position can.
+- **Unrestricted** (`allow_private_network`, set by the admin and for the
+  admin's own use only): no DNS check or pin, git's own redirect handling, and
+  git-lfs with its endpoint forced like the well-known tier. Nobody else may own
+  a repository, an account or an account sync there: a user's import line is
+  refused like an unknown host, and the sync itself refuses a non-admin owner
+  (which is also what happens to existing repos if the admin flips a forge to
+  unrestricted later). Reaching a LAN server anonymously from Amber's network
+  position is exactly what must not be handed to a friend. Repositories on such
+  a forge are always treated as private, and flipping a forge to unrestricted
+  makes every repository on it private at once.
 
 Web push endpoints are URLs any user's browser supplies and Amber later POSTs to,
 so they get the restricted rule (https on 443, public addresses, pinned at every

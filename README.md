@@ -123,7 +123,8 @@ and keep syncing until the admin adopts or deletes them.
 New hosts are restricted to public addresses on the standard port, even when the
 admin imports from them. To back up from a server on your LAN or on an odd port,
 first add it on the forges page with "allow private network" switched on, then
-import. github.com, gitlab.com, bitbucket.org and codeberg.org follow renamed
+import. Such a forge is for the admin's own use: nobody else can import from it,
+since Amber would be reaching your LAN on their behalf. github.com, gitlab.com, bitbucket.org and codeberg.org follow renamed
 repository redirects and fetch LFS content; other restricted hosts do neither.
 
 For local development you can set `INSECURE_ALLOW_PUBLIC_ACCESS=1`, which skips

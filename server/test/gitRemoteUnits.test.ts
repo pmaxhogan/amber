@@ -14,7 +14,7 @@ import {
   sanitizeGitProtocol,
   serviceAnnouncement,
 } from "../src/gitremote/routes.ts";
-import { AuthThrottle, pairKey } from "../src/gitremote/throttle.ts";
+import { addressKey, AuthThrottle, pairKey } from "../src/gitremote/throttle.ts";
 import { buildGitEnv, GitSpawnError, liveGitProcessCount, runGitCapture } from "../src/gitSpawn.ts";
 import { getRepo, getRepoBySlug } from "../src/domain/repos.ts";
 import { repoDirFor } from "../src/repoDir.ts";
@@ -200,6 +200,30 @@ describe("AuthThrottle", () => {
     throttle.clear();
     expect(throttle.size).toBe(0);
     expect(throttle.knownGoodSize).toBe(0);
+  });
+
+  it("aggregates IPv6 clients to their /64, in every spelling", () => {
+    expect(addressKey("2001:db8:1:2:aaaa::1")).toBe("2001:db8:1:2::/64");
+    expect(addressKey("2001:0DB8:0001:0002:ffff:ffff:ffff:fffe")).toBe("2001:db8:1:2::/64");
+    expect(addressKey("2001:db8:1::")).toBe("2001:db8:1:0::/64");
+    expect(addressKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+    expect(addressKey("::ffff:203.0.113.7")).toBe("203.0.113.7");
+    expect(addressKey("203.0.113.7")).toBe("203.0.113.7");
+    expect(addressKey("not-an-ip")).toBe("not-an-ip");
+  });
+
+  it("throttles a client rotating addresses inside one /64 as one address", () => {
+    const throttle = new AuthThrottle({ capacity: 2, addressCapacity: 3, refillMs: 60_000 });
+    for (let i = 1; i <= 3; i += 1) {
+      throttle.recordFailure(`2001:db8:1:2::${String(i)}`, `guess${String(i)}`);
+    }
+    expect(throttle.allowAddress("2001:db8:1:2:ffff::9")).toBe(false);
+    // The same username from a sibling address shares its pair bucket too.
+    throttle.recordFailure("2001:db8:1:2::a", "u");
+    throttle.recordFailure("2001:db8:1:2::b", "u");
+    expect(pairKey("2001:db8:1:2::a", "u")).toBe(pairKey("2001:db8:1:2::c", "u"));
+    // Another /64 is untouched.
+    expect(throttle.allowAddress("2001:db8:1:3::1")).toBe(true);
   });
 
   it("caps the username part of a key", () => {

@@ -2,6 +2,11 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspect } from "node:util";
 import { z } from "zod";
+import {
+  DEFAULT_TRUSTED_PROXY_CIDRS,
+  parseProxyRange,
+  type ProxyRange,
+} from "./security/trustedProxies.ts";
 
 /**
  * Every environment variable Amber reads, validated once at boot. Nothing else
@@ -97,6 +102,33 @@ export const envSchema = z.object({
    * next to /app/web/dist) and when running from the repo.
    */
   WEB_DIST_DIR: z.string().min(1).optional(),
+  /**
+   * Peers whose X-Forwarded-For is believed (one hop), comma separated CIDRs
+   * or addresses. Default loopback only. Set it to the address range your
+   * reverse proxy (cloudflared) connects from, for example its docker network.
+   */
+  TRUSTED_PROXY_CIDRS: z
+    .string()
+    .optional()
+    .transform((raw, context) => {
+      const text = raw === undefined || raw.trim() === "" ? DEFAULT_TRUSTED_PROXY_CIDRS : raw;
+      const ranges: ProxyRange[] = [];
+      for (const entry of text.split(",")) {
+        if (entry.trim() === "") {
+          continue;
+        }
+        const range = parseProxyRange(entry);
+        if (range === null) {
+          context.addIssue({
+            code: "custom",
+            message: `not an IP address or CIDR: ${entry.trim()}`,
+          });
+          return z.NEVER;
+        }
+        ranges.push(range);
+      }
+      return ranges;
+    }),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -168,6 +200,8 @@ export interface Config {
   } | null;
   /** Insecure mode only, and empty otherwise: the stand-in user list. */
   insecureUserEmails: readonly string[];
+  /** TRUSTED_PROXY_CIDRS: the peers whose nearest X-Forwarded-For hop is believed. */
+  trustedProxies: readonly ProxyRange[];
 }
 
 export class ConfigError extends Error {
@@ -273,5 +307,6 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): Config {
     // second, unaudited allow list sitting next to the policy.
     accessPolicy: insecureMode ? null : accessPolicy,
     insecureUserEmails: insecureMode ? (env.INSECURE_USER_EMAILS ?? []) : [],
+    trustedProxies: env.TRUSTED_PROXY_CIDRS,
   };
 }

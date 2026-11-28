@@ -15,7 +15,13 @@ import type {
 } from "@amber/shared";
 import { parseImportLine } from "@amber/shared";
 import type { Db } from "../db/db.ts";
-import { canView, hasPermission, isRepoOwner, visibleRepoSqlFilter } from "../security/authz.ts";
+import {
+  canView,
+  hasPermission,
+  isRepoOwner,
+  maySeeGone,
+  visibleRepoSqlFilter,
+} from "../security/authz.ts";
 import {
   conflict,
   DomainError,
@@ -162,7 +168,9 @@ function isOwnerOrAdmin(ownerUserId: number | null, viewer: User): boolean {
 function ownerDerivedFields(
   row: RepoRow,
   viewer: User,
-): Partial<Pick<Repo, "accountOverrideId" | "managedByAccountSyncId" | "lastError">> {
+): Partial<
+  Pick<Repo, "accountOverrideId" | "managedByAccountSyncId" | "lastError" | "ownerGone" | "goneAt">
+> {
   if (isOwnerOrAdmin(row.owner_user_id, viewer)) {
     return {};
   }
@@ -170,6 +178,12 @@ function ownerDerivedFields(
     accountOverrideId: null,
     managedByAccountSyncId: null,
     lastError: row.last_error === null ? null : OWNER_ONLY_ERROR,
+    // Whether the upstream OWNER is gone too was asked with the owner's
+    // account, so it is theirs like the rest of this list.
+    ownerGone: null,
+    // That someone else's repo is gone is the Removed page's news: only with
+    // view_removed (security/authz.ts maySeeGone).
+    ...(maySeeGone(viewer, { ownerUserId: row.owner_user_id }) ? {} : { goneAt: null }),
   };
 }
 

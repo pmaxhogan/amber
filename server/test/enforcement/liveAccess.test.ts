@@ -3,7 +3,7 @@ import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db } from "../../src/db/db.ts";
 import { createRepo } from "../../src/domain/repos.ts";
-import { updateUser, type User } from "../../src/domain/users.ts";
+import { findUserByEmail, updateUser, type User } from "../../src/domain/users.ts";
 import { insertAccountSync } from "../../src/providers/discovery.ts";
 import { eventRoutes } from "../../src/routes/events.ts";
 import { INSECURE_USER_HEADER } from "../../src/security/identity.ts";
@@ -173,6 +173,14 @@ function setPrivate(repoId: number, isPrivate: boolean): void {
   temp.db.run("UPDATE repos SET is_private = ? WHERE id = ?", isPrivate ? 1 : 0, repoId);
 }
 
+function userByEmail(email: string): User {
+  const user = findUserByEmail(temp.db, email);
+  if (user === undefined) {
+    throw new Error(`no user ${email}`);
+  }
+  return user;
+}
+
 function grant(user: User, permissions: Record<string, boolean>): void {
   updateUser(temp.db, user.id, { permissions });
 }
@@ -212,6 +220,11 @@ describe("SSE: per-stream audience, decided at send time", () => {
   ] as const satisfies readonly AmberEventType[];
 
   it.each(ALL)("%s receives repo events only for the repos they can view", async (who) => {
+    // repo.gone about someone else's repo also needs view_removed (tested
+    // below); granted here so this test is about visibility alone.
+    for (const user of [bob, nothing, userByEmail(EMAILS.viewPrivate)]) {
+      grant(user, { view_removed: true });
+    }
     const privateId = repoOf(alice, true);
     const publicId = repoOf(alice, false);
     const stream = await openStream(who);
@@ -227,6 +240,26 @@ describe("SSE: per-stream audience, decided at send time", () => {
       ...(SEES[who].public ? [`${type}:${String(publicId)}`] : []),
     ]);
     expect(stream.seen()).toEqual(expected);
+  });
+
+  it("delivers repo.gone about someone else's repo only with view_removed", async () => {
+    const publicId = repoOf(alice, false);
+    const bobs = repoOf(bob, true);
+    const stream = await openStream("bob");
+    temp.events.publish("repo.gone", { repoId: publicId });
+    temp.events.publish("repo.updated", { repoId: publicId });
+    temp.events.publish("repo.gone", { repoId: bobs });
+    await stream.settle(temp.events);
+    // Bob still hears about Alice's repo, and always about his own gone one.
+    expect(stream.seen()).toEqual([
+      `repo.updated:${String(publicId)}`,
+      `repo.gone:${String(bobs)}`,
+    ]);
+
+    grant(bob, { view_removed: true });
+    temp.events.publish("repo.gone", { repoId: publicId });
+    await stream.settle(temp.events);
+    expect(stream.seen()).toContain(`repo.gone:${String(publicId)}`);
   });
 
   it.each(["sync.started", "repo.updated"] as const)(
@@ -525,6 +558,24 @@ describe("push: subscriptions belong to the subscribing user", () => {
   beforeEach(async () => {
     sent = [];
     await boot(sender);
+    // The gone push about someone else's repo needs view_removed (tested on
+    // its own below); granted so the rest of this block is about visibility.
+    grant(bob, { view_removed: true });
+    grant(userByEmail(EMAILS.viewPrivate), { view_removed: true });
+  });
+
+  it("sends the gone push about someone else's repo only with view_removed", async () => {
+    grant(bob, { view_removed: false });
+    const alices = repoOf(alice, false);
+    const bobs = repoOf(bob, false);
+    await subscribe("bob", "bob");
+    temp.events.publish("repo.gone", { repoId: alices, path: "alice/shown", host: "github.com" });
+    temp.events.publish("repo.gone", { repoId: bobs, path: "bob/own", host: "github.com" });
+    await temp.app.amber.push.flush();
+    // Only his own: Alice's public repo is visible to him, its gone state is not.
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.payload.body).toContain("bob/own");
+    expect(sent[0]?.payload.body).not.toContain("alice/shown");
   });
 
   const endpointOf = (name: string): string => `https://push.example.com/${name}`;

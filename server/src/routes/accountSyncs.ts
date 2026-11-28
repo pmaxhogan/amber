@@ -24,6 +24,7 @@ import {
   supportsTrendingSync,
   type DiscoveryDeps,
 } from "../providers/discovery.ts";
+import { hostNotEnabled, mayUseForge } from "../domain/forges.ts";
 import { getUser, type User } from "../domain/users.ts";
 import { hasPermission, requireRequestUser } from "../security/authz.ts";
 import { createBackupFileRemover } from "./repos.ts";
@@ -179,14 +180,18 @@ export const accountSyncRoutes: FastifyPluginAsync = async (app) => {
     // The schema guarantees one of the two is present.
     const forgeId = input.forgeId ?? accountForgeId ?? 0;
 
-    const forge = db.get<{ kind: ForgeKind; host: string }>(
-      "SELECT kind, host FROM forges WHERE id = ?",
+    const forge = db.get<{ kind: ForgeKind; host: string; allow_private_network: number }>(
+      "SELECT kind, host, allow_private_network FROM forges WHERE id = ?",
       forgeId,
     );
     if (forge === undefined) {
       return input.forgeId === undefined
         ? fail(reply, 404, "forge_not_found", "The account's forge no longer exists")
         : fail(reply, 404, "forge_not_found", `Forge ${String(forgeId)} does not exist`);
+    }
+    // An unrestricted forge is the admin's alone (domain/forges.ts mayUseForge).
+    if (!mayUseForge(user, { allowPrivateNetwork: forge.allow_private_network === 1 })) {
+      throw hostNotEnabled();
     }
     if (forge.kind === "generic") {
       return fail(

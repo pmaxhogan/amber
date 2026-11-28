@@ -225,3 +225,24 @@ describe("listForges", () => {
     ]);
   });
 });
+
+describe("flipping a forge to unrestricted", () => {
+  it("makes every repo on it private in the same change, and touches no other forge", () => {
+    const forge = upsertForge(db, { protocol: "https", host: "git.example.com", port: null });
+    const other = upsertForge(db, { protocol: "https", host: "git.example.net", port: null });
+    const owner = adminOf(db).id;
+    const here = createRepo(db, { forgeId: forge.id, path: "a/public", ownerUserId: owner }).id;
+    const there = createRepo(db, { forgeId: other.id, path: "b/public", ownerUserId: owner }).id;
+    db.run("UPDATE repos SET is_private = 0 WHERE id IN (?, ?)", here, there);
+
+    updateForge(db, forge.id, { allowPrivateNetwork: true });
+    const privateOf = (id: number) =>
+      db.get<{ is_private: number }>("SELECT is_private FROM repos WHERE id = ?", id)?.is_private;
+    expect(privateOf(here)).toBe(1);
+    expect(privateOf(there)).toBe(0);
+
+    // Restricting it again does not invent public repos either.
+    updateForge(db, forge.id, { allowPrivateNetwork: false });
+    expect(privateOf(here)).toBe(1);
+  });
+});

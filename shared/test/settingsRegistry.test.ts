@@ -21,6 +21,7 @@ describe("settingsRegistry shape", () => {
         "lfs_enabled",
         "max_concurrent_per_forge",
         "max_concurrent_syncs",
+        "min_free_disk_gb",
         "paranoid",
         "shallow_depth",
         "shallow_refs",
@@ -67,6 +68,7 @@ describe("defaults", () => {
       max_concurrent_syncs: 8,
       max_concurrent_per_forge: 4,
       default_user_storage_cap_gb: 5,
+      min_free_disk_gb: 5,
     });
   });
 

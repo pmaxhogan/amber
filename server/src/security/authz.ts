@@ -202,6 +202,16 @@ export function canView(
     : user.permissions.view_others_public;
 }
 
+/**
+ * Whether `user` may learn that a repo they can VIEW is gone upstream (its
+ * goneAt, the repo.gone event, the gone web push). Their own repos always;
+ * anyone else's only with `view_removed`, which is what the Removed page is.
+ * Callers check canView first: this never widens visibility.
+ */
+export function maySeeGone(user: User, repo: Pick<RepoAccessFacts, "ownerUserId">): boolean {
+  return user.isAdmin || isRepoOwner(user, repo) || hasPermission(user, "view_removed");
+}
+
 export function isRepoOwner(user: User, repo: Pick<RepoAccessFacts, "ownerUserId">): boolean {
   return repo.ownerUserId !== null && repo.ownerUserId === user.id;
 }

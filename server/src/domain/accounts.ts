@@ -2,7 +2,8 @@ import type { Account, CreateAccount, UpdateAccount } from "@amber/shared";
 import type { Db } from "../db/db.ts";
 import { assertSecretKey, decryptSecret, encryptSecret } from "../security/secrets.ts";
 import { conflict, invalid, isUniqueViolation, notFound } from "./errors.ts";
-import { requireForge } from "./forges.ts";
+import { hostNotEnabled, mayUseForge, requireForge } from "./forges.ts";
+import { getUser } from "./users.ts";
 
 /**
  * Accounts hold the credentials Amber presents to a forge, so these rules
@@ -237,7 +238,12 @@ export function createAccount(
   }
 
   return db.tx(() => {
-    requireForge(db, input.forgeId);
+    const forge = requireForge(db, input.forgeId);
+    // Accounts on an unrestricted forge are the admin's alone (mayUseForge).
+    const owner = getUser(db, ownerUserId);
+    if (owner === undefined || !mayUseForge(owner, forge)) {
+      throw hostNotEnabled();
+    }
 
     // The owner's first account on a forge is always their default.
     const isFirst = countAccounts(db, ownerUserId, input.forgeId) === 0;

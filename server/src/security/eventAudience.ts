@@ -2,7 +2,7 @@ import type { AmberEvent } from "@amber/shared";
 import type { Db } from "../db/db.ts";
 import type { User } from "../domain/users.ts";
 import type { EventMeta } from "../events.ts";
-import { canView, loadRepoAccessFacts } from "./authz.ts";
+import { canView, loadRepoAccessFacts, maySeeGone } from "./authz.ts";
 
 /**
  * Whether `user` may receive `event` on their live stream. Decided at SEND
@@ -30,7 +30,11 @@ export function mayReceiveEvent(db: Db, user: User, event: AmberEvent, meta: Eve
         return false;
       }
       const facts = loadRepoAccessFacts(db, repoId);
-      return facts !== undefined && canView(user, facts);
+      if (facts === undefined || !canView(user, facts)) {
+        return false;
+      }
+      // That someone else's repo went gone is the Removed page's news.
+      return event.type !== "repo.gone" || maySeeGone(user, facts);
     }
     case "repo.deleted":
       // The row is gone, so visibility was computed before it went.

@@ -2,12 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   expectArray,
   getJson,
+  MAX_PROVIDER_BODY_BYTES,
   matchesVisibility,
   normalizeRepoPath,
   pagesByLink,
   parentPathOrNull,
   parseLinkHeader,
   ProviderError,
+  readBodyCapped,
   retryAfterMsFromHeaders,
 } from "../../src/providers/http.ts";
 import { collect, context, JSON_HEADERS, mockHttp, type MockHttp } from "./support.ts";
@@ -237,5 +239,59 @@ describe("pagesByLink", () => {
     );
     expect(pages).toEqual([[1], [2, 3]]);
     http.agent.assertNoPendingInterceptors();
+  });
+});
+
+describe("provider response size", () => {
+  /** A 200 whose body never ends, counting what was pulled from it. */
+  function endless(declared?: number): { fetch: typeof fetch; pulled: () => number } {
+    let pulled = 0;
+    const chunk = new Uint8Array(1024 * 1024).fill(0x20);
+    const fetchImpl = (() => {
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulled += chunk.byteLength;
+          controller.enqueue(chunk);
+        },
+      });
+      const headers: Record<string, string> = { "content-type": "application/json" };
+      if (declared !== undefined) {
+        headers["content-length"] = String(declared);
+      }
+      return Promise.resolve(new Response(body, { status: 200, headers }));
+    }) as unknown as typeof fetch;
+    return { fetch: fetchImpl, pulled: () => pulled };
+  }
+
+  it("stops reading past the cap and fails as a provider error, never parsing it", async () => {
+    const source = endless();
+    await expect(
+      getJson(context({ fetch: source.fetch }), `${ORIGIN}/huge`, {}),
+    ).rejects.toMatchObject({ kind: "invalid_response", message: expect.stringContaining("MB") });
+    // Read up to the cap and a chunk beyond, not the whole stream.
+    expect(source.pulled()).toBeLessThanOrEqual(MAX_PROVIDER_BODY_BYTES + 3 * 1024 * 1024);
+  });
+
+  it("refuses a declared Content-Length over the cap before reading anything", async () => {
+    const source = endless(MAX_PROVIDER_BODY_BYTES + 1);
+    await expect(
+      getJson(context({ fetch: source.fetch }), `${ORIGIN}/huge`, {}),
+    ).rejects.toMatchObject({ kind: "invalid_response" });
+    expect(source.pulled()).toBeLessThanOrEqual(2 * 1024 * 1024);
+  });
+
+  it("reads only a small prefix of an error body", async () => {
+    const big = "x".repeat(200_000);
+    const fetchImpl = (() =>
+      Promise.resolve(new Response(big, { status: 500 }))) as unknown as typeof fetch;
+    await expect(getJson(context({ fetch: fetchImpl }), `${ORIGIN}/e`, {})).rejects.toMatchObject({
+      kind: "server",
+    });
+  });
+
+  it("caps a body exactly at the limit and truncates on request", async () => {
+    expect(await readBodyCapped(new Response("abcdef"), 6)).toBe("abcdef");
+    expect(await readBodyCapped(new Response("abcdefg"), 6)).toBeNull();
+    expect(await readBodyCapped(new Response("abcdefg"), 3, true)).toBe("abc");
   });
 });

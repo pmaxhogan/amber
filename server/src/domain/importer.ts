@@ -21,6 +21,7 @@ import {
   findForge,
   HOST_NOT_ENABLED_MESSAGE,
   mayAddForges,
+  mayUseForge,
   upsertForge,
   type ForgeOrigin,
 } from "./forges.ts";
@@ -173,8 +174,13 @@ function checkHost(db: Db, importer: User, result: ImportLineResult): ImportLine
   if (result.status === "error" || parsed === undefined) {
     return result;
   }
-  if (findForge(db, parsed.protocol, parsed.host, parsed.port) !== undefined) {
-    return result;
+  const forge = findForge(db, parsed.protocol, parsed.host, parsed.port);
+  if (forge !== undefined) {
+    // An unrestricted forge is the admin's alone: refused exactly like a host
+    // Amber does not have, so nothing is said about what it reaches.
+    return mayUseForge(importer, forge)
+      ? result
+      : failLine(result, HOST_NOT_ENABLED_MESSAGE, "host_not_enabled");
   }
   return mayAddForges(importer)
     ? result
@@ -258,10 +264,14 @@ async function vetNewHosts(
     }
     const origin = originOf(line.parsed);
     const key = originKey(origin);
-    if (
-      verdicts.has(key) ||
-      findForge(db, origin.protocol, origin.host, origin.port) !== undefined
-    ) {
+    if (verdicts.has(key)) {
+      continue;
+    }
+    const known = findForge(db, origin.protocol, origin.host, origin.port);
+    if (known !== undefined) {
+      if (!mayUseForge(importer, known)) {
+        verdicts.set(key, { message: HOST_NOT_ENABLED_MESSAGE, code: "host_not_enabled" });
+      }
       continue;
     }
     if (!mayAddForges(importer)) {

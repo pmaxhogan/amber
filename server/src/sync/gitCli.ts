@@ -48,6 +48,12 @@ export interface GitRunOptions {
   logger?: Logger;
   /** Defaults to "git". Only ever a binary name, never repo-controlled. */
   binary?: string;
+  /**
+   * Aborting kills the whole process tree (SIGKILL, like the timeout) and
+   * rejects with the signal's reason once the child is gone. The sync's disk
+   * watch (sync/diskWatch.ts) uses it to stop a fetch that would fill the disk.
+   */
+  signal?: AbortSignal;
 }
 
 export interface GitResult {
@@ -476,13 +482,33 @@ export async function runGit(
     // A pending kill timer must never keep the process alive on its own.
     timer.unref?.();
 
+    let abortedWith: unknown = undefined;
+    let aborted = false;
+    const onAbort = (): void => {
+      aborted = true;
+      abortedWith = options.signal?.reason;
+      killChild(child, "SIGKILL");
+    };
+    if (options.signal !== undefined) {
+      if (options.signal.aborted) {
+        onAbort();
+      } else {
+        options.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
+
     const finish = (code: number): void => {
       if (done) {
         return;
       }
       done = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       activeChildren.delete(tracked);
+      if (aborted) {
+        fail(abortedWith instanceof Error ? abortedWith : new Error("git was aborted"));
+        return;
+      }
       settle({
         stdout: stdout.text(),
         stderr: stderr.text(),
@@ -509,6 +535,7 @@ export async function runGit(
       }
       done = true;
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onAbort);
       activeChildren.delete(tracked);
       fail(error);
     });

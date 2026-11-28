@@ -16,12 +16,13 @@ import { join } from "node:path";
  * from a throwaway loopback server. The loopback forge is created by the admin
  * first, because a new host needs the admin or manage_forges.
  *
- * That forge reaches a private address, so it is UNRESTRICTED, and on an
- * unrestricted forge every repository is private whatever any fetch says
- * (network position is the credential there). No real public forge is
- * reachable from a test, so the cross-user visibility scenarios run on
- * view_others_private: granted, a friend sees the other's repository; revoked,
- * it answers 404 exactly like one that does not exist.
+ * That forge reaches a private address, so it is UNRESTRICTED: the admin's
+ * alone (a friend's import there is refused like an unknown host), and every
+ * repository on it is private whatever any fetch says. No forge a friend may
+ * import from reaches a test server, so the friends own nothing here, and the
+ * cross-user scenarios run on the admin's repositories with
+ * view_others_private: granted, a friend sees and clones; revoked, it answers
+ * 404 exactly like one that does not exist.
  *
  * Serial: each test builds on what the one before it left behind.
  */
@@ -240,7 +241,7 @@ test("friend A sees only the navigation their permissions allow", async () => {
   expect((await a.get("/api/users")).status()).toBe(403);
 });
 
-test("friend A imports a repository through the UI and it is theirs", async () => {
+test("friend A cannot import from the admin's LAN forge, nor from a host Amber does not have", async () => {
   const { page } = await open(FRIEND_A);
 
   // A host Amber does not have yet is refused: A may not add forges. `localhost`
@@ -259,33 +260,17 @@ test("friend A imports a repository through the UI and it is theirs", async () =
   const refused = (await direct.json()) as { results: { code?: string; action: string }[] };
   expect(refused.results[0]).toMatchObject({ action: "failed", code: "host_not_enabled" });
 
-  // The admin's host is fine.
+  // The admin's loopback forge reaches a private address, so it is the admin's
+  // alone: refused with exactly the same answer, in the UI and the API.
   await page.goto("/import");
   await page.getByLabel("Repository URLs").fill(server.urlFor(names.a));
   await page.getByRole("button", { name: "Preview" }).click();
-  await expect(page.getByTestId("import-preview").locator(".chip--ok")).toHaveText("1 ready");
-  await page.getByRole("button", { name: /^Import 1$/ }).click();
-  await expect(page.getByTestId("import-results")).toContainText("1 created");
-
-  const row = await waitSynced(a, names.a);
-  expect(row.mine).toBe(true);
-
-  // Importing it again says so plainly and is not a failure.
-  await page.goto("/import");
-  await page.getByLabel("Repository URLs").fill(server.urlFor(names.a));
-  await page.getByRole("button", { name: "Preview" }).click();
-  await page.getByRole("button", { name: /^Import 1$/ }).click();
-  await expect(page.getByTestId("import-results")).toContainText("Already backed up");
-  await expect(page.getByTestId("import-failure")).toHaveCount(0);
-
-  await page.goto("/");
-  await expect(
-    page.locator(".repo-cell__name", { hasText: row.displayName }).first(),
-  ).toBeVisible();
-
-  // The admin sees it too. Anonymous, but on an unrestricted forge: private.
-  const seen = await find(admin, names.a);
-  expect(seen?.isPrivate, "an unrestricted forge never derives public").toBe(true);
+  await expect(page.getByTestId("import-preview").locator(".chip--error")).toHaveText("1 rejected");
+  await expect(page.getByTestId("import-preview")).toContainText(/not enabled/i);
+  const lan = await a.post("/api/import", { data: { text: server.urlFor(names.a) } });
+  const lanBody = (await lan.json()) as { results: { code?: string; action: string }[] };
+  expect(lanBody.results[0]).toMatchObject({ action: "failed", code: "host_not_enabled" });
+  expect(await find(admin, names.a)).toBeUndefined();
 });
 
 test("friend A cannot see the admin's private repository", async () => {
@@ -294,26 +279,26 @@ test("friend A cannot see the admin's private repository", async () => {
   expect((await a.get(`/api/repos/${String(secret.id)}`)).status()).toBe(404);
 });
 
-test("friend B cannot see A's private repository until granted view_others_private", async () => {
-  const mine = (await find(a, names.a))!;
-  // With the defaults (view_others_public only) B sees neither A's repository
-  // nor the admin's: both are private.
-  expect(await find(b, names.a)).toBeUndefined();
+test("friend B cannot see the admin's repository until granted view_others_private", async () => {
+  const seed = (await find(admin, names.seed))!;
+  // With the defaults (view_others_public only) B sees none of the admin's
+  // repositories: on an unrestricted forge they are all private.
+  expect(await find(b, names.seed)).toBeUndefined();
   expect(await find(b, names.secret)).toBeUndefined();
-  expect((await b.get(`/api/repos/${String(mine.id)}`)).status()).toBe(404);
+  expect((await b.get(`/api/repos/${String(seed.id)}`)).status()).toBe(404);
 
   const { page: adminPage } = await open(ADMIN);
   await adminPage.goto("/users");
   await toggle(adminPage, FRIEND_B, "view_others_private");
-  expect((await b.get(`/api/repos/${String(mine.id)}`)).status()).toBe(200);
+  expect((await b.get(`/api/repos/${String(seed.id)}`)).status()).toBe(200);
 });
 
-test("friend B sees A's repository but cannot change it", async () => {
-  const mine = (await find(a, names.a))!;
+test("friend B sees the admin's repository but cannot change it", async () => {
+  const seed = (await find(admin, names.seed))!;
   const { page } = await open(FRIEND_B);
 
   await page.goto("/");
-  await page.locator(".repo-cell__name", { hasText: mine.displayName }).first().click();
+  await page.locator(".repo-cell__name", { hasText: seed.displayName }).first().click();
   await expect(page.getByRole("tab", { name: "Overview" })).toBeVisible();
   // No controls for a repository B can see but may not modify.
   await expect(page.getByRole("button", { name: "Pause" })).toHaveCount(0);
@@ -321,27 +306,26 @@ test("friend B sees A's repository but cannot change it", async () => {
   await expect(page.getByRole("button", { name: "Sync now" })).toHaveCount(0);
 
   // The API refuses as well, rather than trusting the UI.
-  const paused = await b.patch(`/api/repos/${String(mine.id)}`, { data: { state: "paused" } });
+  const paused = await b.patch(`/api/repos/${String(seed.id)}`, { data: { state: "paused" } });
   expect(paused.status()).toBe(403);
-  const deleted = await b.delete(`/api/repos/${String(mine.id)}`);
+  const deleted = await b.delete(`/api/repos/${String(seed.id)}`);
   expect(deleted.status()).toBe(403);
-  expect((await find(a, names.a))?.id).toBe(mine.id);
+  expect((await find(admin, names.seed))?.id).toBe(seed.id);
 });
 
-test("turning off view_others_private hides A's repository from B entirely", async () => {
-  const mine = (await find(a, names.a))!;
+test("turning off view_others_private hides the admin's repository from B entirely", async () => {
+  const seed = (await find(admin, names.seed))!;
   const { page } = await open(ADMIN);
   await page.goto("/users");
   await toggle(page, FRIEND_B, "view_others_private");
 
   // A repository B cannot view answers exactly like one that does not exist.
-  expect(await find(b, names.a)).toBeUndefined();
-  expect((await b.get(`/api/repos/${String(mine.id)}`)).status()).toBe(404);
+  expect(await find(b, names.seed)).toBeUndefined();
+  expect((await b.get(`/api/repos/${String(seed.id)}`)).status()).toBe(404);
 
   const { page: bPage } = await open(FRIEND_B);
   await bPage.goto("/");
-  await expect(bPage.locator(".repo-cell__name", { hasText: mine.displayName })).toHaveCount(0);
-  // The admin's private repository is gone from B's view again too.
+  await expect(bPage.locator(".repo-cell__name", { hasText: seed.displayName })).toHaveCount(0);
   expect(await find(b, names.secret)).toBeUndefined();
 });
 
@@ -362,19 +346,22 @@ test("a personal git credential clones what the user can view and nothing else",
   const url = (slug: string, password = gitPasswordA) =>
     `${origin.protocol}//${gitUsernameA}:${encodeURIComponent(password)}@${origin.host}/git/${slug}.git`;
 
-  const mine = (await find(a, names.a))!;
-  const secret = (await find(admin, names.secret))!;
+  const seed = (await find(admin, names.seed))!;
   const dir = scratchDir("multiuser-clone");
   try {
-    const cloned = await git(["clone", url(mine.slug), "mine"], dir);
-    expect(cloned.code, `clone failed: ${cloned.stderr}`).toBe(0);
-    const log = await git(["log", "--oneline"], `${dir}/mine`);
-    expect(log.stdout.trim().length).toBeGreaterThan(0);
-
     // A repository A cannot view is the same 404 as one that does not exist.
-    const refused = await git(["clone", url(secret.slug), "secret"], dir);
+    const refused = await git(["clone", url(seed.slug), "refused"], dir);
     expect(refused.code).not.toBe(0);
     expect(refused.stderr).toMatch(/not found|404|does not appear to be a git repository/i);
+
+    // Once A may view it, the same credential clones it.
+    const { page: adminPage } = await open(ADMIN);
+    await adminPage.goto("/users");
+    await toggle(adminPage, FRIEND_A, "view_others_private");
+    const cloned = await git(["clone", url(seed.slug), "seed"], dir);
+    expect(cloned.code, `clone failed: ${cloned.stderr}`).toBe(0);
+    const log = await git(["log", "--oneline"], `${dir}/seed`);
+    expect(log.stdout.trim().length).toBeGreaterThan(0);
   } finally {
     removeDir(dir);
   }
@@ -391,13 +378,13 @@ test("the admin revokes A's git password and A's clone then fails", async () => 
   await expect(row.getByTestId("has-git")).toHaveCount(0);
 
   const origin = new URL(baseURL);
-  const mine = (await find(a, names.a))!;
+  const seed = (await find(admin, names.seed))!;
   const dir = scratchDir("multiuser-revoked");
   try {
     const cloned = await git(
       [
         "clone",
-        `${origin.protocol}//${gitUsernameA}:${encodeURIComponent(gitPasswordA)}@${origin.host}/git/${mine.slug}.git`,
+        `${origin.protocol}//${gitUsernameA}:${encodeURIComponent(gitPasswordA)}@${origin.host}/git/${seed.slug}.git`,
         "revoked",
       ],
       dir,
@@ -411,16 +398,12 @@ test("the admin revokes A's git password and A's clone then fails", async () => 
   expect(state.hasPassword).toBe(false);
 });
 
-test("a user at a tiny storage cap sees the banner and a new import is refused", async () => {
-  // B has a repository of their own first, so there is usage to be over.
-  await importAs(b, server.urlFor(names.b));
-  const own = await waitSynced(b, names.b);
-  expect(own.mine).toBe(true);
-
+test("a user at a zero storage cap sees the banner and a new import is refused", async () => {
   const idB = users.get(FRIEND_B)!.id;
-  // One byte: the UI takes whole hundredths of a GB, which is far too large for
-  // a fixture repository, so the tiny cap goes through the API the page uses.
-  const capped = await admin.patch(`/api/users/${String(idB)}`, { data: { storageCapBytes: 1 } });
+  // B owns nothing (no forge here that B may import from reaches a test
+  // server), so the cap is 0: usage 0 is at it. The UI takes whole
+  // hundredths of a GB, so the cap goes through the API the page uses.
+  const capped = await admin.patch(`/api/users/${String(idB)}`, { data: { storageCapBytes: 0 } });
   expect(capped.status(), await capped.text()).toBe(200);
 
   const { page } = await open(FRIEND_B);
@@ -428,16 +411,22 @@ test("a user at a tiny storage cap sees the banner and a new import is refused",
   await expect(page.getByTestId("cap-banner")).toBeVisible();
   await expect(page.getByTestId("cap-banner")).toContainText("storage limit");
 
+  // github.com is seeded and restricted, so B may import from it; the cap
+  // refuses the line before anything is created, so nothing reaches the
+  // network.
+  const line = "https://github.com/example/amber-e2e-never-fetched";
   await page.goto("/import");
-  await page.getByLabel("Repository URLs").fill(server.urlFor("mu-b-second"));
+  await page.getByLabel("Repository URLs").fill(line);
   await page.getByRole("button", { name: "Preview" }).click();
   await page.getByRole("button", { name: /^Import 1$/ }).click();
   await expect(page.getByTestId("import-failure")).toContainText("Storage limit reached");
 
-  // The existing repository is untouched, and nothing new was created.
+  // Nothing new was created.
   const rows = (await list(b)).filter((row) => row.mine === true);
-  expect(rows.map((row) => row.path)).toContain(`t/${names.b}`);
-  expect(rows.map((row) => row.path)).not.toContain("t/mu-b-second");
+  expect(rows).toEqual([]);
+  expect((await list(admin)).some((row) => row.path === "example/amber-e2e-never-fetched")).toBe(
+    false,
+  );
 
   // The Users page marks the row.
   const { page: adminPage } = await open(ADMIN);

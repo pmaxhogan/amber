@@ -58,6 +58,7 @@ export async function createTempApp(
   extra: {
     scheduler?: Parameters<typeof buildApp>[0]["scheduler"];
     pushSender?: Parameters<typeof buildApp>[0]["pushSender"];
+    freeDiskBytes?: Parameters<typeof buildApp>[0]["freeDiskBytes"];
     /** The identity seams: a local JWKS, a scripted policy endpoint, a clock. */
     cfAccessGetKey?: Parameters<typeof buildApp>[0]["cfAccessGetKey"];
     accessPolicyFetch?: Parameters<typeof buildApp>[0]["accessPolicyFetch"];
@@ -95,6 +96,7 @@ export async function createTempApp(
     version: "9.9.9-test",
     ...(extra.scheduler === undefined ? {} : { scheduler: extra.scheduler }),
     ...(extra.pushSender === undefined ? {} : { pushSender: extra.pushSender }),
+    ...(extra.freeDiskBytes === undefined ? {} : { freeDiskBytes: extra.freeDiskBytes }),
     ...(extra.cfAccessGetKey === undefined ? {} : { cfAccessGetKey: extra.cfAccessGetKey }),
     ...(extra.accessPolicyFetch === undefined
       ? {}

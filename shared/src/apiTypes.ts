@@ -886,6 +886,18 @@ export const statusSchema = z.object({
   goneRepos: z.number().int().nonnegative(),
   totalDiskUsageBytes: z.number().int().nonnegative(),
   breakerOpen: z.boolean(),
+  /**
+   * The backups volume against the `min_free_disk_gb` floor. The admin only
+   * (absent for everyone else, and when the volume cannot be read). While
+   * `belowFloor` is true no sync starts and running ones are stopped.
+   */
+  disk: z
+    .object({
+      freeBytes: z.number().int().nonnegative(),
+      minFreeBytes: z.number().int().nonnegative(),
+      belowFloor: z.boolean(),
+    })
+    .optional(),
 });
 export type Status = z.infer<typeof statusSchema>;
 

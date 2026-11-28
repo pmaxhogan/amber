@@ -16,7 +16,11 @@ import {
   type RepoFileRemover,
 } from "../domain/repos.ts";
 import { ownedAccountId, ownerMayUseAccounts } from "../domain/credentials.ts";
-import { effectiveIsPrivate, forgeAllowsPrivateNetwork } from "../domain/forges.ts";
+import {
+  ADMIN_ONLY_FORGE_ERROR,
+  effectiveIsPrivate,
+  forgeAllowsPrivateNetwork,
+} from "../domain/forges.ts";
 import { getUser, isAtOrOverCap, type User } from "../domain/users.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { decryptSecret as domainDecryptSecret } from "../security/secrets.ts";
@@ -394,6 +398,11 @@ export async function runAccountSyncDetailed(
     }
     if (!ownerMayRunAccountSync(owner)) {
       throw new Error("The owner of this sync can no longer import, so it does not run.");
+    }
+    if (forge.allow_private_network === 1 && !owner.isAdmin) {
+      // Defence in depth behind the create-time refusal: covers a forge the
+      // admin flipped to unrestricted after this sync was made.
+      throw new Error(ADMIN_ONLY_FORGE_ERROR);
     }
     const mayUseAccounts = ownerMayUseAccounts(owner);
     // The account a run presents is always the sync OWNER's own: the pinned

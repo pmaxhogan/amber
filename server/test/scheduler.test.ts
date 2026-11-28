@@ -90,8 +90,11 @@ function makeScheduler(overrides: Partial<SchedulerOptions> = {}): Scheduler {
     random: noJitter,
     staggerStepMs: 0,
     refreshIntervalMs: 3_600_000,
-    settings: fixedSettings(),
-    globalSettings: () => fixedSettings()(db, 0),
+    // The free-space floor off: these tests count microtasks between a tick
+    // and a dispatch, and a statfs probe would add I/O to that path. The
+    // floor has its own tests (diskWatch.test.ts).
+    settings: fixedSettings({ min_free_disk_gb: 0 }),
+    globalSettings: () => fixedSettings({ min_free_disk_gb: 0 })(db, 0),
     runSync: fakeSync(),
     shutdownGraceMs: 50,
     ...overrides,
