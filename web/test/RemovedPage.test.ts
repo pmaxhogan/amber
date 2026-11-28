@@ -142,6 +142,53 @@ describe("Removed list", () => {
     expect(wrapper.find("tbody tr td.removed-checked").attributes("title")).toBeTruthy();
   });
 
+  it("shows the last reported star count, kept after the repository went gone", async () => {
+    const rows = [
+      makeRepo({ ...GONE[0], stars: 1_234_567 }),
+      makeRepo({ ...GONE[1], stars: null }),
+    ];
+    const { wrapper } = await mountPage(buildApi(rows));
+    const cells = wrapper.findAll("td.removed-num");
+    expect(cells.map((cell) => cell.text())).toEqual(["1.2M", "-"]);
+    expect(cells[0]?.attributes("title")).toBe("1,234,567 stars");
+    expect(wrapper.find("th.removed-num").attributes("aria-sort")).toBe("none");
+  });
+
+  it("sorts by stars from the header, then flips direction, then goes back", async () => {
+    const { wrapper, api } = await mountPage();
+    const sortButton = (label: string) =>
+      wrapper.findAll("button.removed-sort").find((button) => button.text().includes(label))!;
+
+    await sortButton("Stars").trigger("click");
+    await flush();
+    expect(api.listRepos).toHaveBeenLastCalledWith({
+      gone: true,
+      sort: "stars",
+      dir: "desc",
+      perPage: 200,
+    });
+    expect(wrapper.find("th.removed-num").attributes("aria-sort")).toBe("descending");
+
+    await sortButton("Stars").trigger("click");
+    await flush();
+    expect(api.listRepos).toHaveBeenLastCalledWith({
+      gone: true,
+      sort: "stars",
+      dir: "asc",
+      perPage: 200,
+    });
+    expect(wrapper.find("th.removed-num").attributes("aria-sort")).toBe("ascending");
+
+    await sortButton("Gone since").trigger("click");
+    await flush();
+    expect(api.listRepos).toHaveBeenLastCalledWith({
+      gone: true,
+      sort: "gone_at",
+      dir: "desc",
+      perPage: 200,
+    });
+  });
+
   it("says so when nothing has been removed", async () => {
     const { wrapper } = await mountPage(buildApi([]));
     expect(wrapper.text()).toContain("Nothing has been removed");

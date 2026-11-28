@@ -86,7 +86,12 @@ function giteaFork(raw: GiteaRepo): ForkLookup {
 async function giteaRepoInfo(context: DiscoveryContext, path: string): Promise<RepoInfo> {
   const encoded = encodeRepoPath(path);
   if (encoded.split("/").length < 2) {
-    return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+    return {
+      fork: { status: "unknown", rateLimited: false },
+      isPrivate: null,
+      sizeBytes: null,
+      stars: null,
+    };
   }
   try {
     const response = await getJson<GiteaRepo>(
@@ -99,12 +104,14 @@ async function giteaRepoInfo(context: DiscoveryContext, path: string): Promise<R
       // A 200 that does not say "public" is an answer: not public.
       isPrivate: giteaVisibility(response.data) ?? true,
       sizeBytes: null,
+      stars: null,
     };
   } catch (cause) {
     return {
       fork: forkLookupFailure(cause),
       isPrivate: visibilityOnFailure(cause),
       sizeBytes: null,
+      stars: null,
     };
   }
 }

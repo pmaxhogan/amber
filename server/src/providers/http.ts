@@ -46,7 +46,8 @@ export class ProviderError extends Error {
 /** Hard ceiling so a forge that keeps handing out next links cannot loop forever. */
 export const MAX_PAGES = 1000;
 const MAX_REDIRECTS = 3;
-const DEFAULT_TIMEOUT_MS = 30_000;
+/** Per request; also the ceiling the post-sync star lookup waits (sync/stars.ts). */
+export const DEFAULT_TIMEOUT_MS = 30_000;
 
 /**
  * The fetch for one request. Unrestricted forge: the injected fetch or the

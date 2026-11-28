@@ -174,19 +174,24 @@ describe("github getRepoInfo and listings over a mocked forge", () => {
   }
 
   it("reads a public repository: visibility from the field, size in bytes", async () => {
-    http
-      .pool(API)
-      .intercept({ path: "/repos/me/open", method: "GET" })
-      .reply(
-        200,
-        { full_name: "me/open", private: false, visibility: "public", fork: false, size: 10 },
-        { headers: JSON_HEADERS },
-      );
+    http.pool(API).intercept({ path: "/repos/me/open", method: "GET" }).reply(
+      200,
+      {
+        full_name: "me/open",
+        private: false,
+        visibility: "public",
+        fork: false,
+        size: 10,
+        stargazers_count: 1234,
+      },
+      { headers: JSON_HEADERS },
+    );
 
     expect(await ask("me/open")).toEqual({
       fork: { status: "not_fork" },
       isPrivate: false,
       sizeBytes: 10 * 1024,
+      stars: 1234,
     });
   });
 
@@ -250,6 +255,7 @@ describe("github getRepoInfo and listings over a mocked forge", () => {
       fork: { status: "unknown", rateLimited: false },
       isPrivate: true,
       sizeBytes: null,
+      stars: null,
     });
   });
 
@@ -284,6 +290,7 @@ describe("github getRepoInfo and listings over a mocked forge", () => {
       fork: { status: "unknown", rateLimited: true },
       isPrivate: null,
       sizeBytes: null,
+      stars: null,
     });
   });
 
@@ -338,10 +345,11 @@ const LIMITED: RepoInfo = {
   fork: { status: "unknown", rateLimited: true },
   isPrivate: null,
   sizeBytes: null,
+  stars: null,
 };
 
 function answer(isPrivate: boolean | null, fork: ForkLookup = NOT_FORK): RepoInfo {
-  return { fork, isPrivate, sizeBytes: null };
+  return { fork, isPrivate, sizeBytes: null, stars: null };
 }
 
 interface RepoSpec {
@@ -916,7 +924,7 @@ describe("the credential the visibility pass presents", () => {
       owner: world.erin,
       override: world.aliceDefault,
     });
-    answers.set("me/own", { fork: NOT_FORK, isPrivate: false, sizeBytes: 4096 });
+    answers.set("me/own", { fork: NOT_FORK, isPrivate: false, sizeBytes: 4096, stars: null });
     answers.set("me/borrowed", answer(false));
     const resolved: number[] = [];
     const seen = deps({ onResolved: (id) => resolved.push(id) });
@@ -999,6 +1007,10 @@ describe("what a successful fetch proves about visibility", () => {
       settings: fixedSettings(),
       credentials: () =>
         options.authenticated ? { username: "someone", password: "pw" } : undefined,
+      // Never the real forge API: an unrestricted forge's post-sync star
+      // lookup would use the global fetch. A restricted one keeps the default
+      // lookup, which the suite's refusing resolver stops before any network.
+      ...(unrestricted ? { repoInfo: () => Promise.resolve(null) } : {}),
       ...(unrestricted
         ? { remoteUrl: options.remoteUrl ?? origin.url, allowFileProtocol: true }
         : {

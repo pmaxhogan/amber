@@ -19,6 +19,7 @@ import type { EventMeta } from "../events.ts";
 import { isPlausibleRef } from "../gitRef.ts";
 import { createConsoleLogger } from "../logging.ts";
 import { providerForKind } from "../providers/discovery.ts";
+import { lookupRepoInfo } from "../providers/forks.ts";
 import {
   EgressRefusedError,
   gitPinConfig,
@@ -51,6 +52,7 @@ import {
   type GitRunOptions,
 } from "./gitCli.ts";
 import { judgeGone } from "./gone.ts";
+import { recordStars, type RepoInfoLookup } from "./stars.ts";
 import {
   applyRunToRepo,
   enforceRunRetention,
@@ -116,6 +118,14 @@ export interface SyncRepoDeps {
     freeBytes?: FreeBytesProbe;
     sizeOf?: (dir: string) => Promise<number>;
   };
+  /**
+   * The single-repository lookup run after a successful GitHub sync for its
+   * star count (sync/stars.ts). Defaults to providers/forks.ts lookupRepoInfo;
+   * injectable so the tests never reach a forge.
+   */
+  repoInfo?: RepoInfoLookup;
+  /** Test seam: how long the star lookup may hold the worker slot. */
+  starsTimeoutMs?: number;
 }
 
 /** Repo-level git config applied once when paranoid mode is turned on. */
@@ -286,6 +296,29 @@ function recordFetchVisibility(db: Db, target: SyncTarget, anonymous: boolean, n
       target.repo.path,
     );
   }
+}
+
+function defaultRepoInfo(
+  deps: SyncRepoDeps,
+  now: () => number,
+  onResolved: () => void,
+): RepoInfoLookup {
+  return (db, repoId, options) =>
+    lookupRepoInfo(
+      db,
+      repoId,
+      {
+        secretKey: deps.secretKey ?? null,
+        now,
+        // The same response may flip visibility even when it carries no count.
+        onResolved,
+        // Not the sync's injected resolver: in production both are the system
+        // one, and in tests that seam hands the GIT remote a fake address the
+        // forge API must never be dialled at.
+        ...(deps.logger === undefined ? {} : { log: deps.logger }),
+      },
+      options,
+    );
 }
 
 export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
@@ -501,6 +534,34 @@ export async function syncRepo(deps: SyncRepoDeps): Promise<SyncRun> {
       });
     } else if (outcome === "success" && target.repo.goneAt !== null) {
       log.info({ runId, path: target.repo.path }, "repository is reachable upstream again");
+    }
+    // After sync.finished, so the star lookup never delays the outcome the UI
+    // is waiting on; bounded by the provider timeout so it cannot hold the
+    // worker slot for long. Only a success: a failed fetch proved nothing about
+    // the upstream, and its lookup would only spend rate limit.
+    if (outcome === "success") {
+      let visibilityChanged = false;
+      const stars = await recordStars({
+        db,
+        repoId,
+        runId,
+        fetchedPath: target.repo.path,
+        forgeKind: target.forge.kind,
+        lookup:
+          deps.repoInfo ??
+          defaultRepoInfo(deps, now, () => {
+            visibilityChanged = true;
+          }),
+        now,
+        log,
+        ...(deps.starsTimeoutMs === undefined ? {} : { timeoutMs: deps.starsTimeoutMs }),
+      });
+      if (stars !== null) {
+        run = { ...run, stars };
+      }
+      if (stars !== null || visibilityChanged) {
+        deps.events?.publish("repo.updated", { repoId });
+      }
     }
     log.info({ runId, outcome, refsChanged: run.refsChanged }, "sync finished");
 

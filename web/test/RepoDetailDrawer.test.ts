@@ -221,6 +221,52 @@ describe("drawer history", () => {
     expect(text).toContain("2.00 KB");
   });
 
+  it("shows each run's star count, with the change since the older run on the page", async () => {
+    const api = buildApi({
+      listRuns: vi.fn().mockResolvedValue({
+        // Newest first, as the API sends them.
+        rows: [
+          makeRun({ id: 5, stars: 1212 }),
+          makeRun({ id: 4, stars: 1200 }),
+          makeRun({ id: 3, stars: 1200 }),
+          makeRun({ id: 2, stars: null }),
+          makeRun({ id: 1, stars: 1203 }),
+        ],
+        total: 5,
+        page: 1,
+        perPage: 10,
+      }),
+    });
+    const { wrapper } = await mountDrawer(api);
+    await openTab(wrapper, "history");
+
+    const header = wrapper.findAll("th").find((th) => th.text() === "Stars");
+    expect(header?.classes()).toContain("run-num");
+    const cells = wrapper.findAll("td.run-num");
+    // +12 against 1200; nothing for an unchanged count; nothing across an unknown one.
+    expect(cells.map((cell) => cell.text())).toEqual(["1.2k+12", "1.2k", "1.2k", "-", "1.2k"]);
+    const delta = cells[0]?.find(".run-stars-delta");
+    expect(delta?.classes()).toContain("run-stars-delta--up");
+    expect(delta?.attributes("title")).toBe("+12 since the previous sync");
+    expect(cells[0]?.find("span").attributes("title")).toBe("1,212 stars");
+  });
+
+  it("marks a drop in stars as a decrease", async () => {
+    const api = buildApi({
+      listRuns: vi.fn().mockResolvedValue({
+        rows: [makeRun({ id: 2, stars: 97 }), makeRun({ id: 1, stars: 100 })],
+        total: 2,
+        page: 1,
+        perPage: 10,
+      }),
+    });
+    const { wrapper } = await mountDrawer(api);
+    await openTab(wrapper, "history");
+    const delta = wrapper.find("td.run-num .run-stars-delta");
+    expect(delta.text()).toBe("-3");
+    expect(delta.classes()).toContain("run-stars-delta--down");
+  });
+
   it("pages the run list on the server", async () => {
     const { wrapper, api } = await mountDrawer();
     await openTab(wrapper, "history");

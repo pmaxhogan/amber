@@ -87,6 +87,31 @@ describe("Repos page lazy loading", () => {
     expect(query).toMatchObject({ sort: "last_seen_at", dir: "asc", page: 1 });
   });
 
+  it("shows a sortable Stars column: compact, exact in the tooltip, a dash when unknown", async () => {
+    const rows = [
+      makeRepo({ id: 1, displayName: "node", path: "nodejs/node", stars: 34_567 }),
+      makeRepo({ id: 2, displayName: "core", path: "vuejs/core", stars: null }),
+    ];
+    const { wrapper, api } = await mountPage(
+      buildApi({
+        listRepos: vi.fn().mockResolvedValue({ rows, total: 2, page: 1, perPage: 25 }),
+      }),
+    );
+
+    const header = wrapper.findAll("th").find((th) => th.text().includes("Stars"));
+    expect(header?.classes()).toContain("repos-num");
+    const cells = wrapper.findAll("td.repos-num");
+    expect(cells.map((cell) => cell.text())).toEqual(["34.5k", "-"]);
+    expect(cells[0]?.find("span").attributes("title")).toBe("34,567 stars");
+    expect(cells[1]?.find("span").attributes("title")).toBeUndefined();
+
+    await table(wrapper).vm.$emit("sort", { sortField: "stars", sortOrder: -1 });
+    await flush();
+    const [query] = (api.listRepos as unknown as { mock: { calls: unknown[][] } }).mock
+      .calls[1] as [Record<string, unknown>];
+    expect(query).toMatchObject({ sort: "stars", dir: "desc", page: 1 });
+  });
+
   it("passes the filters through to the query", async () => {
     const { wrapper, api } = await mountPage();
 

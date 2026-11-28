@@ -63,6 +63,8 @@ interface RepoRow {
   fork_parent: string | null;
   owner_gone: number | null;
   owner_checked_at: number | null;
+  stars: number | null;
+  stars_checked_at: number | null;
   last_error: string | null;
   disk_usage_bytes: number | null;
   default_branch: string | null;
@@ -78,7 +80,8 @@ const REPO_COLUMNS = `repos.id, repos.forge_id, repos.path, repos.display_name, 
   repos.short_id, repos.account_override_id, repos.force_anonymous,
   repos.managed_by_account_sync_id, repos.state, repos.next_sync_at, repos.consecutive_failures,
   repos.last_sync_at, repos.last_success_at, repos.last_seen_at, repos.gone_at,
-  repos.fork_parent, repos.owner_gone, repos.owner_checked_at, repos.last_error,
+  repos.fork_parent, repos.owner_gone, repos.owner_checked_at, repos.stars,
+  repos.stars_checked_at, repos.last_error,
   repos.disk_usage_bytes, repos.default_branch, repos.last_fetch_head, repos.origin,
   repos.owner_user_id, repos.is_private, repos.created_at, repos.updated_at`;
 
@@ -117,6 +120,8 @@ function toRepo(row: RepoRow): Repo {
     goneAt: row.gone_at,
     forkParent: row.fork_parent,
     ownerGone: ownerGoneOf(row),
+    stars: row.stars,
+    starsCheckedAt: row.stars_checked_at,
     lastError: row.last_error,
     diskUsageBytes: row.disk_usage_bytes,
     defaultBranch: row.default_branch,
@@ -171,12 +176,24 @@ function ownerDerivedFields(
   row: RepoRow,
   viewer: User,
 ): Partial<
-  Pick<Repo, "accountOverrideId" | "managedByAccountSyncId" | "lastError" | "ownerGone" | "goneAt">
+  Pick<
+    Repo,
+    | "accountOverrideId"
+    | "managedByAccountSyncId"
+    | "lastError"
+    | "ownerGone"
+    | "goneAt"
+    | "stars"
+    | "starsCheckedAt"
+  >
 > {
   if (isOwnerOrAdmin(row.owner_user_id, viewer)) {
     return {};
   }
   return {
+    // The star count of a PRIVATE repository was read with the owner's token
+    // and is not public knowledge; a public one's count is on the forge's page.
+    ...(row.is_private === 0 ? {} : { stars: null, starsCheckedAt: null }),
     accountOverrideId: null,
     managedByAccountSyncId: null,
     lastError: row.last_error === null ? null : OWNER_ONLY_ERROR,
@@ -427,9 +444,30 @@ const SORT_SQL: Readonly<Record<RepoSortField, string>> = {
   // Non-forks and repos nobody has asked about yet sort last either way.
   fork_parent: "repos.fork_parent IS NULL, repos.fork_parent COLLATE NOCASE",
   disk_usage_bytes: "repos.disk_usage_bytes",
+  // Never-reported counts sort last either way. Replaced per viewer in
+  // listRepos (starsSortSql) for anyone who is not the admin.
+  stars: "repos.stars IS NULL, repos.stars",
   next_sync_at: "repos.next_sync_at",
   created_at: "repos.created_at",
 };
+
+/**
+ * The stars sort for a viewer who is not the admin: ordered by the count they
+ * are SHOWN (ownerDerivedFields), so the order of the page cannot reveal the
+ * hidden count of somebody else's private repository. Takes the viewer id.
+ */
+const VISIBLE_STARS_SQL =
+  "(CASE WHEN repos.is_private = 0 OR repos.owner_user_id = ? THEN repos.stars END)";
+
+function starsSortSql(viewer: User): { sql: string; params: number[] } {
+  if (viewer.isAdmin) {
+    return { sql: SORT_SQL.stars, params: [] };
+  }
+  return {
+    sql: `${VISIBLE_STARS_SQL} IS NULL, ${VISIBLE_STARS_SQL}`,
+    params: [viewer.id, viewer.id],
+  };
+}
 
 const DIR_SQL: Readonly<Record<"asc" | "desc", string>> = { asc: "ASC", desc: "DESC" };
 
@@ -583,7 +621,9 @@ export function listRepos(db: Db, viewer: User, query: RepoListQuery): Page<Repo
   );
   const total = totalRow?.count ?? 0;
 
-  const orderBy = SORT_SQL[query.sort];
+  const sort =
+    query.sort === "stars" ? starsSortSql(viewer) : { sql: SORT_SQL[query.sort], params: [] };
+  const orderBy = sort.sql;
   const direction = DIR_SQL[query.dir];
   const offset = (query.page - 1) * query.perPage;
 
@@ -595,6 +635,7 @@ export function listRepos(db: Db, viewer: User, query: RepoListQuery): Page<Repo
       ORDER BY ${orderBy} ${direction}, repos.id ${direction}
       LIMIT ? OFFSET ?`,
     ...params,
+    ...sort.params,
     query.perPage,
     offset,
   );
@@ -1042,6 +1083,7 @@ interface SyncRunRow {
   duration_ms: number | null;
   refs_changed: number | null;
   paranoid_archived: number | null;
+  stars: number | null;
 }
 
 function toSyncRun(row: SyncRunRow): SyncRun {
@@ -1057,6 +1099,7 @@ function toSyncRun(row: SyncRunRow): SyncRun {
     durationMs: row.duration_ms,
     refsChanged: row.refs_changed,
     paranoidArchived: row.paranoid_archived,
+    stars: row.stars,
   };
 }
 
@@ -1069,10 +1112,15 @@ export function listSyncRuns(
   requireRepo(db, repoId);
   // Same rule as a repo row's lastError (ownerDerivedFields): run errors came
   // from fetches made with the owner's account.
-  const owner =
-    db.get<{ owner_user_id: number | null }>("SELECT owner_user_id FROM repos WHERE id = ?", repoId)
-      ?.owner_user_id ?? null;
+  const repoRow = db.get<{ owner_user_id: number | null; is_private: number }>(
+    "SELECT owner_user_id, is_private FROM repos WHERE id = ?",
+    repoId,
+  );
+  const owner = repoRow?.owner_user_id ?? null;
   const redact = viewer !== undefined && !isOwnerOrAdmin(owner, viewer);
+  // Same rule as the repo row's stars (ownerDerivedFields): a private repo's
+  // count history was read with the owner's token.
+  const hideStars = redact && repoRow?.is_private !== 0;
   // errorKind says not_found or auth, which is what makes a repo gone.
   const hideKind = viewer !== undefined && !maySeeGone(viewer, { ownerUserId: owner });
   const total =
@@ -1080,7 +1128,7 @@ export function listSyncRuns(
       ?.count ?? 0;
   const rows = db.all<SyncRunRow>(
     `SELECT id, repo_id, started_at, finished_at, outcome, error, error_kind,
-            bytes_fetched, duration_ms, refs_changed, paranoid_archived
+            bytes_fetched, duration_ms, refs_changed, paranoid_archived, stars
      FROM sync_runs WHERE repo_id = ?
      ORDER BY started_at DESC, id DESC
      LIMIT ? OFFSET ?`,
@@ -1091,6 +1139,7 @@ export function listSyncRuns(
   const runs = rows
     .map(toSyncRun)
     .map((run) => (redact && run.error !== null ? { ...run, error: OWNER_ONLY_ERROR } : run))
-    .map((run) => (hideKind && run.errorKind !== null ? { ...run, errorKind: null } : run));
+    .map((run) => (hideKind && run.errorKind !== null ? { ...run, errorKind: null } : run))
+    .map((run) => (hideStars && run.stars !== null ? { ...run, stars: null } : run));
   return { rows: runs, total, page: query.page, perPage: query.perPage };
 }

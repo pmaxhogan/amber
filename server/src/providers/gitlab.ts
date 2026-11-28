@@ -73,7 +73,12 @@ export function gitlabVisibility(raw: Pick<GitLabProject, "visibility">): boolea
 async function gitlabRepoInfo(context: DiscoveryContext, path: string): Promise<RepoInfo> {
   const normalized = path.replace(/^\/+|\/+$/g, "");
   if (normalized === "") {
-    return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+    return {
+      fork: { status: "unknown", rateLimited: false },
+      isPrivate: null,
+      sizeBytes: null,
+      stars: null,
+    };
   }
   try {
     // The project id slot takes the whole path with its slashes encoded.
@@ -84,7 +89,12 @@ async function gitlabRepoInfo(context: DiscoveryContext, path: string): Promise<
     );
     if (typeof response.data.path_with_namespace !== "string") {
       // An answer, but not a recognisable one: not public.
-      return { fork: { status: "unknown", rateLimited: false }, isPrivate: true, sizeBytes: null };
+      return {
+        fork: { status: "unknown", rateLimited: false },
+        isPrivate: true,
+        sizeBytes: null,
+        stars: null,
+      };
     }
     const parent = parentPathOrNull(response.data.forked_from_project?.path_with_namespace);
     return {
@@ -94,12 +104,14 @@ async function gitlabRepoInfo(context: DiscoveryContext, path: string): Promise<
       // A 200 that does not say "public" is an answer: not public.
       isPrivate: gitlabVisibility(response.data) ?? true,
       sizeBytes: null,
+      stars: null,
     };
   } catch (cause) {
     return {
       fork: forkLookupFailure(cause),
       isPrivate: visibilityOnFailure(cause),
       sizeBytes: null,
+      stars: null,
     };
   }
 }

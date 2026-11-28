@@ -68,7 +68,12 @@ export function bitbucketVisibility(raw: Pick<BitbucketRepo, "is_private">): boo
 async function bitbucketRepoInfo(context: DiscoveryContext, path: string): Promise<RepoInfo> {
   const encoded = encodeRepoPath(path);
   if (encoded.split("/").length !== 2) {
-    return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+    return {
+      fork: { status: "unknown", rateLimited: false },
+      isPrivate: null,
+      sizeBytes: null,
+      stars: null,
+    };
   }
   try {
     const response = await getJson<BitbucketRepo>(
@@ -78,7 +83,12 @@ async function bitbucketRepoInfo(context: DiscoveryContext, path: string): Promi
     );
     if (typeof response.data.full_name !== "string") {
       // An answer, but not a recognisable one: not public.
-      return { fork: { status: "unknown", rateLimited: false }, isPrivate: true, sizeBytes: null };
+      return {
+        fork: { status: "unknown", rateLimited: false },
+        isPrivate: true,
+        sizeBytes: null,
+        stars: null,
+      };
     }
     const parent = parentPathOrNull(response.data.parent?.full_name);
     return {
@@ -86,12 +96,14 @@ async function bitbucketRepoInfo(context: DiscoveryContext, path: string): Promi
       // A 200 that does not say "public" is an answer: not public.
       isPrivate: bitbucketVisibility(response.data) ?? true,
       sizeBytes: null,
+      stars: null,
     };
   } catch (cause) {
     return {
       fork: forkLookupFailure(cause),
       isPrivate: visibilityOnFailure(cause),
       sizeBytes: null,
+      stars: null,
     };
   }
 }

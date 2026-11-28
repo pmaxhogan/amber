@@ -39,6 +39,13 @@ export const FORK_BATCH_SIZE = 20;
  * so trending syncs and anonymous discovery keep the other half.
  */
 export const ANONYMOUS_LOOKUPS_PER_HOUR = 30;
+/**
+ * Anonymous lookups per forge per hour the post-sync STAR lookup leaves
+ * untouched (sync/stars.ts): stars spend only while more than this many are
+ * unspent, so they can never starve the visibility pass and the first-clone
+ * gate, which keep the full allowance.
+ */
+export const STARS_ANONYMOUS_RESERVE = ANONYMOUS_LOOKUPS_PER_HOUR / 2;
 
 export interface AnonymousBudget {
   windowStart: number;
@@ -151,9 +158,19 @@ async function askProvider(
     return provider.getRepoInfo(context, path);
   }
   if (provider.getForkParent !== undefined) {
-    return { fork: await provider.getForkParent(context, path), isPrivate: null, sizeBytes: null };
+    return {
+      fork: await provider.getForkParent(context, path),
+      isPrivate: null,
+      sizeBytes: null,
+      stars: null,
+    };
   }
-  return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+  return {
+    fork: { status: "unknown", rateLimited: false },
+    isPrivate: null,
+    sizeBytes: null,
+    stars: null,
+  };
 }
 
 function contextFor(
@@ -253,18 +270,26 @@ function isCooled(
   return (cooldowns.get(cooldownKey(forgeId, accountId)) ?? 0) > at;
 }
 
-/** Spend one anonymous lookup on this forge, or say the hour's budget is gone. */
+/**
+ * Spend one anonymous lookup on this forge, or say the hour's budget is gone.
+ * `reserve` lookups are kept back for other callers: the spend is refused
+ * unless more than that many are still unspent.
+ */
 function spendAnonymous(
   budgets: Map<number, AnonymousBudget>,
   forgeId: number,
   at: number,
+  reserve = 0,
 ): boolean {
   const budget = budgets.get(forgeId);
   if (budget === undefined || at - budget.windowStart >= HOUR_MS) {
+    if (reserve >= ANONYMOUS_LOOKUPS_PER_HOUR) {
+      return false;
+    }
     budgets.set(forgeId, { windowStart: at, used: 1 });
     return true;
   }
-  if (budget.used >= ANONYMOUS_LOOKUPS_PER_HOUR) {
+  if (budget.used >= ANONYMOUS_LOOKUPS_PER_HOUR - reserve) {
     return false;
   }
   budget.used += 1;
@@ -279,11 +304,20 @@ function spendAnonymous(
  * never asks with a cooled credential and never overspends the anonymous
  * budget. Null when the forge cannot be asked (generic hosts), the credential
  * is cooling down, or the anonymous budget is spent.
+ *
+ * `options.path` asks only while the repo still has that path: the post-sync
+ * star lookup (sync/stars.ts) wants the answer for the upstream it FETCHED,
+ * and a rename that landed since would otherwise spend a lookup (and the
+ * anonymous budget) on a different repository. Null when the path moved.
+ * `options.anonymousReserve` keeps that many of the hour's anonymous lookups
+ * for everyone else (STARS_ANONYMOUS_RESERVE for the star lookup); a token
+ * backed lookup ignores it.
  */
 export async function lookupRepoInfo(
   db: Db,
   repoId: number,
   deps: ForkResolverDeps = {},
+  options: { path?: string; anonymousReserve?: number } = {},
 ): Promise<RepoInfo | null> {
   const now = deps.now ?? Date.now;
   const providerFor = deps.providerFor ?? providerForKind;
@@ -295,7 +329,7 @@ export async function lookupRepoInfo(
       WHERE r.id = ? AND ${ownerMayUseForgeSql("r", "f")}`,
     repoId,
   );
-  if (row === undefined) {
+  if (row === undefined || (options.path !== undefined && row.path !== options.path)) {
     return null;
   }
   const provider = providerFor(row.kind);
@@ -306,7 +340,10 @@ export async function lookupRepoInfo(
   if (isCooled(cooldowns, row.forge_id, accountId, now())) {
     return null;
   }
-  if (context.token === null && !spendAnonymous(budgets, row.forge_id, now())) {
+  if (
+    context.token === null &&
+    !spendAnonymous(budgets, row.forge_id, now(), options.anonymousReserve ?? 0)
+  ) {
     return null;
   }
   const info = await askProvider(provider, context, row.path);
@@ -403,6 +440,7 @@ export async function resolvePendingForks(
           fork: { status: "unknown", rateLimited: false },
           isPrivate: null,
           sizeBytes: null,
+          stars: null,
         };
       }
       result.asked += 1;

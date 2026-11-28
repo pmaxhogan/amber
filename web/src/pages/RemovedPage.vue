@@ -6,7 +6,15 @@ import { dmcaTakedown, type Account, type Forge } from "@amber/shared";
 import { normalizeError, type ApiClientError } from "../api/client.ts";
 import { useApi } from "../api/provide.ts";
 import type { RepoRow } from "../api/types.ts";
-import { absoluteTime, forgeOrigin, humanBytes, pluralize, relativeTime } from "../lib/format.ts";
+import {
+  absoluteTime,
+  compactCount,
+  forgeOrigin,
+  humanBytes,
+  pluralize,
+  relativeTime,
+  starsTitle,
+} from "../lib/format.ts";
 import { disablePush, enablePush, readPushState, type PushState } from "../lib/push.ts";
 import { useToaster } from "../lib/toast.ts";
 import { useEventsStore } from "../stores/events.ts";
@@ -32,6 +40,29 @@ const forges = ref<Forge[]>([]);
 const accounts = ref<Account[]>([]);
 const loading = ref(false);
 const error = ref<ApiClientError | null>(null);
+
+/**
+ * Newest removal first by default; the Stars header re-sorts by the last
+ * reported count instead (never-reported last either way, server side).
+ */
+type RemovedSort = "gone_at" | "stars";
+const sortField = ref<RemovedSort>("gone_at");
+const sortDir = ref<"asc" | "desc">("desc");
+
+function sortBy(field: RemovedSort): void {
+  if (sortField.value === field) {
+    sortDir.value = sortDir.value === "desc" ? "asc" : "desc";
+  } else {
+    sortField.value = field;
+    sortDir.value = "desc";
+  }
+  void load(true);
+}
+
+function ariaSort(field: RemovedSort): "ascending" | "descending" | "none" {
+  if (sortField.value !== field) return "none";
+  return sortDir.value === "asc" ? "ascending" : "descending";
+}
 
 const forgeById = computed(() => new Map(forges.value.map((forge) => [forge.id, forge])));
 
@@ -84,7 +115,7 @@ async function load(quiet = false): Promise<void> {
   if (!quiet) loading.value = true;
   try {
     const [page, forgeRows, accountRows] = await Promise.all([
-      api.listRepos({ gone: true, sort: "gone_at", dir: "desc", perPage: PER_PAGE }),
+      api.listRepos({ gone: true, sort: sortField.value, dir: sortDir.value, perPage: PER_PAGE }),
       api.listForges(),
       api.listAccounts(),
     ]);
@@ -261,10 +292,31 @@ onBeforeUnmount(() => {
           <tr>
             <th scope="col">Repository</th>
             <th scope="col">Fork of</th>
-            <th scope="col">Gone since</th>
+            <th scope="col" :aria-sort="ariaSort('gone_at')">
+              <button type="button" class="removed-sort" @click="sortBy('gone_at')">
+                Gone since
+                <AppIcon
+                  v-if="sortField === 'gone_at'"
+                  name="chevron"
+                  :size="12"
+                  :class="{ 'removed-sort__up': sortDir === 'asc' }"
+                />
+              </button>
+            </th>
             <th scope="col">Last checked</th>
             <th scope="col">Last good sync</th>
             <th scope="col">Backup size</th>
+            <th scope="col" class="removed-num" :aria-sort="ariaSort('stars')">
+              <button type="button" class="removed-sort" @click="sortBy('stars')">
+                Stars
+                <AppIcon
+                  v-if="sortField === 'stars'"
+                  name="chevron"
+                  :size="12"
+                  :class="{ 'removed-sort__up': sortDir === 'asc' }"
+                />
+              </button>
+            </th>
             <th scope="col">Forge said</th>
             <th scope="col"><span class="removed-sr">Actions</span></th>
           </tr>
@@ -288,6 +340,9 @@ onBeforeUnmount(() => {
               {{ relativeTime(repo.lastSuccessAt) }}
             </td>
             <td>{{ humanBytes(repo.diskUsageBytes) }}</td>
+            <td class="removed-num" :title="starsTitle(repo.stars)">
+              {{ compactCount(repo.stars) }}
+            </td>
             <td>
               <Tag
                 :value="reason(repo).label"
@@ -313,7 +368,10 @@ onBeforeUnmount(() => {
         </tbody>
       </table>
       <p v-if="total > repos.length" class="amber-note removed-more">
-        Showing the {{ repos.length }} most recent of {{ total }}.
+        <template v-if="sortField === 'gone_at'">
+          Showing the {{ repos.length }} most recent of {{ total }}.
+        </template>
+        <template v-else>Showing {{ repos.length }} of {{ total }}.</template>
       </p>
     </div>
 
@@ -375,6 +433,38 @@ onBeforeUnmount(() => {
   padding: 0.6rem 0.9rem;
   border-bottom: 1px solid var(--p-content-border-color);
   white-space: nowrap;
+}
+
+.removed-table .removed-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.removed-sort {
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.removed-sort__up {
+  transform: rotate(180deg);
+}
+
+.removed-sort:hover {
+  color: var(--p-text-color);
+}
+
+.removed-sort:focus-visible {
+  outline: 2px solid var(--p-primary-color);
+  outline-offset: 2px;
 }
 
 .removed-table tbody tr:last-child td {

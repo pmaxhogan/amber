@@ -38,6 +38,7 @@ import type {
   SyncRepoDeps,
 } from "./syncRepo.ts";
 import { syncRepo } from "./syncRepo.ts";
+import type { RepoInfoLookup } from "./stars.ts";
 
 export { backoffDelayMs, jitteredIntervalMs } from "./backoff.ts";
 
@@ -77,9 +78,11 @@ export interface SchedulerOptions {
   /**
    * Asks the forge about one repository right before a capped owner's first
    * clone, for its size (and, while at it, its visibility). Injectable so the
-   * tests never reach a forge. Null: nothing could be learned.
+   * tests never reach a forge. Null: nothing could be learned. Also handed to
+   * every sync as its post-success star lookup (sync/stars.ts), so one seam
+   * keeps both off the network in tests.
    */
-  repoInfo?: (db: Db, repoId: number) => Promise<RepoInfo | null>;
+  repoInfo?: RepoInfoLookup;
 }
 
 /** Five failed attempts across different forges mean the problem is local. */
@@ -571,6 +574,7 @@ export class Scheduler {
       credentials: this.#options.credentials,
       allowFileProtocol: this.#options.allowFileProtocol,
       ...(this.#options.diskWatch === undefined ? {} : { diskWatch: this.#options.diskWatch }),
+      ...(this.#options.repoInfo === undefined ? {} : { repoInfo: this.#options.repoInfo }),
       now: this.#options.now,
       random: this.#options.random,
     });

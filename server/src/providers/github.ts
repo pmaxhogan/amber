@@ -67,6 +67,7 @@ interface GitHubRepo {
   fork?: unknown;
   parent?: { full_name?: unknown } | null;
   size?: unknown;
+  stargazers_count?: unknown;
 }
 
 /**
@@ -91,6 +92,18 @@ function githubSizeBytes(raw: Pick<GitHubRepo, "size">): number | null {
     : null;
 }
 
+/**
+ * `stargazers_count` is the star count on every repository response (GitHub's
+ * starring docs: "watchers, watchers_count, and stargazers_count correspond to
+ * the number of users that have starred a repository"). Anything that is not
+ * a non-negative safe integer is "not reported", so a malformed body can never
+ * overwrite a known count.
+ */
+export function githubStars(raw: Pick<GitHubRepo, "stargazers_count">): number | null {
+  const value = raw.stargazers_count;
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 function githubFork(raw: GitHubRepo): ForkLookup {
   if (raw.fork === true) {
     const parent = parentPathOrNull(raw.parent?.full_name);
@@ -102,7 +115,12 @@ function githubFork(raw: GitHubRepo): ForkLookup {
 async function githubRepoInfo(context: DiscoveryContext, path: string): Promise<RepoInfo> {
   const encoded = encodeRepoPath(path);
   if (encoded.split("/").length < 2) {
-    return { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null };
+    return {
+      fork: { status: "unknown", rateLimited: false },
+      isPrivate: null,
+      sizeBytes: null,
+      stars: null,
+    };
   }
   try {
     const response = await getJson<GitHubRepo>(
@@ -115,12 +133,14 @@ async function githubRepoInfo(context: DiscoveryContext, path: string): Promise<
       // A 200 that does not say "public" is an answer: not public.
       isPrivate: githubVisibility(response.data) ?? true,
       sizeBytes: githubSizeBytes(response.data),
+      stars: githubStars(response.data),
     };
   } catch (cause) {
     return {
       fork: forkLookupFailure(cause),
       isPrivate: visibilityOnFailure(cause),
       sizeBytes: null,
+      stars: null,
     };
   }
 }

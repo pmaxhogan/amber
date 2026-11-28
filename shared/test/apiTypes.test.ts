@@ -12,7 +12,9 @@ import {
   parseNamespaceInput,
   paginationQuerySchema,
   repoListQuerySchema,
+  repoSchema,
   settingsScopeParamsSchema,
+  syncRunSchema,
   supportsNamespaceSyncKind,
   upsertAccountSyncSchema,
 } from "../src/apiTypes.ts";
@@ -69,6 +71,44 @@ describe("repo list query", () => {
 
   it("coerces the forge filter", () => {
     expect(repoListQuerySchema.parse({ forgeId: "4" }).forgeId).toBe(4);
+  });
+
+  it("sorts by stars", () => {
+    expect(repoListQuerySchema.parse({ sort: "stars", dir: "desc" })).toMatchObject({
+      sort: "stars",
+      dir: "desc",
+    });
+  });
+});
+
+describe("star counts", () => {
+  it("reads a repo payload from before the columns existed as unknown", () => {
+    expect(repoSchema.shape.stars.parse(undefined)).toBeNull();
+    expect(repoSchema.shape.starsCheckedAt.parse(undefined)).toBeNull();
+    expect(repoSchema.shape.stars.parse(1200)).toBe(1200);
+    expect(repoSchema.shape.stars.safeParse(-1).success).toBe(false);
+    expect(repoSchema.shape.stars.safeParse(1.5).success).toBe(false);
+  });
+
+  it("carries a run's count, null when none was reported", () => {
+    const run = {
+      id: 1,
+      repoId: 2,
+      startedAt: 1,
+      finishedAt: 2,
+      outcome: "success",
+      error: null,
+      errorKind: null,
+      bytesFetched: null,
+      durationMs: 1,
+      refsChanged: null,
+      paranoidArchived: null,
+    };
+    expect(syncRunSchema.parse({ ...run, stars: 34 }).stars).toBe(34);
+    expect(syncRunSchema.parse({ ...run, stars: null }).stars).toBeNull();
+    expect(syncRunSchema.safeParse({ ...run, stars: -2 }).success).toBe(false);
+    // Required on the wire: the server always sends it.
+    expect(syncRunSchema.safeParse(run).success).toBe(false);
   });
 });
 

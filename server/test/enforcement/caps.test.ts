@@ -674,6 +674,7 @@ describe("scheduler first-clone gate", () => {
       durationMs: 0,
       refsChanged: null,
       paranoidArchived: null,
+      stars: null,
     };
   }
 
@@ -728,7 +729,7 @@ describe("scheduler first-clone gate", () => {
   }
 
   function info(sizeBytes: number | null): RepoInfo {
-    return { fork: { status: "not_fork" }, isPrivate: null, sizeBytes };
+    return { fork: { status: "not_fork" }, isPrivate: null, sizeBytes, stars: null };
   }
 
   /** A capped owner at their cap (via one synced repo that is not due) and a first clone. */
@@ -1322,6 +1323,9 @@ describe("a real sync that crosses the cap", () => {
       credentials: () => undefined,
       remoteUrl: origin.url,
       allowFileProtocol: true,
+      // github.com here is unrestricted, so the post-sync star lookup would
+      // otherwise call the real GitHub API.
+      repoInfo: () => Promise.resolve(null),
     });
   }
 

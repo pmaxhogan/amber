@@ -228,6 +228,16 @@ export const repoSchema = z.object({
    * through `.default(null)` so a payload from before this existed still parses.
    */
   ownerGone: z.boolean().nullable().default(null),
+  /**
+   * The forge's last reported star count (GitHub only), read after a
+   * successful sync. Null while none was ever reported, and for a viewer who
+   * is neither the owner nor the admin when the repository is private. A
+   * repository that later goes gone or is removed keeps its last count.
+   * Defaulted so a payload from before the column existed still parses.
+   */
+  stars: z.number().int().nonnegative().nullable().default(null),
+  /** When `stars` was last written. Null alongside a null `stars`. */
+  starsCheckedAt: epochMsSchema.nullable().default(null),
   lastError: z.string().nullable(),
   diskUsageBytes: z.number().int().nonnegative().nullable(),
   defaultBranch: z.string().nullable(),
@@ -344,6 +354,7 @@ export const REPO_SORT_FIELDS = [
   "gone_at",
   "fork_parent",
   "disk_usage_bytes",
+  "stars",
   "next_sync_at",
   "created_at",
 ] as const;
@@ -429,6 +440,8 @@ export const syncRunSchema = z.object({
   durationMs: z.number().int().nonnegative().nullable(),
   refsChanged: z.number().int().nonnegative().nullable(),
   paranoidArchived: z.number().int().nonnegative().nullable(),
+  /** The forge's star count read after this (successful) sync; null when none was reported. */
+  stars: z.number().int().nonnegative().nullable(),
 });
 export type SyncRun = z.infer<typeof syncRunSchema>;
 

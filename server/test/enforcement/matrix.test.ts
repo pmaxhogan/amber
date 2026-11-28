@@ -334,7 +334,12 @@ describe("fail-closed corners", () => {
       deps(
         // What the providers report for a 404 or a non-rate-limit 403.
         stub(
-          { fork: { status: "unknown", rateLimited: false }, isPrivate: true, sizeBytes: null },
+          {
+            fork: { status: "unknown", rateLimited: false },
+            isPrivate: true,
+            sizeBytes: null,
+            stars: null,
+          },
           seen,
         ),
       ),
@@ -352,7 +357,12 @@ describe("fail-closed corners", () => {
       temp.db,
       deps(
         stub(
-          { fork: { status: "unknown", rateLimited: false }, isPrivate: null, sizeBytes: null },
+          {
+            fork: { status: "unknown", rateLimited: false },
+            isPrivate: null,
+            sizeBytes: null,
+            stars: null,
+          },
           seen,
         ),
       ),
@@ -366,7 +376,10 @@ describe("fail-closed corners", () => {
   it("makes the cap gate's lookup spend the same anonymous budget as the pass", async () => {
     makeUser(temp.db, ALICE, { import_private: false });
     const seen: DiscoveryContext[] = [];
-    const provider = stub({ fork: { status: "not_fork" }, isPrivate: false, sizeBytes: 10 }, seen);
+    const provider = stub(
+      { fork: { status: "not_fork" }, isPrivate: false, sizeBytes: 10, stars: null },
+      seen,
+    );
     const budget = new Map<number, AnonymousBudget>([
       [forgeId, { windowStart: Date.now(), used: 30 }],
     ]);
@@ -394,7 +407,7 @@ describe("fail-closed corners", () => {
     await resolveGoneOwners(temp.db, {
       secretKey: temp.config.secretKey,
       providerFor: () =>
-        stub({ fork: { status: "not_fork" }, isPrivate: null, sizeBytes: null }, seen),
+        stub({ fork: { status: "not_fork" }, isPrivate: null, sizeBytes: null, stars: null }, seen),
       decryptSecret: () => "token",
     });
     // One lookup per credential, not one per owner name.

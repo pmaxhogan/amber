@@ -169,3 +169,53 @@ export function refusedReason(refused: readonly { message: string }[]): string {
     ? "You can only change repositories you own, unless you have been given more access."
     : messages.join(" ");
 }
+
+const COUNT_UNITS = ["k", "M", "B"] as const;
+
+/**
+ * A count in a narrow column: "999", "1.2k", "34.5k", "123k", "1.1M". Rounds
+ * DOWN so a count never reads as more than it is (999,999 is "999k", not
+ * "1000k"). Null, negative or non-finite renders as a dash, "never reported".
+ */
+export function compactCount(count: number | null | undefined): string {
+  if (count === null || count === undefined || !Number.isFinite(count) || count < 0) return "-";
+  const whole = Math.floor(count);
+  if (whole < 1000) return String(whole);
+  let unit = 0;
+  let scale = 1000;
+  while (whole >= scale * 1000 && unit < COUNT_UNITS.length - 1) {
+    scale *= 1000;
+    unit += 1;
+  }
+  // Integer tenths, so float error can never round 5.8k down to 5.7k.
+  const tenths = Math.floor(whole / (scale / 10));
+  const shown =
+    tenths < 1000
+      ? `${String(Math.floor(tenths / 10))}.${String(tenths % 10)}`
+      : String(Math.floor(tenths / 10));
+  return `${shown.replace(/\.0$/, "")}${COUNT_UNITS[unit] ?? ""}`;
+}
+
+/** The exact count for a tooltip: "34,567 stars". Undefined when unknown, so no title renders. */
+export function starsTitle(count: number | null | undefined): string | undefined {
+  if (count === null || count === undefined || !Number.isFinite(count) || count < 0) {
+    return undefined;
+  }
+  return `${Math.floor(count).toLocaleString("en-US")} ${count === 1 ? "star" : "stars"}`;
+}
+
+/**
+ * The change in stars since the previous (older) run: "+12", "-3". Empty when
+ * either count is unknown or nothing changed, so only movement is drawn.
+ */
+export function starsDelta(
+  current: number | null | undefined,
+  previous: number | null | undefined,
+): string {
+  if (current === null || current === undefined || previous === null || previous === undefined) {
+    return "";
+  }
+  const delta = current - previous;
+  if (delta === 0 || !Number.isFinite(delta)) return "";
+  return delta > 0 ? `+${String(delta)}` : String(delta);
+}

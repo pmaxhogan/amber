@@ -59,6 +59,11 @@ export interface RepoInfo {
   fork: ForkLookup;
   isPrivate: boolean | null;
   sizeBytes: number | null;
+  /**
+   * The forge's star count, only where the forge reports one we map (GitHub's
+   * `stargazers_count`); null means "not reported", never zero stars.
+   */
+  stars: number | null;
 }
 
 export type OwnerLookup =

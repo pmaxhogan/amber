@@ -78,6 +78,7 @@ server/src/
   sync/gitCli.ts          # hardened git spawn wrapper (askpass, allowlisted flags)
   sync/syncRepo.ts        # single-repo sync: modes, paranoid archival, LFS
   sync/gone.ts            # the rule for "this repository is gone upstream"
+  sync/stars.ts           # star count after a successful GitHub sync (shared lookup)
   sync/scheduler.ts       # queue, worker pool, stagger, backoff, breaker, startup catch-up
   sync/diskUsage.ts       # du of repo dirs (cached in DB per sync)
   providers/types.ts      # AccountSyncProvider interface (listRepos, listStarred?,
@@ -175,6 +176,10 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   `owner_user_id` FK users RESTRICT, `is_private` INTEGER 0/1 (default 1: unknown is
   private), `visibility_checked_at` INTEGER NULL (migration 010; see "Multi-user access
   control").
+  `stars` INTEGER NULL (>= 0), `stars_checked_at` INTEGER NULL (migration 011; see
+  "Star counts" under Sync engine). The forge's last reported star count and when it
+  was written. NULL means never reported, not zero; no backfill. A repo that later
+  goes gone or is removed keeps its last count.
   UNIQUE(forge_id, path). Re-importing an existing forge+path changes NOTHING (not the
   owner, not the account override, not the schedule): it answers "Already backed up" to
   a user who can view the repo and "Amber could not import this repository" to one who
@@ -183,7 +188,9 @@ Tables (columns abridged; all tables get `created_at`, `updated_at` ints, epoch 
   `outcome` ('success'|'error'|'canceled'), `error` TEXT NULL, `error_kind` TEXT NULL
   ('auth'|'not_found'|'rate_limited'|'network'|'timeout'|'disk'|'git'|'other'),
   `bytes_fetched` INTEGER NULL, `duration_ms`, `refs_changed` INTEGER NULL,
-  `paranoid_archived` INTEGER NULL. Retention (enforced after each run): keep newest
+  `paranoid_archived` INTEGER NULL, `stars` INTEGER NULL (>= 0; migration 011: the
+  star count read right after this run, set only for a successful GitHub sync whose
+  lookup answered, so the history shows it changing over time). Retention (enforced after each run): keep newest
   50 per repo; error rows additionally kept 30 days regardless of count.
 - `settings`: `scope_type` ('global'|'forge'|'account'|'repo'), `scope_id` INTEGER
   NULL (NULL for global), `key` TEXT, `value` TEXT (JSON). UNIQUE(scope_type,
@@ -501,6 +508,34 @@ directory names never collide regardless of sanitization overlaps.
   as `ownerGone` (null for a repository that is not gone, or that went gone
   again after the last answer), and the Removed page shows "account removed"
   for it, unless the forge named a DMCA takedown, which wins.
+- Star counts (`sync/stars.ts`, `recordStars`): after every SUCCESSFUL sync of
+  a repository on a forge of kind `github`, the sync looks it up once through
+  `providers/forks.ts` `lookupRepoInfo`, the very same single-repository GET
+  the visibility pass and the first-clone gate use, so the admin-only rule
+  for unrestricted forges, the egress guard, the per-credential cooldowns,
+  the shared anonymous budget (`processLookupLimits`) and the credential rule
+  all apply unchanged, with one addition: an ANONYMOUS star lookup is made
+  only while more than half of that forge's hourly anonymous allowance is
+  unspent (`STARS_ANONYMOUS_RESERVE`, 15 of 30, passed as
+  `anonymousReserve` to the same spend check), so stars can never take the
+  budget below 15 and the visibility pass and the first-clone gate keep the
+  full allowance; a token-backed lookup is unaffected. GitHub's `stargazers_count` (a non-negative integer,
+  anything else is "not reported") goes to that run's `sync_runs.stars` and
+  to `repos.stars` + `stars_checked_at`, both guarded on the path that was
+  fetched: the lookup is skipped when the repo no longer has that path, and
+  the writes match `AND path = ?`, so a rename landing mid-lookup cannot
+  receive the old path's count. The same response's visibility answer is
+  written by the existing writer, so the lookup doubles as a visibility
+  refresh. A lookup that answers nothing (rate limited, cooled down, budget
+  spent, forge error, a thrown credential error) leaves the run's count NULL
+  and the repo's last count alone: a known count is never overwritten with
+  NULL, and the sync's outcome, backoff and gone judgement are never touched.
+  It runs after `sync.finished` is published, never for a failed or
+  cancelled sync, and is capped at the provider's own request timeout (30 s)
+  so it cannot hold a worker slot past that; a count that was written
+  publishes `repo.updated`. Injectable as `repoInfo` on the sync deps (the
+  scheduler passes its own `repoInfo` seam through), so tests never reach a
+  forge. Other forges' providers report `stars: null`.
 - Every sync records a `sync_runs` row + updates repo denormalized fields +
   `disk_usage_bytes` (recursive du, after the fetch) and emits an SSE event.
 
@@ -727,7 +762,11 @@ Rules that make it safe:
     `ownerRemoved` - anyone else sending them is refused), returns rows + total.
     The list and its total are filtered IN SQL to what the caller can view.
     Every row also carries `mine`, `isPrivate` and, for the admin only, `owner`
-    (`{ id, email, removed }`). `sort` includes `fork_parent`, non-forks last. `q` is a case-insensitive substring of the path or
+    (`{ id, email, removed }`). `sort` includes `fork_parent`, non-forks last, and
+    `stars`, never-reported counts last in both directions (for anyone but the
+    admin, ordered by the count that viewer is SHOWN, so the order cannot leak a
+    hidden one). Every row carries `stars` and `starsCheckedAt` (null when never
+    reported), and every run in `GET /api/repos/:id/runs` carries `stars`. `q` is a case-insensitive substring of the path or
     display name; when it is a pasted repository URL (any scheme, scp syntax,
     a `user@` prefix, `.git`, a trailing slash, a query string, or a deeper
     page such as `/tree/main`) it also matches by forge host plus path, so
@@ -1153,7 +1192,9 @@ Rules that are not toggles:
   `lastError` (and each run's `error` in the run history) as a fixed marker
   ("The last sync failed. The details are visible to the repository's owner.")
   whenever there is one: those values were chosen or learned with the owner's
-  account.
+  account. On a PRIVATE repo (`is_private = 1`) they also read `stars`,
+  `starsCheckedAt` and each run's `stars` as null: that count was read with
+  the owner's token. A public repo's count is on the forge's own page.
 - FORCE ANONYMOUS. Turning `force_anonymous` ON takes a credential away, so
   `modify_others` may do it. Turning it OFF lets the repo resolve the owner's
   own default account, exactly like setting an override, so it is the owner's
@@ -1570,8 +1611,13 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   README and the CF Access app icon.
 - Pages: Repos (default; dense DataTable, lazy server-side mode, multi-select +
   bulk bar, a sortable "Fork of" column that opens the upstream's own drawer
-  when amber backs it up and its page on the forge when it does not, detail
-  drawer with runs/errors/settings/export/clone and a Browse tab: a ref picker
+  when amber backs it up and its page on the forge when it does not, a
+  sortable right-aligned "Stars" column (compact: 1.2k, 34.5k, 1.1M, rounded
+  down; the exact count in the tooltip; "-" when never reported), detail
+  drawer with runs/errors/settings/export/clone (the run history has a
+  "Stars" column with each run's count and, when the next older run on the
+  page also has one, the change since it: "+12", "-3"; nothing when unchanged
+  or unknown) and a Browse tab: a ref picker
   with branch and tag tabs plus a jump box that takes a branch, tag or sha,
   the file tree with the directory's README rendered under it, a file view
   with line numbers, markdown and common images rendered, history, and
@@ -1581,7 +1627,9 @@ Everything not deployment-fundamental is a DB setting managed in the UI, not env
   and what the forge answered, a GitHub DMCA takedown named as such with a link
   to the published notice, "account removed" when the owner is gone as well,
   the upstream each fork came from when that was learned before it went gone
-  (a gone repository answers 404 to the fork lookup too), the same detail drawer for exporting the backup, and the per-device notification
+  (a gone repository answers 404 to the fork lookup too), the last reported
+  star count in a "Stars" column that, like "Gone since", re-sorts the list
+  from its header, the same detail drawer for exporting the backup, and the per-device notification
   toggle plus a test button; the sidebar entry carries the gone count), Import
   (textarea -> preview table -> commit), Forges & Accounts (forges + accounts CRUD,
   default badges, write-only password fields; the add/edit account form shows

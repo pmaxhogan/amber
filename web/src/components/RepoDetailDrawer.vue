@@ -29,11 +29,14 @@ import {
 import type { ScopeOverrides } from "../lib/settingsResolve.ts";
 import {
   absoluteTime,
+  compactCount,
   forgeOrigin,
   formatDuration,
   humanBytes,
   relativeTime,
   safeFileName,
+  starsDelta,
+  starsTitle,
 } from "../lib/format.ts";
 import {
   downloadToDirectory,
@@ -258,6 +261,15 @@ const runsPerPage = ref(10);
 const runsLoading = ref(false);
 const runsError = ref<ApiClientError | null>(null);
 const expandedRuns = ref<Record<number, boolean>>({});
+
+/**
+ * The change since the next OLDER run on this page (runs are newest first).
+ * Only within the page: across a page boundary the older run is not loaded,
+ * and a run without a count breaks the chain rather than bridging it.
+ */
+function runStarsDelta(index: number): string {
+  return starsDelta(runs.value[index]?.stars, runs.value[index + 1]?.stars);
+}
 
 async function loadRuns(): Promise<void> {
   if (props.repo === null) return;
@@ -734,6 +746,23 @@ watch(activeTab, (tab) => {
               <Column header="Refs">
                 <template #body="{ data }">{{ data.refsChanged ?? "-" }}</template>
               </Column>
+              <Column header="Stars" header-class="run-num" body-class="run-num">
+                <template #body="{ data, index }">
+                  <span :title="starsTitle(data.stars)">{{ compactCount(data.stars) }}</span>
+                  <span
+                    v-if="runStarsDelta(index) !== ''"
+                    class="run-stars-delta"
+                    :class="
+                      runStarsDelta(index).startsWith('+')
+                        ? 'run-stars-delta--up'
+                        : 'run-stars-delta--down'
+                    "
+                    :title="`${runStarsDelta(index)} since the previous sync`"
+                  >
+                    {{ runStarsDelta(index) }}
+                  </span>
+                </template>
+              </Column>
               <template #expansion="{ data }">
                 <div class="run-detail">
                   <p>
@@ -971,6 +1000,29 @@ watch(activeTab, (tab) => {
 .explain-table td {
   padding: 0.35rem 0.5rem 0.35rem 0;
   border-bottom: 1px solid var(--p-content-border-color);
+}
+
+:deep(td.run-num) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+:deep(th.run-num .p-datatable-column-header-content) {
+  justify-content: flex-end;
+}
+
+.run-stars-delta {
+  margin-left: 0.35rem;
+  font-size: 0.78rem;
+}
+
+.run-stars-delta--up {
+  color: var(--amber-success);
+}
+
+.run-stars-delta--down {
+  color: var(--p-text-muted-color);
 }
 
 .run-detail {

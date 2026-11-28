@@ -136,6 +136,8 @@ export function makeRepo(overrides: Partial<RepoRow> = {}): RepoRow {
     goneAt: null,
     forkParent: null,
     ownerGone: null,
+    stars: null,
+    starsCheckedAt: null,
     lastError: null,
     diskUsageBytes: 1_048_576,
     defaultBranch: "main",
@@ -159,6 +161,7 @@ export function makeRun(overrides: Partial<SyncRun> = {}): SyncRun {
     durationMs: 4000,
     refsChanged: 3,
     paranoidArchived: 0,
+    stars: null,
     ...overrides,
   };
 }

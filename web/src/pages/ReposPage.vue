@@ -24,7 +24,9 @@ import { eventPayloadSchema } from "@amber/shared";
 import { deriveOutcome, type AccountSyncRow, type RepoRow } from "../api/types.ts";
 import {
   forgeOrigin,
+  compactCount,
   humanBytes,
+  starsTitle,
   pluralize,
   refusedReason,
   relativeTime,
@@ -796,6 +798,20 @@ onBeforeUnmount(() => {
         <template #body="{ data }">{{ humanBytes(data.diskUsageBytes) }}</template>
       </Column>
 
+      <Column
+        header="Stars"
+        sort-field="stars"
+        sortable
+        header-class="repos-num"
+        body-class="repos-num"
+      >
+        <template #body="{ data }">
+          <span :title="starsTitle(data.stars)">
+            {{ compactCount(data.stars) }}
+          </span>
+        </template>
+      </Column>
+
       <Column header="Added" sort-field="created_at" sortable>
         <template #body="{ data }">
           <span :title="absoluteTime(data.createdAt)">{{ relativeTime(data.createdAt) }}</span>
@@ -934,6 +950,16 @@ onBeforeUnmount(() => {
 
 .repo-status--syncing {
   color: var(--p-primary-color);
+}
+
+/* Counts line up on the right, header included, so the digits compare at a glance. */
+.repos-table :deep(td.repos-num) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.repos-table :deep(th.repos-num .p-datatable-column-header-content) {
+  justify-content: flex-end;
 }
 
 .repos-table :deep(tbody tr) {

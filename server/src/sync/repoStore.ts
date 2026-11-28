@@ -214,6 +214,7 @@ interface RunDbRow {
   duration_ms: number | null;
   refs_changed: number | null;
   paranoid_archived: number | null;
+  stars: number | null;
 }
 
 function toSyncRun(row: RunDbRow): SyncRun {
@@ -229,6 +230,7 @@ function toSyncRun(row: RunDbRow): SyncRun {
     durationMs: row.duration_ms,
     refsChanged: row.refs_changed,
     paranoidArchived: row.paranoid_archived,
+    stars: row.stars,
   };
 }
 

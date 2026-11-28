@@ -367,6 +367,7 @@ describe("provider contexts", () => {
           fork: { status: "unknown", rateLimited: false },
           isPrivate: null,
           sizeBytes: null,
+          stars: null,
         });
       },
     } as unknown as AccountSyncProvider;

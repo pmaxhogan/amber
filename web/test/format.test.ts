@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { deriveOutcome } from "../src/api/types.ts";
 import {
   absoluteTime,
+  compactCount,
   forgeOrigin,
   formatDuration,
   humanBytes,
@@ -9,6 +10,8 @@ import {
   refusedReason,
   relativeTime,
   safeFileName,
+  starsDelta,
+  starsTitle,
 } from "../src/lib/format.ts";
 
 describe("humanBytes", () => {
@@ -135,5 +138,62 @@ describe("refusedReason", () => {
 
   it("falls back to a generic sentence when the server gave none", () => {
     expect(refusedReason([])).toMatch(/repositories you own/);
+  });
+});
+
+describe("compactCount", () => {
+  it("renders a dash for an unknown or impossible count", () => {
+    expect(compactCount(null)).toBe("-");
+    expect(compactCount(undefined)).toBe("-");
+    expect(compactCount(-1)).toBe("-");
+    expect(compactCount(Number.NaN)).toBe("-");
+  });
+
+  it("keeps counts under a thousand exact", () => {
+    expect(compactCount(0)).toBe("0");
+    expect(compactCount(999)).toBe("999");
+  });
+
+  it("abbreviates with one decimal below a hundred units, none above", () => {
+    expect(compactCount(1000)).toBe("1k");
+    expect(compactCount(1234)).toBe("1.2k");
+    expect(compactCount(5800)).toBe("5.8k");
+    expect(compactCount(34_567)).toBe("34.5k");
+    expect(compactCount(123_456)).toBe("123k");
+    expect(compactCount(1_100_000)).toBe("1.1M");
+    expect(compactCount(2_500_000_000)).toBe("2.5B");
+  });
+
+  it("rounds down, so a count never reads as more than it is", () => {
+    expect(compactCount(1999)).toBe("1.9k");
+    expect(compactCount(999_999)).toBe("999k");
+    expect(compactCount(999_999_999)).toBe("999M");
+  });
+});
+
+describe("starsTitle", () => {
+  it("spells out the exact count", () => {
+    expect(starsTitle(34_567)).toBe("34,567 stars");
+    expect(starsTitle(1)).toBe("1 star");
+    expect(starsTitle(0)).toBe("0 stars");
+  });
+
+  it("is undefined when unknown, so no tooltip renders", () => {
+    expect(starsTitle(null)).toBeUndefined();
+    expect(starsTitle(undefined)).toBeUndefined();
+  });
+});
+
+describe("starsDelta", () => {
+  it("signs the change since the previous run", () => {
+    expect(starsDelta(112, 100)).toBe("+12");
+    expect(starsDelta(97, 100)).toBe("-3");
+  });
+
+  it("says nothing when unchanged or either side is unknown", () => {
+    expect(starsDelta(100, 100)).toBe("");
+    expect(starsDelta(null, 100)).toBe("");
+    expect(starsDelta(100, null)).toBe("");
+    expect(starsDelta(100, undefined)).toBe("");
   });
 });

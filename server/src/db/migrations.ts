@@ -642,6 +642,20 @@ BEGIN
 END;
 `;
 
+/**
+ * 011: star counts. The forge's star count for a repo, recorded after each
+ * successful sync of a GitHub repo from the same single-repository GET the
+ * visibility pass uses (sync/stars.ts). Kept on the repo row so the list can
+ * show and sort it, and copied onto that sync's run row so the history shows
+ * it changing over time. All NULL means "never reported": no backfill, and a
+ * repo that later goes gone keeps its last count.
+ */
+const stars = `
+ALTER TABLE repos ADD COLUMN stars INTEGER NULL CHECK (stars IS NULL OR stars >= 0);
+ALTER TABLE repos ADD COLUMN stars_checked_at INTEGER NULL;
+ALTER TABLE sync_runs ADD COLUMN stars INTEGER NULL CHECK (stars IS NULL OR stars >= 0);
+`;
+
 export const migrations: readonly Migration[] = [
   { name: "001_initial", sql: initial },
   { name: "002_starred_sync", sql: starredSync },
@@ -653,4 +667,5 @@ export const migrations: readonly Migration[] = [
   { name: "008_fork_parent", sql: forkParent },
   { name: "009_owner_gone", sql: ownerGone },
   { name: "010_users", sql: users },
+  { name: "011_stars", sql: stars },
 ];

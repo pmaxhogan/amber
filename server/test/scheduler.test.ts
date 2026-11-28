@@ -51,6 +51,7 @@ function makeRun(repoId: number, errorKind: SyncErrorKind | null = null): SyncRu
     durationMs: 0,
     refsChanged: null,
     paranoidArchived: null,
+    stars: null,
   };
 }
 
